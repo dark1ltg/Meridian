@@ -1,40 +1,72 @@
 # Meridian
 
-Local, offline Linux music player built with Qt 6 (PySide6). Your library is a **mood map**. The queue is a **context-aware Eisenhower matrix**, not a folder list.
+**Find music by feeling — not by folders.**
+
+Meridian is a local, offline Linux music player that places your library on a living **mood map**. Point a lens at the mood you want. Meridian fills an Eisenhower-style listen matrix and a context queue around that feeling, the time of day, and how you play.
+
+No accounts. No streaming. Your files stay on disk.
 
 ![Meridian overview](docs/screenshots/01-overview.png)
 
 <p align="center">
-  <img src="docs/screenshots/02-mood-map.png" alt="Mood map with lens" width="48%" />
+  <img src="docs/screenshots/02-mood-map.png" alt="Mood map with selection lens" width="48%" />
   &nbsp;
-  <img src="docs/screenshots/03-matrix-queue.png" alt="Eisenhower matrix and context queue" width="48%" />
+  <img src="docs/screenshots/03-matrix-queue.png" alt="Listen matrix and context queue" width="48%" />
 </p>
 
-## Ideas
+## Why Meridian
 
-**Mood map** — tracks sit on a 2D field: *shadow → glow* (valence) and *still → kinetic* (energy). Drag the dashed **lens** to say where you want to be. Scroll to resize it (smaller lens = tighter matrix/queue neighborhood). Drag a star to pin a track’s mood forever.
+Most players ask *what album next*. Meridian asks *where do you want to be*.
 
-**Eisenhower listen matrix**
+- **Shadow → Glow** — darker to brighter emotional color  
+- **Still → Kinetic** — calm to driving energy  
+- A **lens** you drag and resize chooses the neighborhood the queue pulls from  
+- Stars you move stay **pinned** so your sense of a track can override the analysis  
 
-| | Urgent (fits *now*) | Not urgent |
+Under the hood, Meridian reads tags, samples short waveforms (via `ffmpeg`), and uses **aubio** for tempo and onset cues so placements stay musical without a cloud model.
+
+## How listening works
+
+### Mood map
+Every track is a star on the map. Click a star to snap the lens. Scroll to tighten or widen the pull radius — a smaller lens means a stricter matrix and queue.
+
+### Eisenhower listen matrix
+
+| | Fits the lens *now* | Not urgent |
 |---|---|---|
 | **Important** | **NOW** — play this | **DEEP** — keep close |
 | **Not important** | **FILL** — background pulse | **SHELF** — park it |
 
-Importance comes from mood fit, loves, and play history. Urgency comes from the lens, time of day, session skips, and tracks you pulled in by hand.
+Importance comes from mood fit, loves, and play history. Urgency comes from the lens, clock band, skips, and tracks you pull in by hand.
 
-**Context-aware queue** — rebuilt from the lens, clock band (Dawn / Day / Dusk / Night), and mode:
+### Context queue
+The queue replenishes from the lens, clock, and matrix when it runs dry. Modes shape the gravity:
 
-- **Focus** — tighter mid-energy
-- **Wander** — follow the map
-- **Charge** — kinetic bias
-- **Dim** — night gravity
+| Mode | Intent |
+|---|---|
+| **Focus** | Steady mid-energy, fewer surprises |
+| **Wander** | Follow the map |
+| **Charge** | High kinetic bias |
+| **Dim** | Low light, low pulse — night gravity |
 
-Everything stays on disk. No accounts, no streaming.
+Clock bands (**Dawn / Day / Dusk / Night**) nudge the target without overriding the lens you set.
 
-## Run from source
+## Get Meridian
 
-Needs system PySide6 (Qt 6) plus a venv for mutagen/numpy/aubio:
+### AppImage (recommended)
+
+Download the latest build from [Releases](https://github.com/dark1ltg/Meridian/releases):
+
+```bash
+chmod +x Meridian-x86_64.AppImage
+./Meridian-x86_64.AppImage
+```
+
+Install **`ffmpeg`** on the host for mood analysis. Playback uses Qt Multimedia.
+
+### Run from source
+
+Needs system PySide6 (Qt 6) plus a venv for analysis libraries:
 
 ```bash
 /usr/bin/python3 -m venv --system-site-packages .venv
@@ -42,11 +74,11 @@ Needs system PySide6 (Qt 6) plus a venv for mutagen/numpy/aubio:
 bash scripts/run.sh
 ```
 
-`aubio` needs the native library available (e.g. Arch/CachyOS: `sudo pacman -S aubio`). Mood analysis still works without it, but tempo/onset features are skipped.
+`aubio` needs the native library (e.g. Arch/CachyOS: `sudo pacman -S aubio`). Without it, Meridian still runs; tempo/onset features are skipped.
 
-Add folders with **Add library folder**. `~/Music` is scanned on first launch if it exists.
+Add folders with **Add library folder**. `~/Music` is scanned on first launch if it exists. **Rescan** force-refreshes tags and re-analyzes every track in your library folders.
 
-## AppImage
+### Build the AppImage yourself
 
 ```bash
 bash packaging/build-appimage.sh
@@ -54,21 +86,20 @@ bash packaging/build-appimage.sh
 
 Output: `dist/Meridian-$(uname -m).AppImage`
 
-Needs `ffmpeg` on PATH for mood analysis (waveform energy / brightness). Playback uses Qt Multimedia. AppImage builds also bundle **aubio** for tempo/onset when the venv has it installed.
-
 ## Shortcuts
 
-- Space — play / pause
-- Ctrl+Left / Ctrl+Right — previous / next
-- Double-click a star, matrix row, or queue row to play
-- Heart on the transport to mark a track important
+| Key | Action |
+|---|---|
+| Space | Play / pause |
+| Ctrl+Left / Ctrl+Right | Previous / next |
+| Double-click star, matrix row, or queue row | Play |
+| Heart (transport) | Mark a track important |
 
 ## License
 
-Meridian is free software licensed under the **GNU General Public License v3.0**.
+Meridian is free software under the **GNU General Public License v3.0**.  
 See [LICENSE](LICENSE) / [COPYING](COPYING).
 
-Redistributed components are listed in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).
-Ubuntu fonts ship under the Ubuntu Font Licence 1.0 in `resources/fonts/`.
-AppImage builds install these texts under `usr/share/doc/meridian/` together with
-[SOURCE_OFFER.txt](SOURCE_OFFER.txt) (GPLv3 corresponding-source offer).
+Third-party components are listed in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).  
+Ubuntu fonts ship under the Ubuntu Font Licence 1.0 in `resources/fonts/`.  
+AppImage builds include these texts under `usr/share/doc/meridian/` with [SOURCE_OFFER.txt](SOURCE_OFFER.txt).
