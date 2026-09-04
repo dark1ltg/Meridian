@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Meridian
+Comment=Mood map player with a context-aware Eisenhower queue
+Exec=Meridian
+Icon=meridian
+Categories=AudioVideo;Audio;Player;
+Terminal=false
+StartupNotify=true

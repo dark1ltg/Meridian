@@ -1,0 +1,69 @@
+Meridian — third-party notices
+================================
+
+Meridian itself is licensed under the GNU General Public License version 3.
+See LICENSE (also COPYING) in this documentation directory.
+
+This file identifies other software and Font Software redistributed with
+Meridian AppImage builds, and where their full licence texts are stored.
+
+----------------------------------------------------------------------------
+mutagen
+----------------------------------------------------------------------------
+Purpose:  Audio metadata / tag reading
+License:  GPL-2.0-or-later
+Texts:    third-party/mutagen/
+
+----------------------------------------------------------------------------
+PySide6 / Qt for Python / shiboken6
+----------------------------------------------------------------------------
+Purpose:  UI and multimedia (Qt 6)
+License:  LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+          (Qt for Python dual licensing; Meridian chooses GPL-3.0 for the
+          combined AppImage work)
+Texts:    third-party/pyside6/ and third-party/shiboken6/ when present in
+          the installed packages; otherwise third-party/qt-for-python-NOTICE.txt
+
+----------------------------------------------------------------------------
+numpy
+----------------------------------------------------------------------------
+Purpose:  Numeric analysis for mood features
+License:  BSD-3-Clause (and other permissive notices in the numpy tree)
+Texts:    third-party/numpy/
+
+----------------------------------------------------------------------------
+aubio
+----------------------------------------------------------------------------
+Purpose:  Fast tempo / onset features for mood-map energy (kinetic axis)
+License:  GPL-3.0-or-later (see upstream COPYING)
+Texts:    third-party/aubio/
+
+----------------------------------------------------------------------------
+PyInstaller (bootloader)
+----------------------------------------------------------------------------
+Purpose:  Application packaging bootloader shipped inside the AppImage
+License:  GPL-2.0-or-later WITH Bootloader-exception
+          (exception permits use of the bootloader with programs under other
+          licences; Meridian remains GPL-3.0)
+Texts:    third-party/pyinstaller/
+
+----------------------------------------------------------------------------
+Ubuntu Sans / Ubuntu Condensed (Font Software)
+----------------------------------------------------------------------------
+Purpose:  Application UI fonts
+License:  Ubuntu Font Licence 1.0
+Texts:    ../fonts/truetype/meridian/  (standalone font files + UFL)
+          and ubuntu-font-licence/ in this documentation tree
+
+----------------------------------------------------------------------------
+ffmpeg (not bundled)
+----------------------------------------------------------------------------
+Meridian invokes a host `ffmpeg` binary on PATH for optional mood analysis.
+ffmpeg is not redistributed inside the AppImage; install it separately under
+whatever licence applies to your system package or build.
+
+----------------------------------------------------------------------------
+appimagetool (build-only)
+----------------------------------------------------------------------------
+Used only to assemble the AppImage; not shipped inside Meridian. Upstream
+licence is MIT.
