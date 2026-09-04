@@ -2,6 +2,14 @@
 
 Local, offline Linux music player built with Qt 6 (PySide6). Your library is a **mood map**. The queue is a **context-aware Eisenhower matrix**, not a folder list.
 
+![Meridian overview](docs/screenshots/01-overview.png)
+
+<p align="center">
+  <img src="docs/screenshots/02-mood-map.png" alt="Mood map with lens" width="48%" />
+  &nbsp;
+  <img src="docs/screenshots/03-matrix-queue.png" alt="Eisenhower matrix and context queue" width="48%" />
+</p>
+
 ## Ideas
 
 **Mood map** — tracks sit on a 2D field: *shadow → glow* (valence) and *still → kinetic* (energy). Drag the dashed **lens** to say where you want to be. Scroll to resize it (smaller lens = tighter matrix/queue neighborhood). Drag a star to pin a track’s mood forever.
