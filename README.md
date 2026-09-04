@@ -1,10 +1,8 @@
 # Meridian
 
-**Find music by feeling — not by folders.**
+**Your library is a night sky. Navigate by feel.**
 
-Meridian is a local, offline Linux music player that places your library on a living **mood map**. Point a lens at the mood you want. Meridian fills an Eisenhower-style listen matrix and a context queue around that feeling, the time of day, and how you play.
-
-No accounts. No streaming. Your files stay on disk.
+Meridian is a local, offline Linux music player that charts every track as a star on a mood map — shadow to glow, still to kinetic. Aim the lens where you want to be. Discover what was already on your disk, by atmosphere instead of folders. No accounts. No streaming.
 
 ![Meridian overview](docs/screenshots/01-overview.png)
 
