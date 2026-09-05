@@ -19,15 +19,21 @@ Most players ask *what album next*. Meridian asks *where do you want to be*.
 - **Shadow → Glow** — darker to brighter emotional color  
 - **Still → Kinetic** — calm to driving energy  
 - A **lens** you drag and resize (scroll) chooses the neighborhood the queue pulls from  
-- **Pinch** or **Ctrl+scroll** zooms the map; drag empty space to pan; double-click empty to reset  
+- **Pinch** to dive from the full night sky into a local cluster; **Ctrl+scroll** zooms; drag empty space to pan; double-click empty to return to the sky  
+- Large libraries stay fluid — the sky is baked into a single starfield texture and composited with OpenGL when available  
 - Stars you move stay **pinned** so your sense of a track can override the analysis  
+- Playback always **crossfades** (~3s) between tracks — queue advances, skips, matrix pulls, and double-clicks  
 
 Under the hood, Meridian reads tags, samples short waveforms (via `ffmpeg`), and uses **aubio** for tempo and onset cues so placements stay musical without a cloud model.
 
 ## How listening works
 
 ### Mood map
-Every track is a star on the map. Click a star to snap the lens. Scroll to tighten or widen the lens (queue neighborhood). Pinch or Ctrl+scroll to zoom into the sky; drag empty space to pan; double-click empty space to show the full map again.
+Every track is a star on the map. Click a star to snap the lens. Scroll to tighten or widen the lens (queue neighborhood).
+
+**Pinch** (or Ctrl+scroll) zooms from the full sky into a neighborhood — chrome fades, nearby tracks pick up glow and names, and zoom bias pulls toward clusters under your fingers. Drag empty space to pan. Double-click empty space to show the full map again.
+
+Thousands of tracks stay smooth because the overview is one cached starfield; interactive stars appear only once you are zoomed in on a region.
 
 ### Eisenhower listen matrix
 
@@ -39,7 +45,7 @@ Every track is a star on the map. Click a star to snap the lens. Scroll to tight
 Importance comes from mood fit, loves, and play history. Urgency comes from the lens, clock band, skips, and tracks you pull in by hand.
 
 ### Context queue
-The queue replenishes from the lens, clock, and matrix when it runs dry. Modes shape the gravity:
+The queue replenishes from the lens, clock, and matrix when it runs dry. Hit **Play** (or Space) with nothing loaded and Meridian starts the context queue from the top. Modes shape the gravity:
 
 | Mode | Intent |
 |---|---|
@@ -49,6 +55,9 @@ The queue replenishes from the lens, clock, and matrix when it runs dry. Modes s
 | **Dim** | Low light, low pulse — night gravity |
 
 Clock bands (**Dawn / Day / Dusk / Night**) nudge the target without overriding the lens you set.
+
+### Crossfade
+Natural advances, skips, and manual jumps always crossfade (~3s) between tracks — no toggle. Softens cuts while the queue and lens still decide *what* comes next.
 
 ## Get Meridian
 
@@ -61,7 +70,7 @@ chmod +x Meridian-x86_64.AppImage
 ./Meridian-x86_64.AppImage
 ```
 
-Install **`ffmpeg`** on the host for mood analysis. Playback uses Qt Multimedia.
+Install **`ffmpeg`** on the host for mood analysis. Playback uses Qt Multimedia. The mood map prefers desktop OpenGL (NVIDIA / AMD / Intel) and falls back to software if needed.
 
 ### Run from source
 
@@ -89,12 +98,13 @@ Output: `dist/Meridian-$(uname -m).AppImage`
 
 | Key | Action |
 |---|---|
-| Space | Play / pause |
+| Space / Play | Play / pause — or start the context queue if nothing is loaded |
 | Ctrl+Left / Ctrl+Right | Previous / next |
 | Double-click star, matrix row, or queue row | Play |
+| Pinch / Ctrl+scroll on map | Zoom night sky ↔ cluster |
+| Scroll on map | Resize lens |
+| Double-click empty map | Reset to full sky |
 | Heart (transport) | Mark a track important |
-
-Natural advances, skips, and manual jumps always **crossfade** (~3s) between tracks — no toggle.
 
 ## License
 
