@@ -14,6 +14,11 @@ PLAYLIST_HEX = {
 
 PLAYLIST_QCOLOR = {q: QColor(h) for q, h in PLAYLIST_HEX.items()}
 
+# Low-trust placements: cool pewter — contrasts neon amber/cyan/magenta/lime; dims only.
+LOW_TRUST_HEX = "#8B9BB8"
+LOW_TRUST_QCOLOR = QColor(LOW_TRUST_HEX)
+LOW_TRUST_ALPHA = 150  # baked field / live fill opacity (0–255)
+
 STAR_RADIUS = {
     Quadrant.NOW: 6.8,
     Quadrant.DEEP: 6.4,

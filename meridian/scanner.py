@@ -63,7 +63,17 @@ class ScanWorker(QObject):
                         continue
                     self.progress.emit(name)
                     tags = read_tags(path)
-                    valence, energy = genre_seed(tags["genre"], tags["title"], tags["artist"])
+                    seed = genre_seed(
+                        tags["genre"],
+                        tags["title"],
+                        tags["artist"],
+                        path=path,
+                        year=tags.get("year"),
+                        extra_text=tags.get("extra_text") or "",
+                        albumartist=tags.get("albumartist") or "",
+                        composer=tags.get("composer") or "",
+                        replaygain_db=tags.get("replaygain_db"),
+                    )
                     self.library.upsert_track(
                         {
                             "path": path,
@@ -74,8 +84,10 @@ class ScanWorker(QObject):
                             "duration_ms": tags["duration_ms"],
                             "year": tags["year"],
                             "bpm": tags["bpm"],
-                            "valence": valence,
-                            "energy": energy,
+                            "valence": seed.valence,
+                            "energy": seed.energy,
+                            # Provisional until analyze; no genre yet ⇒ low trust.
+                            "low_trust": int(not seed.clamp_match),
                             "added_at": now,
                             "mtime": st.st_mtime,
                             "analyzed": 0,
@@ -108,10 +120,28 @@ class AnalyzeWorker(QObject):
             if not track:
                 continue
             self.progress.emit(track.short_title, index, total)
-            valence, energy, bpm = analyze_audio(
-                track.path, track.genre, track.title, track.artist, track.bpm
+            tags = read_tags(track.path)
+            result = analyze_audio(
+                track.path,
+                track.genre or tags.get("genre") or "",
+                track.title,
+                track.artist,
+                track.bpm if track.bpm is not None else tags.get("bpm"),
+                year=track.year if track.year is not None else tags.get("year"),
+                extra_text=tags.get("extra_text") or "",
+                albumartist=tags.get("albumartist") or "",
+                composer=tags.get("composer") or "",
+                replaygain_db=tags.get("replaygain_db"),
             )
-            self.library.set_analyzed_mood(track.id, valence, energy, bpm)
+            self.library.set_analyzed_mood(
+                track.id,
+                result.valence,
+                result.energy,
+                result.bpm,
+                low_trust=result.low_trust,
+            )
+        self.library.smooth_album_moods()
+        self.library.smooth_artist_moods()
         self.finished.emit()
 
 

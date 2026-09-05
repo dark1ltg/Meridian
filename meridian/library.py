@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     bpm REAL,
     valence REAL NOT NULL DEFAULT 0.5,
     energy REAL NOT NULL DEFAULT 0.5,
+    low_trust INTEGER NOT NULL DEFAULT 0,
     pinned INTEGER NOT NULL DEFAULT 0,
     loved INTEGER NOT NULL DEFAULT 0,
     play_count INTEGER NOT NULL DEFAULT 0,
@@ -56,6 +57,7 @@ class Track:
     bpm: float | None
     valence: float
     energy: float
+    low_trust: bool
     pinned: bool
     loved: bool
     play_count: int
@@ -90,6 +92,16 @@ class Library:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.lock = threading.Lock()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        with self.lock:
+            cols = {str(r[1]) for r in self.conn.execute("PRAGMA table_info(tracks)")}
+            if "low_trust" not in cols:
+                self.conn.execute(
+                    "ALTER TABLE tracks ADD COLUMN low_trust INTEGER NOT NULL DEFAULT 0"
+                )
+                self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -138,13 +150,65 @@ class Library:
 
     def set_mood(self, track_id: int, valence: float, energy: float, pinned: bool = True) -> None:
         with self.lock:
+            # User pin ⇒ trusted placement; clear low-trust dimming.
             self.conn.execute(
-                "UPDATE tracks SET valence = ?, energy = ?, pinned = ? WHERE id = ?",
+                "UPDATE tracks SET valence = ?, energy = ?, pinned = ?, low_trust = 0 WHERE id = ?",
                 (valence, energy, int(pinned), track_id),
             )
             self.conn.commit()
 
-    def set_analyzed_mood(self, track_id: int, valence: float, energy: float, bpm: float | None) -> None:
+    def nudge_mood_from_listen(
+        self,
+        track_id: int,
+        *,
+        lens_x: float,
+        lens_y: float,
+        skipped: bool,
+        amount: float = 0.014,
+        max_step: float = 0.025,
+    ) -> bool:
+        """Offline personalization: tiny unpinned drift from skip vs finish under the lens."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT valence, energy, pinned FROM tracks WHERE id = ?",
+                (track_id,),
+            ).fetchone()
+            if not row or int(row["pinned"]):
+                return False
+            v = float(row["valence"])
+            e = float(row["energy"])
+            dx = float(lens_x) - v
+            dy = float(lens_y) - e
+            if skipped:
+                dx = -dx
+                dy = -dy
+            step = float(amount)
+            dv = max(-max_step, min(max_step, step * dx))
+            de = max(-max_step, min(max_step, step * dy))
+            if abs(dv) < 1e-6 and abs(de) < 1e-6:
+                # If already on the lens, push skips slightly toward higher energy variance.
+                if skipped:
+                    de = max_step * 0.35
+                else:
+                    return False
+            nv = max(0.03, min(0.97, v + dv))
+            ne = max(0.03, min(0.97, e + de))
+            self.conn.execute(
+                "UPDATE tracks SET valence = ?, energy = ? WHERE id = ? AND pinned = 0",
+                (nv, ne, track_id),
+            )
+            self.conn.commit()
+            return True
+
+    def set_analyzed_mood(
+        self,
+        track_id: int,
+        valence: float,
+        energy: float,
+        bpm: float | None,
+        *,
+        low_trust: bool = False,
+    ) -> None:
         with self.lock:
             self.conn.execute(
                 """
@@ -152,12 +216,90 @@ class Library:
                 SET valence = CASE WHEN pinned = 1 THEN valence ELSE ? END,
                     energy = CASE WHEN pinned = 1 THEN energy ELSE ? END,
                     bpm = ?,
+                    low_trust = ?,
                     analyzed = 1
                 WHERE id = ?
                 """,
-                (valence, energy, bpm, track_id),
+                (valence, energy, bpm, int(low_trust), track_id),
             )
             self.conn.commit()
+
+    def smooth_album_moods(self, max_shift: float = 0.08, blend: float = 0.30) -> int:
+        """Gently pull unpinned tracks toward their album median mood (no ffmpeg)."""
+        return self._smooth_group_moods(
+            group_sql="""
+                SELECT id, artist, album, valence, energy, pinned
+                FROM tracks
+                WHERE album IS NOT NULL AND TRIM(album) != ''
+                  AND artist IS NOT NULL AND TRIM(artist) != ''
+                """,
+            key_fn=lambda row: (str(row["artist"]).lower(), str(row["album"]).lower()),
+            min_group=4,
+            max_shift=max_shift,
+            blend=blend,
+        )
+
+    def smooth_artist_moods(self, max_shift: float = 0.06, blend: float = 0.22) -> int:
+        """Gently pull unpinned tracks toward their artist median mood (no ffmpeg)."""
+        return self._smooth_group_moods(
+            group_sql="""
+                SELECT id, artist, valence, energy, pinned
+                FROM tracks
+                WHERE artist IS NOT NULL AND TRIM(artist) != ''
+                """,
+            key_fn=lambda row: str(row["artist"]).lower(),
+            min_group=6,
+            max_shift=max_shift,
+            blend=blend,
+        )
+
+    def _smooth_group_moods(
+        self,
+        *,
+        group_sql: str,
+        key_fn,
+        min_group: int,
+        max_shift: float,
+        blend: float,
+    ) -> int:
+        from statistics import median
+
+        with self.lock:
+            rows = self.conn.execute(group_sql).fetchall()
+
+        groups: dict = {}
+        for row in rows:
+            groups.setdefault(key_fn(row), []).append(row)
+
+        updates: list[tuple[float, float, int]] = []
+        for items in groups.values():
+            if len(items) < min_group:
+                continue
+            med_v = float(median(float(i["valence"]) for i in items))
+            med_e = float(median(float(i["energy"]) for i in items))
+            for item in items:
+                if int(item["pinned"]):
+                    continue
+                v0 = float(item["valence"])
+                e0 = float(item["energy"])
+                v = (1.0 - blend) * v0 + blend * med_v
+                e = (1.0 - blend) * e0 + blend * med_e
+                v = v0 + max(-max_shift, min(max_shift, v - v0))
+                e = e0 + max(-max_shift, min(max_shift, e - e0))
+                v = max(0.03, min(0.97, v))
+                e = max(0.03, min(0.97, e))
+                if abs(v - v0) > 1e-9 or abs(e - e0) > 1e-9:
+                    updates.append((v, e, int(item["id"])))
+
+        if not updates:
+            return 0
+        with self.lock:
+            self.conn.executemany(
+                "UPDATE tracks SET valence = ?, energy = ? WHERE id = ? AND pinned = 0",
+                updates,
+            )
+            self.conn.commit()
+        return len(updates)
 
     def toggle_loved(self, track_id: int) -> bool:
         with self.lock:
@@ -268,6 +410,7 @@ class Library:
             bpm=row["bpm"],
             valence=float(row["valence"]),
             energy=float(row["energy"]),
+            low_trust=bool(row["low_trust"]) if "low_trust" in row.keys() else False,
             pinned=bool(row["pinned"]),
             loved=bool(row["loved"]),
             play_count=int(row["play_count"]),

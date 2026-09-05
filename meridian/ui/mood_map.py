@@ -30,7 +30,13 @@ from PySide6.QtWidgets import (
 from meridian.context import LENS_RADIUS_DEFAULT, LENS_RADIUS_MAX, LENS_RADIUS_MIN
 from meridian.queue_engine import Quadrant, RankedTrack
 from meridian.ui.fonts import sans
-from meridian.ui.palette import PLAYLIST_QCOLOR, STAR_RADIUS, STAR_Z
+from meridian.ui.palette import (
+    LOW_TRUST_ALPHA,
+    LOW_TRUST_QCOLOR,
+    PLAYLIST_QCOLOR,
+    STAR_RADIUS,
+    STAR_Z,
+)
 
 # View magnification on top of fit-to-widget (1 = whole night sky).
 VIEW_ZOOM_MIN = 1.0
@@ -88,8 +94,19 @@ class TrackStar(QGraphicsEllipseItem):
         if ranked.track.loved:
             r += 0.8
         self.setRect(-r, -r, r * 2, r * 2)
-        color = QColor(PLAYLIST_QCOLOR[ranked.quadrant])
+        low = (
+            bool(ranked.track.low_trust)
+            and not ranked.track.pinned
+            and not ranked.track.loved
+            and not current
+        )
+        if low:
+            color = QColor(LOW_TRUST_QCOLOR)
+            color.setAlpha(LOW_TRUST_ALPHA)
+        else:
+            color = QColor(PLAYLIST_QCOLOR[ranked.quadrant])
         self.setBrush(QBrush(color))
+        self.setOpacity(0.55 if low else 1.0)
         if current:
             pen = QPen(QColor("#ffffff"), 2.0)
             pen.setCosmetic(True)
@@ -100,17 +117,25 @@ class TrackStar(QGraphicsEllipseItem):
             pen.setCosmetic(True)
             self.setPen(pen)
             self.setZValue(STAR_Z[ranked.quadrant] + 1)
+        elif low:
+            pen = QPen(QColor(20, 28, 42, 200), 1.0)
+            pen.setCosmetic(True)
+            self.setPen(pen)
+            self.setZValue(max(1, STAR_Z[ranked.quadrant] - 2))
         else:
             pen = QPen(QColor(8, 12, 22, 180), 1.0)
             pen.setCosmetic(True)
             self.setPen(pen)
             self.setZValue(STAR_Z[ranked.quadrant])
-        self.setToolTip(f"{ranked.track.label}\n{ranked.quadrant.value.upper()}")
+        tip = f"{ranked.track.label}\n{ranked.quadrant.value.upper()}"
+        if low:
+            tip += "\nlow confidence — placement is a weak guess"
+        self.setToolTip(tip)
 
         glow_r = r * 3.4
         self._glow.setRect(-glow_r, -glow_r, glow_r * 2, glow_r * 2)
         glow_c = QColor(color)
-        glow_c.setAlpha(90)
+        glow_c.setAlpha(40 if low else 90)
         self._glow.setBrush(QBrush(glow_c))
 
         title = ranked.track.label
@@ -121,7 +146,10 @@ class TrackStar(QGraphicsEllipseItem):
         self._label.setText(title)
         br = self._label.boundingRect()
         self._label.setPos(-br.width() / 2, r + 4)
-        self._label.setBrush(QBrush(QColor("#ffffff" if current else "#dce3f4")))
+        if low:
+            self._label.setBrush(QBrush(QColor("#9AA8C0")))
+        else:
+            self._label.setBrush(QBrush(QColor("#ffffff" if current else "#dce3f4")))
 
     def set_lod(self, glow_a: float, label_on: bool) -> None:
         show_glow = glow_a > 0.02
@@ -386,17 +414,26 @@ class MoodMap(QGraphicsView):
         # Draw dimmer stars first so bright quadrants read on top.
         order = sorted(
             self._ranked.values(),
-            key=lambda r: STAR_Z[r.quadrant] + (2 if r.track.loved else 0),
+            key=lambda r: (
+                0 if (r.track.low_trust and not r.track.pinned and not r.track.loved) else 1,
+                STAR_Z[r.quadrant] + (2 if r.track.loved else 0),
+            ),
         )
         for item in order:
             pos = self._positions[item.track.id]
             r = STAR_RADIUS[item.quadrant] * (0.55 if len(self._ranked) > 2500 else 0.85)
             if item.track.loved:
                 r += 0.5
-            color = QColor(PLAYLIST_QCOLOR[item.quadrant])
+            low = bool(item.track.low_trust) and not item.track.pinned and not item.track.loved
             if item.track.id == self._current_id:
                 color = QColor("#ffffff")
                 r += 0.6
+            elif low:
+                color = QColor(LOW_TRUST_QCOLOR)
+                color.setAlpha(LOW_TRUST_ALPHA)
+                r *= 0.85
+            else:
+                color = QColor(PLAYLIST_QCOLOR[item.quadrant])
             painter.setBrush(QBrush(color))
             painter.drawEllipse(pos, r, r)
         painter.end()

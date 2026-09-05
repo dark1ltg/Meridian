@@ -294,6 +294,8 @@ class MainWindow(QMainWindow):
             reasons.append(f"clock band: {ctx.band_label}")
             reasons.append(f"mode: {self.mode.value.title()}")
             reasons.append(f"mood: valence {track.valence:.2f}, energy {track.energy:.2f}")
+            if track.low_trust and not track.pinned:
+                reasons.append("low confidence placement (dimmed on map)")
             if reasons:
                 lines.append("Why: " + " · ".join(reasons))
         else:
@@ -337,6 +339,22 @@ class MainWindow(QMainWindow):
     def start_rescan(self) -> None:
         """Force re-read tags and re-analyze every track under library folders."""
         if self._scan_thread and self._scan_thread.isRunning():
+            return
+        n = len(self.library.all_tracks())
+        reply = QMessageBox.warning(
+            self,
+            "Rescan whole library?",
+            (
+                "Rescan re-reads tags and re-analyzes mood for every track in your "
+                f"library folders ({n} track{'s' if n != 1 else ''}).\n\n"
+                "This can take a while on large libraries. Pinned stars keep their "
+                "positions; everything else may move on the map.\n\n"
+                "Continue?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
             return
         if self._analyze_worker:
             self._analyze_worker.abort()
@@ -463,9 +481,11 @@ class MainWindow(QMainWindow):
 
     def play_next(self) -> None:
         skipped = bool(self.player.current and self.player.backend.position() < 8000)
-        if skipped and self.player.current:
-            self.library.record_skip(self.player.current.id)
-            self.skips_window.append(time())
+        if self.player.current:
+            if skipped:
+                self.library.record_skip(self.player.current.id)
+                self.skips_window.append(time())
+            self._listen_nudge(self.player.current.id, skipped=skipped)
         self._advance_queue(skipped=skipped)
 
     def play_prev(self) -> None:
@@ -478,7 +498,18 @@ class MainWindow(QMainWindow):
 
     def _completed(self) -> None:
         # Natural end (or pre-end crossfade arm). Skips use play_next → same play_id path.
+        if self.player.current:
+            self._listen_nudge(self.player.current.id, skipped=False)
         self._advance_queue(skipped=False)
+
+    def _listen_nudge(self, track_id: int, *, skipped: bool) -> None:
+        """Local-only: gently move unpinned stars from skip/finish under the lens."""
+        lx, ly, _ = self.map.lens_mood()
+        moved = self.library.nudge_mood_from_listen(
+            track_id, lens_x=lx, lens_y=ly, skipped=skipped
+        )
+        if moved:
+            self.refresh_plan(keep_current=True, rebuild_queue=False)
 
     def _advance_queue(self, skipped: bool = False) -> None:
         current_id = self.player.current.id if self.player.current else None

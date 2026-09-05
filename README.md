@@ -1,7 +1,7 @@
 # Meridian
 
 [![Release](https://img.shields.io/github/v/release/dark1ltg/Meridian?label=release&color=e8b86d)](https://github.com/dark1ltg/Meridian/releases/latest)
-**Current release: [1.1](https://github.com/dark1ltg/Meridian/releases/tag/v1.1.0)** (`v1.1.0`)
+**Current release: [1.2](https://github.com/dark1ltg/Meridian/releases/tag/v1.2.0)** (`v1.2.0`)
 
 **Your library is a night sky. Navigate by feel.**
 
@@ -25,6 +25,7 @@ Most players ask *what album next*. Meridian asks *where do you want to be*.
 - **Pinch** to dive from the full night sky into a local cluster; **Ctrl+scroll** zooms; drag empty space to pan; double-click empty to return to the sky  
 - Large libraries stay fluid — the sky is baked into a single starfield texture and composited with OpenGL when available  
 - Stars you move stay **pinned** so your sense of a track can override the analysis  
+- **Search** by title, artist, or album — pick a hit to snap the lens there and play  
 - Playback always **crossfades** (~3s) between tracks — queue advances, skips, matrix pulls, and double-clicks  
 
 Under the hood, Meridian reads tags, samples short waveforms (via `ffmpeg`), and uses **aubio** for tempo and onset cues so placements stay musical without a cloud model.
@@ -59,6 +60,9 @@ The queue replenishes from the lens, clock, and matrix when it runs dry. Hit **P
 
 Clock bands (**Dawn / Day / Dusk / Night**) nudge the target without overriding the lens you set.
 
+### Search
+Need a known track without hunting the sky? Use the header search (or **Ctrl+F**). Type part of a title, artist, or album — results appear as you type. Choosing one **snaps the lens** to that track’s mood and starts playback, so the map and queue stay oriented around what you just found.
+
 ### Crossfade
 Natural advances, skips, and manual jumps always crossfade (~3s) between tracks — no toggle. Softens cuts while the queue and lens still decide *what* comes next.
 
@@ -66,7 +70,7 @@ Natural advances, skips, and manual jumps always crossfade (~3s) between tracks 
 
 ### AppImage (recommended)
 
-**Latest:** [Meridian 1.1](https://github.com/dark1ltg/Meridian/releases/tag/v1.1.0) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
+**Latest:** [Meridian 1.2](https://github.com/dark1ltg/Meridian/releases/tag/v1.2.0) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
 
 ```bash
 chmod +x Meridian-x86_64.AppImage
@@ -102,6 +106,7 @@ Output: `dist/Meridian-$(uname -m).AppImage`
 | Key | Action |
 |---|---|
 | Space / Play | Play / pause — or start the context queue if nothing is loaded |
+| Ctrl+F | Focus search (title, artist, album) |
 | Ctrl+Left / Ctrl+Right | Previous / next |
 | Double-click star, matrix row, or queue row | Play |
 | Pinch / Ctrl+scroll on map | Zoom night sky ↔ cluster |
