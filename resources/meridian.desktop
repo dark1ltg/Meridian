@@ -7,3 +7,5 @@ Icon=meridian
 Categories=AudioVideo;Audio;Player;
 Terminal=false
 StartupNotify=true
+Version=1.1
+X-AppImage-Version=1.1.0

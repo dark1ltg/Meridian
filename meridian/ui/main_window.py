@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from meridian import __version__
 from meridian.context import (
     LENS_RADIUS_DEFAULT,
     MODE_HINTS,
@@ -45,7 +46,7 @@ from meridian.ui.transport import TransportBar
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Meridian")
+        self.setWindowTitle(f"Meridian {__version__}")
         self.resize(1440, 900)
         self.settings = QSettings()
         self.library = Library()

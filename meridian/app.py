@@ -7,7 +7,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from meridian import APP_NAME, ORG_NAME
+from meridian import APP_NAME, ORG_NAME, __version__
 from meridian.ui.fonts import register_bundled_fonts, sans
 from meridian.ui.main_window import MainWindow
 
@@ -263,8 +263,9 @@ def run() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(__version__)
     app.setOrganizationName(ORG_NAME)
-    app.setApplicationDisplayName("Meridian")
+    app.setApplicationDisplayName(f"Meridian {__version__}")
     icon = resource_path("resources", "meridian.png")
     if icon.exists():
         app.setWindowIcon(QIcon(str(icon)))

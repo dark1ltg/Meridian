@@ -1,5 +1,8 @@
 # Meridian
 
+[![Release](https://img.shields.io/github/v/release/dark1ltg/Meridian?label=release&color=e8b86d)](https://github.com/dark1ltg/Meridian/releases/latest)
+**Current release: [1.1](https://github.com/dark1ltg/Meridian/releases/tag/v1.1.0)** (`v1.1.0`)
+
 **Your library is a night sky. Navigate by feel.**
 
 Meridian is a local, offline Linux music player that charts every track as a star on a mood map — shadow to glow, still to kinetic. Aim the lens where you want to be. Discover what was already on your disk, by atmosphere instead of folders. No accounts. No streaming.
@@ -63,7 +66,7 @@ Natural advances, skips, and manual jumps always crossfade (~3s) between tracks 
 
 ### AppImage (recommended)
 
-Download the latest build from [Releases](https://github.com/dark1ltg/Meridian/releases):
+**Latest:** [Meridian 1.1](https://github.com/dark1ltg/Meridian/releases/tag/v1.1.0) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
 
 ```bash
 chmod +x Meridian-x86_64.AppImage
