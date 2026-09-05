@@ -121,7 +121,9 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left_l = QVBoxLayout(left)
         left_l.setContentsMargins(0, 0, 0, 0)
-        map_label = QLabel("MOOD MAP  ·  click a star to snap the lens  ·  drag the lens  ·  scroll to resize")
+        map_label = QLabel(
+            "MOOD MAP  ·  scroll = lens  ·  pinch / Ctrl+scroll = dive into a cluster  ·  drag empty = pan  ·  double-click empty = night sky"
+        )
         map_label.setObjectName("section")
         self.map = MoodMap()
         left_l.addWidget(map_label)
@@ -165,7 +167,7 @@ class MainWindow(QMainWindow):
 
         play_act = QAction("Play/Pause", self)
         play_act.setShortcut(QKeySequence(Qt.Key.Key_Space))
-        play_act.triggered.connect(self.player.toggle)
+        play_act.triggered.connect(self.toggle_play)
         self.addAction(play_act)
         next_act = QAction("Next", self)
         next_act.setShortcut(QKeySequence("Ctrl+Right"))
@@ -189,7 +191,7 @@ class MainWindow(QMainWindow):
         self.matrix.track_activated.connect(self._pull_and_play)
         self.queue_list.itemDoubleClicked.connect(self._queue_activated)
         self.search.track_chosen.connect(self._search_picked)
-        self.transport.play_toggled.connect(self.player.toggle)
+        self.transport.play_toggled.connect(self.toggle_play)
         self.transport.previous.connect(self.play_prev)
         self.transport.next.connect(self.play_next)
         self.transport.seeked.connect(self.player.seek)
@@ -199,6 +201,7 @@ class MainWindow(QMainWindow):
         self.player.duration_changed.connect(self._dur)
         self.player.state_changed.connect(self.transport.set_playing)
         self.player.track_finished.connect(self._completed)
+        self.player.track_nearly_finished.connect(self._completed)
         self.player.error_occurred.connect(lambda m: self.status_label.setText(m))
 
     def _restore_lens(self) -> None:
@@ -420,6 +423,23 @@ class MainWindow(QMainWindow):
             self.explicit = self.explicit[:12]
         self.play_id(track_id)
 
+    def toggle_play(self) -> None:
+        """Pause/resume current track, or start the context queue if nothing is loaded."""
+        if self.player.is_playing():
+            self.player.toggle()
+            return
+        if self.player.current is not None:
+            # Paused (or stopped mid-track) — resume.
+            self.player.toggle()
+            return
+        if not self.session_queue:
+            self._replenish_queue()
+        if not self.session_queue:
+            self.status_label.setText("Context queue is empty — move the lens or replenish.")
+            return
+        self.queue_index = max(0, min(self.queue_index, len(self.session_queue) - 1))
+        self.play_id(self.session_queue[self.queue_index])
+
     @Slot(int)
     def play_id(self, track_id: int) -> None:
         track = self.library.get(track_id)
@@ -456,6 +476,7 @@ class MainWindow(QMainWindow):
         self.play_id(self.session_queue[self.queue_index])
 
     def _completed(self) -> None:
+        # Natural end (or pre-end crossfade arm). Skips use play_next → same play_id path.
         self._advance_queue(skipped=False)
 
     def _advance_queue(self, skipped: bool = False) -> None:

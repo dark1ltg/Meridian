@@ -18,7 +18,8 @@ Most players ask *what album next*. Meridian asks *where do you want to be*.
 
 - **Shadow → Glow** — darker to brighter emotional color  
 - **Still → Kinetic** — calm to driving energy  
-- A **lens** you drag and resize chooses the neighborhood the queue pulls from  
+- A **lens** you drag and resize (scroll) chooses the neighborhood the queue pulls from  
+- **Pinch** or **Ctrl+scroll** zooms the map; drag empty space to pan; double-click empty to reset  
 - Stars you move stay **pinned** so your sense of a track can override the analysis  
 
 Under the hood, Meridian reads tags, samples short waveforms (via `ffmpeg`), and uses **aubio** for tempo and onset cues so placements stay musical without a cloud model.
@@ -26,7 +27,7 @@ Under the hood, Meridian reads tags, samples short waveforms (via `ffmpeg`), and
 ## How listening works
 
 ### Mood map
-Every track is a star on the map. Click a star to snap the lens. Scroll to tighten or widen the pull radius — a smaller lens means a stricter matrix and queue.
+Every track is a star on the map. Click a star to snap the lens. Scroll to tighten or widen the lens (queue neighborhood). Pinch or Ctrl+scroll to zoom into the sky; drag empty space to pan; double-click empty space to show the full map again.
 
 ### Eisenhower listen matrix
 
@@ -92,6 +93,8 @@ Output: `dist/Meridian-$(uname -m).AppImage`
 | Ctrl+Left / Ctrl+Right | Previous / next |
 | Double-click star, matrix row, or queue row | Play |
 | Heart (transport) | Mark a track important |
+
+Natural advances, skips, and manual jumps always **crossfade** (~3s) between tracks — no toggle.
 
 ## License
 

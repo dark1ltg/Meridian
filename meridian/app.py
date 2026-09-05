@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from meridian import APP_NAME, ORG_NAME
@@ -245,6 +246,21 @@ def resource_path(*parts: str) -> Path:
 
 
 def run() -> int:
+    # Prefer desktop OpenGL before QApplication so the mood map can use a GPU viewport.
+    try:
+        from PySide6.QtGui import QSurfaceFormat
+
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
+        fmt = QSurfaceFormat()
+        fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+        fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
+        fmt.setSwapInterval(1)
+        fmt.setSamples(4)
+        fmt.setDepthBufferSize(24)
+        QSurfaceFormat.setDefaultFormat(fmt)
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
