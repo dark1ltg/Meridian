@@ -1,7 +1,7 @@
 # Meridian
 
 [![Release](https://img.shields.io/github/v/release/dark1ltg/Meridian?label=release&color=e8b86d)](https://github.com/dark1ltg/Meridian/releases/latest)
-**Current release: [1.3.3](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.3)** (`v1.3.3`)
+**Current release: [1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4)** (`v1.3.4`)
 
 **Your library is a night sky. Navigate by feel.**
 
@@ -70,7 +70,7 @@ Natural advances, skips, and manual jumps always crossfade (~3s) between tracks 
 
 ### AppImage (recommended)
 
-**Latest:** [Meridian 1.3.3](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.3) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
+**Latest:** [Meridian 1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
 
 ```bash
 chmod +x Meridian-x86_64.AppImage
