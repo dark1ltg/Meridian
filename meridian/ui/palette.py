@@ -14,10 +14,16 @@ PLAYLIST_HEX = {
 
 PLAYLIST_QCOLOR = {q: QColor(h) for q, h in PLAYLIST_HEX.items()}
 
-# Low-trust placements: cool pewter — contrasts neon amber/cyan/magenta/lime; dims only.
+# Graduated confidence on the map (dims only — does not move stars).
+# High (>= 0.75): full playlist color
+# Mid  (0.45–0.75): same hue, softer
+# Low  (< 0.45): cool pewter — contrasts neon amber/cyan/magenta/lime
 LOW_TRUST_HEX = "#8B9BB8"
 LOW_TRUST_QCOLOR = QColor(LOW_TRUST_HEX)
-LOW_TRUST_ALPHA = 150  # baked field / live fill opacity (0–255)
+LOW_TRUST_ALPHA = 150  # baked field fill (0–255)
+MID_CONFIDENCE_ALPHA = 200
+MID_CONFIDENCE_OPACITY = 0.78
+LOW_CONFIDENCE_OPACITY = 0.55
 
 STAR_RADIUS = {
     Quadrant.NOW: 6.8,

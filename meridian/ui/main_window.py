@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from meridian import __version__
+from meridian.features import CONFIDENCE_HIGH, CONFIDENCE_LOW
 from meridian.context import (
     LENS_RADIUS_DEFAULT,
     MODE_HINTS,
@@ -294,8 +295,18 @@ class MainWindow(QMainWindow):
             reasons.append(f"clock band: {ctx.band_label}")
             reasons.append(f"mode: {self.mode.value.title()}")
             reasons.append(f"mood: valence {track.valence:.2f}, energy {track.energy:.2f}")
-            if track.low_trust and not track.pinned:
-                reasons.append("low confidence placement (dimmed on map)")
+            conf = float(getattr(track, "mood_confidence", 0.5) or 0.5)
+            if track.pinned:
+                reasons.append("confidence 1.00 (pinned)")
+            else:
+                reasons.append(f"confidence {conf:.2f}")
+                note = (getattr(track, "confidence_note", "") or "").strip()
+                if note:
+                    reasons.append(note)
+                if conf < CONFIDENCE_LOW:
+                    reasons.append("weak placement evidence (dimmed)")
+                elif conf < CONFIDENCE_HIGH:
+                    reasons.append("partial placement evidence")
             if reasons:
                 lines.append("Why: " + " · ".join(reasons))
         else:

@@ -30,9 +30,13 @@ from PySide6.QtWidgets import (
 from meridian.context import LENS_RADIUS_DEFAULT, LENS_RADIUS_MAX, LENS_RADIUS_MIN
 from meridian.queue_engine import Quadrant, RankedTrack
 from meridian.ui.fonts import sans
+from meridian.features import CONFIDENCE_HIGH, CONFIDENCE_LOW
 from meridian.ui.palette import (
+    LOW_CONFIDENCE_OPACITY,
     LOW_TRUST_ALPHA,
     LOW_TRUST_QCOLOR,
+    MID_CONFIDENCE_ALPHA,
+    MID_CONFIDENCE_OPACITY,
     PLAYLIST_QCOLOR,
     STAR_RADIUS,
     STAR_Z,
@@ -94,19 +98,28 @@ class TrackStar(QGraphicsEllipseItem):
         if ranked.track.loved:
             r += 0.8
         self.setRect(-r, -r, r * 2, r * 2)
-        low = (
-            bool(ranked.track.low_trust)
-            and not ranked.track.pinned
-            and not ranked.track.loved
-            and not current
-        )
-        if low:
+        conf = float(getattr(ranked.track, "mood_confidence", 0.5) or 0.5)
+        if ranked.track.pinned or current:
+            band = "high"
+        elif conf >= CONFIDENCE_HIGH:
+            band = "high"
+        elif conf >= CONFIDENCE_LOW:
+            band = "mid"
+        else:
+            band = "low"
+
+        if band == "low":
             color = QColor(LOW_TRUST_QCOLOR)
             color.setAlpha(LOW_TRUST_ALPHA)
+            self.setOpacity(LOW_CONFIDENCE_OPACITY)
+        elif band == "mid":
+            color = QColor(PLAYLIST_QCOLOR[ranked.quadrant])
+            color.setAlpha(MID_CONFIDENCE_ALPHA)
+            self.setOpacity(MID_CONFIDENCE_OPACITY)
         else:
             color = QColor(PLAYLIST_QCOLOR[ranked.quadrant])
+            self.setOpacity(1.0)
         self.setBrush(QBrush(color))
-        self.setOpacity(0.55 if low else 1.0)
         if current:
             pen = QPen(QColor("#ffffff"), 2.0)
             pen.setCosmetic(True)
@@ -117,7 +130,7 @@ class TrackStar(QGraphicsEllipseItem):
             pen.setCosmetic(True)
             self.setPen(pen)
             self.setZValue(STAR_Z[ranked.quadrant] + 1)
-        elif low:
+        elif band == "low":
             pen = QPen(QColor(20, 28, 42, 200), 1.0)
             pen.setCosmetic(True)
             self.setPen(pen)
@@ -128,14 +141,20 @@ class TrackStar(QGraphicsEllipseItem):
             self.setPen(pen)
             self.setZValue(STAR_Z[ranked.quadrant])
         tip = f"{ranked.track.label}\n{ranked.quadrant.value.upper()}"
-        if low:
-            tip += "\nlow confidence — placement is a weak guess"
+        tip += f"\nconfidence {conf:.2f}"
+        if band == "low":
+            tip += " — weak guess"
+        elif band == "mid":
+            tip += " — partial evidence"
+        note = (getattr(ranked.track, "confidence_note", "") or "").strip()
+        if note:
+            tip += f"\n{note}"
         self.setToolTip(tip)
 
         glow_r = r * 3.4
         self._glow.setRect(-glow_r, -glow_r, glow_r * 2, glow_r * 2)
         glow_c = QColor(color)
-        glow_c.setAlpha(40 if low else 90)
+        glow_c.setAlpha(40 if band == "low" else (65 if band == "mid" else 90))
         self._glow.setBrush(QBrush(glow_c))
 
         title = ranked.track.label
@@ -146,8 +165,10 @@ class TrackStar(QGraphicsEllipseItem):
         self._label.setText(title)
         br = self._label.boundingRect()
         self._label.setPos(-br.width() / 2, r + 4)
-        if low:
+        if band == "low":
             self._label.setBrush(QBrush(QColor("#9AA8C0")))
+        elif band == "mid":
+            self._label.setBrush(QBrush(QColor("#c5cde0")))
         else:
             self._label.setBrush(QBrush(QColor("#ffffff" if current else "#dce3f4")))
 
@@ -411,11 +432,21 @@ class MoodMap(QGraphicsView):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.scale(FIELD_SCALE, FIELD_SCALE)
         painter.setPen(Qt.PenStyle.NoPen)
-        # Draw dimmer stars first so bright quadrants read on top.
+        # Draw lower-confidence stars first so bright / high-trust read on top.
+        def _conf_band(r: RankedTrack) -> int:
+            if r.track.pinned:
+                return 2
+            c = float(getattr(r.track, "mood_confidence", 0.5) or 0.5)
+            if c >= CONFIDENCE_HIGH:
+                return 2
+            if c >= CONFIDENCE_LOW:
+                return 1
+            return 0
+
         order = sorted(
             self._ranked.values(),
             key=lambda r: (
-                0 if (r.track.low_trust and not r.track.pinned and not r.track.loved) else 1,
+                _conf_band(r),
                 STAR_Z[r.quadrant] + (2 if r.track.loved else 0),
             ),
         )
@@ -424,14 +455,18 @@ class MoodMap(QGraphicsView):
             r = STAR_RADIUS[item.quadrant] * (0.55 if len(self._ranked) > 2500 else 0.85)
             if item.track.loved:
                 r += 0.5
-            low = bool(item.track.low_trust) and not item.track.pinned and not item.track.loved
+            band = _conf_band(item)
             if item.track.id == self._current_id:
                 color = QColor("#ffffff")
                 r += 0.6
-            elif low:
+            elif band == 0:
                 color = QColor(LOW_TRUST_QCOLOR)
                 color.setAlpha(LOW_TRUST_ALPHA)
                 r *= 0.85
+            elif band == 1:
+                color = QColor(PLAYLIST_QCOLOR[item.quadrant])
+                color.setAlpha(MID_CONFIDENCE_ALPHA)
+                r *= 0.92
             else:
                 color = QColor(PLAYLIST_QCOLOR[item.quadrant])
             painter.setBrush(QBrush(color))

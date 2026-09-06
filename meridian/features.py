@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import subprocess
@@ -39,17 +40,24 @@ GENRE_MOOD: dict[str, tuple[float, float]] = {
     # Aliases → same coordinates as a nearby canonical genre (longest match wins).
     "alt rock": (0.50, 0.64),
     "alternative rock": (0.50, 0.64),
+    "alt-rock": (0.50, 0.64),
     "alternative": (0.52, 0.56),
     "indie rock": (0.52, 0.58),
+    "indie-rock": (0.52, 0.58),
     "indie pop": (0.62, 0.52),
+    "indie-pop": (0.62, 0.52),
     "post-rock": (0.44, 0.42),
     "post rock": (0.44, 0.42),
+    "postrock": (0.44, 0.42),
     "emo": (0.38, 0.58),
     "shoegaze": (0.40, 0.48),
     "grunge": (0.34, 0.70),
     "hard rock": (0.42, 0.80),
+    "hard-rock": (0.42, 0.80),
     "progressive rock": (0.48, 0.62),
     "prog": (0.48, 0.62),
+    "prog-rock": (0.48, 0.62),
+    "prog rock": (0.48, 0.62),
     "death metal": (0.22, 0.92),
     "black metal": (0.20, 0.90),
     "heavy metal": (0.30, 0.88),
@@ -135,19 +143,24 @@ WORD_ENERGY = {
     "war": 0.18,
     "club": 0.22,
     "banger": 0.26,
-    "live": 0.12,
+    # "live" omitted — too many calm live albums got a false kinetic bump.
     "acoustic": -0.14,
     "lofi": -0.18,
     "lo-fi": -0.18,
 }
 
 PCM_MAX_SHIFT = 0.12
+# Tiny residual when genre+BPM are already strong — spreads neighbors without leaving the cluster.
+SOFT_PCM_MAX_SHIFT = 0.06
 KEYWORD_SHIFT_CAP = 0.18
 REPLAYGAIN_ENERGY_CAP = 0.06
 DEFAULT_VALENCE = 0.5
 DEFAULT_ENERGY = 0.48
 # Dump / raw formats often have empty or junk tags — favor PCM more.
 WEAK_TAG_EXTS = {".wav", ".aiff", ".aif"}
+# Graduated confidence bands (UI + low_trust compat).
+CONFIDENCE_LOW = 0.45
+CONFIDENCE_HIGH = 0.75
 
 # Test hook: increments whenever ffmpeg decode is attempted.
 _decode_pcm_calls = 0
@@ -159,6 +172,7 @@ class MoodSeed:
     energy: float
     tag_key: str | None = None
     path_key: str | None = None
+    keyword_hit: bool = False
 
     @property
     def clamp_match(self) -> bool:
@@ -171,7 +185,9 @@ class MoodResult:
     valence: float
     energy: float
     bpm: float | None
+    confidence: float
     low_trust: bool
+    confidence_note: str = ""
 
 def _text(tag) -> str:
     if tag is None:
@@ -190,68 +206,72 @@ def _text_join(tag) -> str:
     return str(tag)
 
 
-def _parse_gain_db(raw: str) -> float | None:
+def _parse_gain_db(raw: str, *, r128: bool = False) -> float | None:
     """Parse ReplayGain / R128 style strings into dB (negative = louder master)."""
     if not raw:
         return None
     text = str(raw).strip()
-    # Opus R128_* is often Q7.8 integer (divide by 256) when no unit.
+    # Opus/R128 gain is Q7.8 integer (divide by 256). Never treat bare ints as ReplayGain dB.
     if re.fullmatch(r"[+-]?\d+", text):
         try:
             q = int(text)
         except ValueError:
             return None
-        if abs(q) > 64:
+        if r128:
             return float(q) / 256.0
-        return float(q)
+        return None
     match = re.search(r"([+-]?\d+(?:\.\d+)?)\s*dB?", text, flags=re.IGNORECASE)
     if not match:
         return None
     try:
-        return float(match.group(1))
+        val = float(match.group(1))
     except ValueError:
         return None
+    # Explicit R128 with a unit still sometimes stored as Q7.8-sized ints.
+    if r128 and abs(val) > 64 and "db" not in text.lower():
+        return val / 256.0
+    return val
 
 
 def _read_replaygain_db(audio) -> float | None:
     """Prefer track gain; fall back to album / R128. Free loudness prior when present."""
-    easy_keys = (
-        "replaygain_track_gain",
-        "replaygain_album_gain",
-        "r128_track_gain",
-        "r128_album_gain",
-    )
-    for key in easy_keys:
-        val = _text(audio.get(key))
-        parsed = _parse_gain_db(val)
+    easy_rg = ("replaygain_track_gain", "replaygain_album_gain")
+    easy_r128 = ("r128_track_gain", "r128_album_gain")
+    for key in easy_rg:
+        parsed = _parse_gain_db(_text(audio.get(key)), r128=False)
+        if parsed is not None:
+            return parsed
+    for key in easy_r128:
+        parsed = _parse_gain_db(_text(audio.get(key)), r128=True)
         if parsed is not None:
             return parsed
     try:
         raw = getattr(audio, "tags", None)
         if raw is None:
             return None
-        # FLAC / Vorbis comment style keys on non-easy tags.
-        for key in (
-            "REPLAYGAIN_TRACK_GAIN",
-            "REPLAYGAIN_ALBUM_GAIN",
-            "R128_TRACK_GAIN",
-            "R128_ALBUM_GAIN",
-        ):
+        for key in ("REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_ALBUM_GAIN"):
             if key in raw:
-                parsed = _parse_gain_db(_text_join(raw.get(key)))
+                parsed = _parse_gain_db(_text_join(raw.get(key)), r128=False)
+                if parsed is not None:
+                    return parsed
+        for key in ("R128_TRACK_GAIN", "R128_ALBUM_GAIN"):
+            if key in raw:
+                parsed = _parse_gain_db(_text_join(raw.get(key)), r128=True)
                 if parsed is not None:
                     return parsed
         # ID3 TXXX frames
         for frame in raw.getall("TXXX") if hasattr(raw, "getall") else []:
             desc = str(getattr(frame, "desc", "") or "").lower()
-            if "replaygain_track_gain" in desc or desc == "r128_track_gain":
-                parsed = _parse_gain_db(_text_join(frame.text if hasattr(frame, "text") else frame))
+            text = _text_join(frame.text if hasattr(frame, "text") else frame)
+            if "replaygain_track_gain" in desc or "replaygain_album_gain" in desc:
+                parsed = _parse_gain_db(text, r128=False)
                 if parsed is not None:
                     return parsed
         for frame in raw.getall("TXXX") if hasattr(raw, "getall") else []:
             desc = str(getattr(frame, "desc", "") or "").lower()
-            if "replaygain_album_gain" in desc or desc == "r128_album_gain":
-                parsed = _parse_gain_db(_text_join(frame.text if hasattr(frame, "text") else frame))
+            text = _text_join(frame.text if hasattr(frame, "text") else frame)
+            if desc in {"r128_track_gain", "r128_album_gain"} or "r128_track_gain" in desc or "r128_album_gain" in desc:
+                parsed = _parse_gain_db(text, r128=True)
                 if parsed is not None:
                     return parsed
     except Exception:
@@ -399,14 +419,19 @@ def _keyword_shift(text: str, skip_words: set[str] | None = None) -> tuple[float
 
 
 def _match_genre_keys(haystack: str) -> list[str]:
-    """All matching GENRE_MOOD keys, longest first (most specific)."""
+    """All matching GENRE_MOOD keys, longest first (most specific).
+
+    Keys must match as whole tokens (word boundaries) so short aliases like
+    ost/prog/game/house do not fire inside host/program/gameplay/warehouse.
+    """
     g = (haystack or "").lower()
     if not g.strip():
         return []
-    tokens = [t.strip() for t in re.split(r"[,;/|]+", g) if t.strip()]
     hits: list[str] = []
     for key in GENRE_MOOD:
-        if key in g or any(key in token for token in tokens):
+        # (?<![a-z0-9])…(?![a-z0-9]) ≈ word boundary for genre tokens incl. &/-.
+        pattern = rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])"
+        if re.search(pattern, g, flags=re.IGNORECASE):
             hits.append(key)
     hits.sort(key=len, reverse=True)
     # Drop shorter keys fully contained in a longer hit ("rock" under "indie rock").
@@ -434,22 +459,37 @@ def _blend_genre_pairs(keys: list[str]) -> tuple[float, float] | None:
     return (0.70 * v0 + 0.30 * v1, 0.70 * e0 + 0.30 * e1)
 
 
-def _path_genre_keys(path: str | None) -> list[str]:
-    if not path:
-        return []
+def _best_genre_keys_from_parts(parts: list[str]) -> list[str]:
     best: list[str] = []
     best_len = -1
-    for part in Path(path).parts:
-        part_l = part.lower().strip()
+    for part in parts:
+        part_l = (part or "").lower().strip()
         if not part_l or part_l in {".", "/"}:
             continue
         stem = Path(part_l).stem if "." in part_l else part_l
-        for candidate in (part_l, stem):
+        stem = stem.replace("_", " ")
+        for candidate in (part_l.replace("_", " "), stem):
             keys = _match_genre_keys(candidate)
             if keys and len(keys[0]) > best_len:
                 best = keys
                 best_len = len(keys[0])
     return best
+
+
+def _path_genre_keys(path: str | None) -> list[str]:
+    """Genre from path — prefer folder taxonomy over the filename stem (#2 / #6)."""
+    if not path:
+        return []
+    p = Path(path)
+    parts = list(p.parts)
+    if not parts:
+        return []
+    dir_parts = parts[:-1]
+    file_stem = p.stem.replace("_", " ").replace(".", " ")
+    dir_keys = _best_genre_keys_from_parts(dir_parts)
+    if dir_keys:
+        return dir_keys
+    return _match_genre_keys(file_stem)
 
 
 def _path_genre_key(path: str | None) -> str | None:
@@ -500,13 +540,18 @@ def genre_seed(
 
     skip_words = set(tag_keys) | set(path_keys)
     credit = _credit_text(albumartist, composer)
-    blob = f"{title} {artist} {credit} {genre} {extra_text} {_filename_mood_text(path)}"
+    # Filename is already folded into extra_text by read_tags — only add if missing.
+    fn = _filename_mood_text(path)
+    blob = f"{title} {artist} {credit} {genre} {extra_text}"
+    if fn and fn.lower() not in blob.lower():
+        blob = f"{blob} {fn}"
     dv, de = _keyword_shift(blob, skip_words=skip_words)
     return MoodSeed(
         valence=float(np.clip(valence + dv, 0.03, 0.97)),
         energy=float(np.clip(energy + de, 0.03, 0.97)),
         tag_key=tag_key,
         path_key=path_key,
+        keyword_hit=bool(abs(dv) > 1e-9 or abs(de) > 1e-9),
     )
 
 def genre_match(genre: str) -> str | None:
@@ -514,9 +559,13 @@ def genre_match(genre: str) -> str | None:
 
 
 def _stable_jitter(path: str) -> tuple[float, float]:
-    """Tiny stable scatter so unknown tracks do not stack on one point."""
-    h_v = hash(path)
-    h_e = hash(path + ":e")
+    """Tiny stable scatter so unknown tracks do not stack on one point.
+
+    Uses blake2b (not Python hash) so positions stay fixed across rescans/processes.
+    """
+    digest = hashlib.blake2b(path.encode("utf-8", errors="replace"), digest_size=8).digest()
+    h_v = int.from_bytes(digest[:4], "little")
+    h_e = int.from_bytes(digest[4:], "little")
     valence = DEFAULT_VALENCE + ((h_v % 1000) / 1000.0 - 0.5) * 0.06
     energy = DEFAULT_ENERGY + ((h_e % 1000) / 1000.0 - 0.5) * 0.06
     return (
@@ -525,7 +574,7 @@ def _stable_jitter(path: str) -> tuple[float, float]:
     )
 
 
-def _decode_pcm(path: str) -> np.ndarray | None:
+def _decode_pcm(path: str, *, start_s: float = 12.0) -> np.ndarray | None:
     global _decode_pcm_calls
     _decode_pcm_calls += 1
     ffmpeg = shutil.which("ffmpeg")
@@ -536,7 +585,7 @@ def _decode_pcm(path: str) -> np.ndarray | None:
         "-v",
         "error",
         "-ss",
-        "12",
+        f"{float(start_s):.3f}",
         "-t",
         "28",
         "-i",
@@ -559,6 +608,126 @@ def _decode_pcm(path: str) -> np.ndarray | None:
     if pcm.size < 2048:
         return None
     return pcm
+
+
+def _pcm_signal_ok(pcm: np.ndarray) -> bool:
+    """True when the buffer still has usable energy after silence trim."""
+    trimmed = _trim_silence(np.ascontiguousarray(pcm, dtype=np.float32))
+    if trimmed.size < 4096:
+        return False
+    rms = float(np.sqrt(np.mean(np.square(trimmed))) + 1e-12)
+    return rms > 1e-4
+
+
+def _decode_pcm_with_fallback(path: str, duration_ms: int = 0) -> tuple[np.ndarray | None, bool]:
+    """Decode at +12s; if near-silent, retry mid-track (or earlier for short files).
+
+    Returns (pcm_or_None, used_fallback). used_fallback True when the primary
+    +12s window failed signal checks and a later seek was used.
+    """
+    starts = [12.0]
+    dur_s = max(0.0, float(duration_ms) / 1000.0) if duration_ms else 0.0
+    if dur_s > 0:
+        if dur_s < 40.0:
+            starts.append(max(1.0, dur_s * 0.15))
+        else:
+            starts.append(float(np.clip(dur_s * 0.35, 20.0, max(20.0, dur_s - 30.0))))
+    else:
+        starts.append(45.0)
+
+    seen: set[float] = set()
+    for index, ss in enumerate(starts):
+        key = round(float(ss), 2)
+        if key in seen:
+            continue
+        seen.add(key)
+        pcm = _decode_pcm(path, start_s=float(ss))
+        if pcm is not None and _pcm_signal_ok(pcm):
+            return pcm, index > 0
+    return None, False
+
+
+def _genre_pair_conflict(tag_key: str | None, path_key: str | None) -> bool:
+    """True when tag and path genre seeds disagree strongly on the map."""
+    if not tag_key or not path_key or tag_key == path_key:
+        return False
+    tv, te = GENRE_MOOD[tag_key]
+    pv, pe = GENRE_MOOD[path_key]
+    return float(np.hypot(tv - pv, te - pe)) > 0.35
+
+
+def mood_confidence(
+    *,
+    tag_key: str | None = None,
+    path_key: str | None = None,
+    pcm_ok: bool = False,
+    pcm_fallback: bool = False,
+    pcm_unstable: bool = False,
+    bpm_ok: bool = False,
+    bpm_conflict: bool = False,
+    replaygain: bool = False,
+    keyword_hit: bool = False,
+    weak_tags: bool = False,
+    jitter: bool = False,
+) -> tuple[float, str]:
+    """Graduated placement confidence in 0..1 plus a short evidence note for tooltips."""
+    score = 0.0
+    reasons: list[str] = []
+    if tag_key:
+        # Seed-only genre is weaker than genre confirmed by PCM.
+        score += 0.40 if pcm_ok else 0.30
+        reasons.append(f"tag:{tag_key}")
+    if path_key:
+        if tag_key:
+            if _genre_pair_conflict(tag_key, path_key):
+                score -= 0.10
+                reasons.append("path conflict")
+            else:
+                score += 0.08
+                reasons.append("path agrees")
+        else:
+            score += 0.12 if pcm_ok else 0.15
+            reasons.append(f"path:{path_key}")
+    if pcm_ok:
+        if pcm_fallback or pcm_unstable:
+            score += 0.12
+            reasons.append("PCM weak" if pcm_unstable else "PCM fallback")
+        elif tag_key or path_key:
+            score += 0.30
+            reasons.append("PCM")
+        else:
+            # PCM-only placements are real mid-tier evidence, not "full trust".
+            score += 0.50
+            reasons.append("PCM only")
+    if bpm_conflict:
+        # Tag vs detected tempo disagree — flag only, no BPM credit (C3).
+        score -= 0.04
+        reasons.append("BPM conflict")
+    elif bpm_ok:
+        score += 0.08
+        reasons.append("BPM")
+    if replaygain:
+        score += 0.04
+        reasons.append("ReplayGain")
+    if keyword_hit:
+        score += 0.03
+        reasons.append("keywords")
+    if weak_tags:
+        score -= 0.08
+        reasons.append("weak-tag format")
+    if jitter or (not pcm_ok and not tag_key and not path_key):
+        score = min(score, 0.20)
+        if jitter:
+            reasons.append("jitter")
+        elif not reasons:
+            reasons.append("no evidence")
+    score = float(np.clip(score, 0.0, 1.0))
+    return score, " · ".join(reasons)
+
+
+def confidence_low_trust(confidence: float) -> bool:
+    """Compat flag: dimmest band / smooth target."""
+    return float(confidence) < CONFIDENCE_LOW
 
 
 def _aubio_rhythm(pcm: np.ndarray, samplerate: int = 11025) -> tuple[float | None, float]:
@@ -646,8 +815,14 @@ def _spectral_slice(
     return bright, bass, flatness
 
 
-def _pcm_mood_cues(pcm: np.ndarray, samplerate: int = 11025) -> tuple[float, float, float | None]:
-    """Derive valence/energy cues from one already-decoded PCM buffer (no extra I/O)."""
+def _pcm_mood_cues(
+    pcm: np.ndarray, samplerate: int = 11025
+) -> tuple[float, float, float | None, bool]:
+    """Derive valence/energy cues from one already-decoded PCM buffer (no extra I/O).
+
+    Returns (valence, energy, bpm, unstable) where unstable means the two FFT
+    windows disagree strongly (weaker PCM evidence for confidence).
+    """
     pcm = _trim_silence(np.ascontiguousarray(pcm, dtype=np.float32))
     rms = float(np.sqrt(np.mean(np.square(pcm))) + 1e-12)
     energy_from_rms = float(np.clip(np.log10(rms * 40 + 1e-6) / 1.6 + 0.55, 0.04, 0.96))
@@ -665,6 +840,7 @@ def _pcm_mood_cues(pcm: np.ndarray, samplerate: int = 11025) -> tuple[float, flo
     bright = 0.5 * (b0 + b1)
     bass = 0.5 * (bass0 + bass1)
     flatness = 0.5 * (flat0 + flat1)
+    unstable = abs(b0 - b1) > 0.28 or abs(bass0 - bass1) > 0.30
 
     peak = float(np.max(np.abs(pcm)) + 1e-12)
     crest = peak / rms
@@ -693,7 +869,7 @@ def _pcm_mood_cues(pcm: np.ndarray, samplerate: int = 11025) -> tuple[float, flo
             0.97,
         )
     )
-    return valence_pcm, energy_pcm, detected_bpm
+    return valence_pcm, energy_pcm, detected_bpm, bool(unstable)
 
 
 def analyze_audio(
@@ -708,6 +884,7 @@ def analyze_audio(
     albumartist: str = "",
     composer: str = "",
     replaygain_db: float | None = None,
+    duration_ms: int = 0,
 ) -> MoodResult:
     seed = genre_seed(
         genre,
@@ -723,49 +900,69 @@ def analyze_audio(
     valence, energy = seed.valence, seed.energy
     tag_bpm_ok = bpm is not None and np.isfinite(float(bpm))
     weak_tags = _weak_tag_ext(path)
-    # WAV/AIFF dumps: never skip PCM even when genre+BPM tags look complete.
-    skip_pcm = seed.tag_key is not None and tag_bpm_ok and not weak_tags
+    # Strong genre (tag or path) + BPM: tiny PCM residual only — includes path genre (#3).
+    soft_pcm_only = seed.clamp_match and tag_bpm_ok and not weak_tags
 
     detected_bpm: float | None = None
     pcm_ok = False
+    pcm_fallback = False
+    pcm_unstable = False
 
-    if not skip_pcm:
-        pcm = _decode_pcm(path)
-        if pcm is not None:
-            pcm_ok = True
-            valence_pcm, energy_pcm, detected_bpm = _pcm_mood_cues(pcm)
+    pcm, pcm_fallback = _decode_pcm_with_fallback(path, duration_ms=duration_ms)
+    if pcm is not None:
+        pcm_ok = True
+        valence_pcm, energy_pcm, detected_bpm, pcm_unstable = _pcm_mood_cues(pcm)
 
-            if weak_tags:
-                # Dump formats: distrust tags; lean hard on waveform.
-                valence = float(np.clip(0.22 * seed.valence + 0.78 * valence_pcm, 0.03, 0.97))
-                energy = float(np.clip(0.18 * seed.energy + 0.82 * energy_pcm, 0.03, 0.97))
-            elif seed.clamp_match:
-                valence = float(np.clip(0.60 * seed.valence + 0.40 * valence_pcm, 0.03, 0.97))
-                energy = float(np.clip(0.52 * seed.energy + 0.48 * energy_pcm, 0.03, 0.97))
-                valence = float(
-                    np.clip(
-                        seed.valence
-                        + float(np.clip(valence - seed.valence, -PCM_MAX_SHIFT, PCM_MAX_SHIFT)),
-                        0.03,
-                        0.97,
-                    )
+        if weak_tags:
+            # Dump formats: distrust tags; lean hard on waveform.
+            valence = float(np.clip(0.22 * seed.valence + 0.78 * valence_pcm, 0.03, 0.97))
+            energy = float(np.clip(0.18 * seed.energy + 0.82 * energy_pcm, 0.03, 0.97))
+        elif soft_pcm_only:
+            # Genre+BPM already trusted — soft residual spreads same-genre neighbors.
+            valence = float(
+                np.clip(
+                    seed.valence
+                    + float(np.clip(valence_pcm - seed.valence, -SOFT_PCM_MAX_SHIFT, SOFT_PCM_MAX_SHIFT)),
+                    0.03,
+                    0.97,
                 )
-                energy = float(
-                    np.clip(
-                        seed.energy
-                        + float(np.clip(energy - seed.energy, -PCM_MAX_SHIFT, PCM_MAX_SHIFT)),
-                        0.03,
-                        0.97,
-                    )
+            )
+            energy = float(
+                np.clip(
+                    seed.energy
+                    + float(np.clip(energy_pcm - seed.energy, -SOFT_PCM_MAX_SHIFT, SOFT_PCM_MAX_SHIFT)),
+                    0.03,
+                    0.97,
                 )
-            else:
-                # Messy / untagged: trust waveform cues heavily.
-                valence = float(np.clip(0.15 * seed.valence + 0.85 * valence_pcm, 0.03, 0.97))
-                energy = float(np.clip(0.12 * seed.energy + 0.88 * energy_pcm, 0.03, 0.97))
+            )
+        elif seed.clamp_match:
+            valence = float(np.clip(0.60 * seed.valence + 0.40 * valence_pcm, 0.03, 0.97))
+            energy = float(np.clip(0.52 * seed.energy + 0.48 * energy_pcm, 0.03, 0.97))
+            valence = float(
+                np.clip(
+                    seed.valence
+                    + float(np.clip(valence - seed.valence, -PCM_MAX_SHIFT, PCM_MAX_SHIFT)),
+                    0.03,
+                    0.97,
+                )
+            )
+            energy = float(
+                np.clip(
+                    seed.energy
+                    + float(np.clip(energy - seed.energy, -PCM_MAX_SHIFT, PCM_MAX_SHIFT)),
+                    0.03,
+                    0.97,
+                )
+            )
+        else:
+            # Messy / untagged: trust waveform cues heavily.
+            valence = float(np.clip(0.15 * seed.valence + 0.85 * valence_pcm, 0.03, 0.97))
+            energy = float(np.clip(0.12 * seed.energy + 0.88 * energy_pcm, 0.03, 0.97))
 
     out_bpm = bpm if bpm else detected_bpm
     energy = _bpm_nudge(energy, out_bpm, soft=(bpm is None and detected_bpm is not None))
 
+    used_jitter = False
     if (
         not seed.clamp_match
         and not pcm_ok
@@ -773,12 +970,36 @@ def analyze_audio(
         and abs(energy - DEFAULT_ENERGY) < 1e-6
     ):
         valence, energy = _stable_jitter(path)
+        used_jitter = True
 
-    # Low-trust: no genre (tag or path) and weak/missing PCM — UI dims only.
-    low_trust = (not seed.clamp_match) and (not pcm_ok)
+    bpm_conflict = False
+    bpm_ok = False
+    if tag_bpm_ok and detected_bpm is not None and np.isfinite(float(detected_bpm)):
+        if abs(float(bpm) - float(detected_bpm)) > 18.0:
+            bpm_conflict = True
+        else:
+            bpm_ok = True
+    elif tag_bpm_ok or (detected_bpm is not None and np.isfinite(float(detected_bpm))):
+        bpm_ok = True
+
+    confidence, note = mood_confidence(
+        tag_key=seed.tag_key,
+        path_key=seed.path_key,
+        pcm_ok=pcm_ok,
+        pcm_fallback=pcm_fallback,
+        pcm_unstable=pcm_unstable,
+        bpm_ok=bpm_ok,
+        bpm_conflict=bpm_conflict,
+        replaygain=replaygain_db is not None and np.isfinite(float(replaygain_db)),
+        keyword_hit=seed.keyword_hit,
+        weak_tags=weak_tags,
+        jitter=used_jitter,
+    )
     return MoodResult(
         valence=float(valence),
         energy=float(energy),
         bpm=out_bpm,
-        low_trust=bool(low_trust),
+        confidence=float(confidence),
+        low_trust=confidence_low_trust(confidence),
+        confidence_note=note,
     )

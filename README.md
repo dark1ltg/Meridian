@@ -1,7 +1,7 @@
 # Meridian
 
 [![Release](https://img.shields.io/github/v/release/dark1ltg/Meridian?label=release&color=e8b86d)](https://github.com/dark1ltg/Meridian/releases/latest)
-**Current release: [1.2](https://github.com/dark1ltg/Meridian/releases/tag/v1.2.0)** (`v1.2.0`)
+**Current release: [1.3](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.0)** (`v1.3.0`)
 
 **Your library is a night sky. Navigate by feel.**
 
@@ -28,7 +28,7 @@ Most players ask *what album next*. Meridian asks *where do you want to be*.
 - **Search** by title, artist, or album — pick a hit to snap the lens there and play  
 - Playback always **crossfades** (~3s) between tracks — queue advances, skips, matrix pulls, and double-clicks  
 
-Under the hood, Meridian reads tags, samples short waveforms (via `ffmpeg`), and uses **aubio** for tempo and onset cues so placements stay musical without a cloud model.
+Under the hood, Meridian reads tags, samples short waveforms (via `ffmpeg`), and uses **aubio** for tempo and onset cues so placements stay musical without a cloud model. Stars show a **graduated confidence** score (and short evidence notes on hover); after analyze, moods get a light **library/genre percentile** nudge so neighbors rank relative to *your* collection — pins stay put.
 
 ## How listening works
 
@@ -70,7 +70,7 @@ Natural advances, skips, and manual jumps always crossfade (~3s) between tracks 
 
 ### AppImage (recommended)
 
-**Latest:** [Meridian 1.2](https://github.com/dark1ltg/Meridian/releases/tag/v1.2.0) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
+**Latest:** [Meridian 1.3](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.0) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
 
 ```bash
 chmod +x Meridian-x86_64.AppImage

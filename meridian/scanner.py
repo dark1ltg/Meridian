@@ -7,7 +7,14 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, QThread
 
-from meridian.features import AUDIO_EXTS, analyze_audio, genre_seed, read_tags
+from meridian.features import (
+    AUDIO_EXTS,
+    analyze_audio,
+    confidence_low_trust,
+    genre_seed,
+    mood_confidence,
+    read_tags,
+)
 from meridian.library import Library
 
 
@@ -74,20 +81,33 @@ class ScanWorker(QObject):
                         composer=tags.get("composer") or "",
                         replaygain_db=tags.get("replaygain_db"),
                     )
+                    # Provisional score (no PCM yet) — same weights as analyze, pcm_ok=False.
+                    bpm = tags.get("bpm")
+                    conf, note = mood_confidence(
+                        tag_key=seed.tag_key,
+                        path_key=seed.path_key,
+                        pcm_ok=False,
+                        bpm_ok=bpm is not None,
+                        replaygain=tags.get("replaygain_db") is not None,
+                        keyword_hit=seed.keyword_hit,
+                        weak_tags=Path(path).suffix.lower() in {".wav", ".aiff", ".aif"},
+                    )
                     self.library.upsert_track(
                         {
                             "path": path,
                             "title": tags["title"],
                             "artist": tags["artist"],
                             "album": tags["album"],
+                            "albumartist": tags.get("albumartist") or "",
                             "genre": tags["genre"],
                             "duration_ms": tags["duration_ms"],
                             "year": tags["year"],
                             "bpm": tags["bpm"],
                             "valence": seed.valence,
                             "energy": seed.energy,
-                            # Provisional until analyze; no genre yet ⇒ low trust.
-                            "low_trust": int(not seed.clamp_match),
+                            "mood_confidence": conf,
+                            "confidence_note": note or "pre-analyze",
+                            "low_trust": int(confidence_low_trust(conf)),
                             "added_at": now,
                             "mtime": st.st_mtime,
                             "analyzed": 0,
@@ -129,19 +149,23 @@ class AnalyzeWorker(QObject):
                 track.bpm if track.bpm is not None else tags.get("bpm"),
                 year=track.year if track.year is not None else tags.get("year"),
                 extra_text=tags.get("extra_text") or "",
-                albumartist=tags.get("albumartist") or "",
+                albumartist=track.albumartist or tags.get("albumartist") or "",
                 composer=tags.get("composer") or "",
                 replaygain_db=tags.get("replaygain_db"),
+                duration_ms=track.duration_ms or int(tags.get("duration_ms") or 0),
             )
             self.library.set_analyzed_mood(
                 track.id,
                 result.valence,
                 result.energy,
                 result.bpm,
+                confidence=result.confidence,
                 low_trust=result.low_trust,
+                confidence_note=result.confidence_note,
             )
         self.library.smooth_album_moods()
         self.library.smooth_artist_moods()
+        self.library.rescale_moods_by_percentile()
         self.finished.emit()
 
 
