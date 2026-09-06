@@ -1,7 +1,7 @@
 # Meridian
 
 [![Release](https://img.shields.io/github/v/release/dark1ltg/Meridian?label=release&color=e8b86d)](https://github.com/dark1ltg/Meridian/releases/latest)
-**Current release: [1.3.1](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.1)** (`v1.3.1`)
+**Current release: [1.3.2](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.2)** (`v1.3.2`)
 
 **Your library is a night sky. Navigate by feel.**
 
@@ -70,7 +70,7 @@ Natural advances, skips, and manual jumps always crossfade (~3s) between tracks 
 
 ### AppImage (recommended)
 
-**Latest:** [Meridian 1.3.1](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.1) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
+**Latest:** [Meridian 1.3.2](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.2) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
 
 ```bash
 chmod +x Meridian-x86_64.AppImage
@@ -92,6 +92,14 @@ bash scripts/run.sh
 `aubio` needs the native library (e.g. Arch/CachyOS: `sudo pacman -S aubio`). Without it, Meridian still runs; tempo/onset features are skipped.
 
 Add folders with **Add library folder**. `~/Music` is scanned on first launch if it exists. **Rescan** force-refreshes tags and re-analyzes every track in your library folders.
+
+### Tests
+
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt   # pytest (dev only)
+bash scripts/run_tests.sh -v     # pytest suite
+bash scripts/smoke_test.sh       # same checks, no pytest required
+```
 
 ### Build the AppImage yourself
 

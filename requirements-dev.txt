@@ -1,0 +1,2 @@
+# Dev / test tools (not needed for AppImage runtime).
+pytest>=8.0

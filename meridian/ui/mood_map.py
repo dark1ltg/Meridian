@@ -331,6 +331,11 @@ class MoodMap(QGraphicsView):
         self.lens._map = self
 
     def _enable_opengl_viewport(self) -> bool:
+        import os
+
+        # Tests / headless smoke set MERIDIAN_NO_GL=1 to avoid GL teardown crashes.
+        if os.environ.get("MERIDIAN_NO_GL", "").strip() in {"1", "true", "yes"}:
+            return False
         try:
             from PySide6.QtGui import QSurfaceFormat
             from PySide6.QtOpenGLWidgets import QOpenGLWidget
