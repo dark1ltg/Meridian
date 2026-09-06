@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.smoke_checks import (
+    check_analyze_failed_marks_done,
     check_confidence,
     check_empty_scan_does_not_wipe,
     check_library_moods,
@@ -32,6 +33,10 @@ def test_smooth_rescale_pin_and_listen_nudge(tmp_db: Path) -> None:
 
 def test_empty_scan_does_not_wipe_library(tmp_path: Path) -> None:
     check_empty_scan_does_not_wipe(tmp_path / "wipe.sqlite")
+
+
+def test_analyze_failed_marks_done(tmp_path: Path) -> None:
+    check_analyze_failed_marks_done(tmp_path / "fail.sqlite")
 
 
 def test_mood_map_sky_drag_helpers() -> None:

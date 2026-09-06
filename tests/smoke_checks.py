@@ -142,21 +142,87 @@ def check_empty_scan_does_not_wipe(db_path: Path) -> None:
         lib.close()
 
 
+def check_analyze_failed_marks_done(db_path: Path) -> None:
+    lib = Library(db_path)
+    try:
+        _seed_library(lib, n=2)
+        tid = lib.all_tracks()[0].id
+        lib.conn.execute("UPDATE tracks SET analyzed = 0 WHERE id = ?", (tid,))
+        lib.conn.commit()
+        lib.mark_analyze_failed(tid)
+        t = lib.get(tid)
+        assert t is not None and t.analyzed
+        assert "analyze failed" in (t.confidence_note or "")
+        assert tid not in lib.unanalyzed_ids()
+    finally:
+        lib.close()
+
+
 def check_mood_map_helpers() -> None:
     from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QPointF
 
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
 
-    from meridian.ui.mood_map import HIT_RADIUS_SKY, LIVE_STARS_ZOOM, MoodMap
+    from meridian.ui.mood_map import (
+        HIT_RADIUS_SKY,
+        HIT_RADIUS_SKY_GRAB,
+        LIVE_STARS_ZOOM,
+        MoodMap,
+    )
+    from meridian.context import LENS_RADIUS_DEFAULT
+    from meridian.queue_engine import Quadrant
+    from types import SimpleNamespace
 
     m = MoodMap()
     assert hasattr(m, "_ensure_interactive_star")
     assert hasattr(m, "_sky_hold_id")
+    assert hasattr(m, "_drag_locked_ids")
+    assert hasattr(m, "set_radius_scale")
     assert LIVE_STARS_ZOOM == 2.4
     assert HIT_RADIUS_SKY >= 10
+    assert HIT_RADIUS_SKY_GRAB < HIT_RADIUS_SKY
     assert m._ensure_interactive_star(999) is None
+
+    # Lens ellipse matches mood radius on map axes (and mode scale).
+    m.set_radius_scale(1.0)
+    m.set_lens(0.5, 0.5, LENS_RADIUS_DEFAULT)
+    rx = m.lens.rect().width() / 2
+    ry = m.lens.rect().height() / 2
+    assert abs(rx - LENS_RADIUS_DEFAULT * 720) < 0.5
+    assert abs(ry - LENS_RADIUS_DEFAULT * 524) < 0.5
+    m.set_radius_scale(0.78)
+    assert abs(m.lens.rect().width() / 2 - LENS_RADIUS_DEFAULT * 0.78 * 720) < 0.5
+
+    # Mid-drag set_tracks must not wipe the held star position.
+    track = SimpleNamespace(
+        id=1,
+        valence=0.2,
+        energy=0.8,
+        label="T",
+        loved=False,
+        pinned=False,
+        mood_confidence=0.9,
+        confidence_note="",
+    )
+    ranked = SimpleNamespace(track=track, quadrant=Quadrant.NOW, fit=1.0, importance=1.0)
+    m.set_tracks([ranked], None)
+    star = m._ensure_interactive_star(1)
+    assert star is not None
+    drag = QPointF(600.0, 250.0)
+    star.setPos(drag)
+    m._positions[1] = QPointF(drag)
+    m._sky_hold_id = 1
+    m.set_tracks([ranked], None)
+    assert abs(m._stars[1].pos().x() - 600.0) < 0.5
+    assert abs(m._positions[1].x() - 600.0) < 0.5
+
+    # Backdrop rebuild must not leak chrome items.
+    n0 = len(m._sky_chrome)
+    m._draw_backdrop()
+    assert len(m._sky_chrome) == n0
 
 
 def run_all_smoke_checks(tmp_dir: Path) -> None:
@@ -165,4 +231,5 @@ def run_all_smoke_checks(tmp_dir: Path) -> None:
     check_confidence()
     check_library_moods(tmp_dir / "smoke.sqlite")
     check_empty_scan_does_not_wipe(tmp_dir / "wipe.sqlite")
+    check_analyze_failed_marks_done(tmp_dir / "fail.sqlite")
     check_mood_map_helpers()

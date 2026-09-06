@@ -297,6 +297,34 @@ class Library:
             )
             self.conn.commit()
 
+    def mark_analyze_failed(self, track_id: int) -> None:
+        """Mark a track analyzed so a poison file cannot loop the analyze worker forever."""
+        from meridian.features import confidence_low_trust
+
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT pinned, mood_confidence, confidence_note, low_trust FROM tracks WHERE id = ?",
+                (track_id,),
+            ).fetchone()
+            if not row:
+                return
+            if int(row["pinned"] or 0):
+                # Pins keep mood/trust; only clear the pending-analyze flag.
+                self.conn.execute("UPDATE tracks SET analyzed = 1 WHERE id = ?", (track_id,))
+            else:
+                conf = float(row["mood_confidence"] if row["mood_confidence"] is not None else 0.25)
+                conf = min(conf, 0.28)
+                note = self._append_note(row["confidence_note"], "analyze failed")
+                self.conn.execute(
+                    """
+                    UPDATE tracks
+                    SET analyzed = 1, mood_confidence = ?, low_trust = ?, confidence_note = ?
+                    WHERE id = ? AND pinned = 0
+                    """,
+                    (conf, int(confidence_low_trust(conf)), note, track_id),
+                )
+            self.conn.commit()
+
     def smooth_album_moods(self, max_shift: float = 0.08, blend: float = 0.30) -> int:
         """Gently pull unpinned tracks toward their album median mood (no ffmpeg).
 

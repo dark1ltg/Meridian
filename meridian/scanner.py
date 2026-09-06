@@ -174,7 +174,11 @@ class AnalyzeWorker(QObject):
                         confidence_note=result.confidence_note,
                     )
                 except Exception:
-                    # Skip bad files; keep analyzing the rest.
+                    # Poison the row so auto-restart cannot loop forever on a bad file.
+                    try:
+                        self.library.mark_analyze_failed(track.id)
+                    except Exception:
+                        pass
                     continue
             if not self._abort:
                 self.library.smooth_album_moods()

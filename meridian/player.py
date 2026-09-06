@@ -225,5 +225,8 @@ class Player(QObject):
         else:
             self.output.setVolume(self._master)
 
+    def is_crossfading(self) -> bool:
+        return bool(self._crossfading)
+
     def is_playing(self) -> bool:
         return self.backend.playbackState() == QMediaPlayer.PlaybackState.PlayingState
