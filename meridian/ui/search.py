@@ -16,7 +16,8 @@ class TrackSearch(QLineEdit):
         self.setPlaceholderText("Search title, artist, album")
         self.setClearButtonEnabled(True)
         self._hits: list[Track] = []
-        self._labels: list[str] = []
+        # Completer labels are unique even when artist/title collide.
+        self._label_to_id: dict[str, int] = {}
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(90)
@@ -41,19 +42,48 @@ class TrackSearch(QLineEdit):
     def _schedule(self, _text: str) -> None:
         self._timer.start()
 
+    @staticmethod
+    def _unique_label(track: Track, used: set[str]) -> str:
+        base = track.label
+        if base not in used:
+            used.add(base)
+            return base
+        # Disambiguate duplicates with album or path stem.
+        alt = f"{base}  ·  {track.album}" if track.album else base
+        if alt not in used:
+            used.add(alt)
+            return alt
+        n = 2
+        while True:
+            label = f"{base}  ({n})"
+            if label not in used:
+                used.add(label)
+                return label
+            n += 1
+
     def _refresh(self) -> None:
         self._hits = self.library.search(self.text())
-        self._labels = [t.label for t in self._hits]
-        self._model.setStringList(self._labels)
+        used: set[str] = set()
+        labels: list[str] = []
+        self._label_to_id = {}
+        for track in self._hits:
+            label = self._unique_label(track, used)
+            labels.append(label)
+            self._label_to_id[label] = track.id
+        self._model.setStringList(labels)
         if self._hits and self.hasFocus() and self.text().strip():
             self._completer.complete()
 
     def _activated(self, label: str) -> None:
-        for track in self._hits:
-            if track.label == label:
-                self.track_chosen.emit(track.id)
-                self.clear()
-                return
+        tid = self._label_to_id.get(label)
+        if tid is None:
+            for track in self._hits:
+                if track.label == label:
+                    tid = track.id
+                    break
+        if tid is not None:
+            self.track_chosen.emit(tid)
+            self.clear()
 
     def _accept_first(self) -> None:
         if not self._hits:

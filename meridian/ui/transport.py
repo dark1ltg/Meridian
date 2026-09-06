@@ -191,6 +191,7 @@ class TransportBar(QWidget):
     def _preview_time(self, value: int) -> None:
         if self._seeking or self.seek.isSliderDown():
             self.elapsed.setText(fmt_ms(value))
+            self.remain.setText(fmt_ms(max(0, self.seek.maximum() - value)))
 
     def _release(self) -> None:
         self._seeking = False
@@ -212,7 +213,7 @@ class TransportBar(QWidget):
             self.seek.setValue(max(0, min(position, duration)))
             self.seek.blockSignals(False)
             self.elapsed.setText(fmt_ms(position))
-        self.remain.setText(fmt_ms(duration))
+        self.remain.setText(fmt_ms(max(0, duration - position)))
 
     def set_playing(self, playing: bool) -> None:
         self.play_btn.setText("❚❚" if playing else "▶")

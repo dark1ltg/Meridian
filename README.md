@@ -1,7 +1,7 @@
 # Meridian
 
 [![Release](https://img.shields.io/github/v/release/dark1ltg/Meridian?label=release&color=e8b86d)](https://github.com/dark1ltg/Meridian/releases/latest)
-**Current release: [1.3.2](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.2)** (`v1.3.2`)
+**Current release: [1.3.3](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.3)** (`v1.3.3`)
 
 **Your library is a night sky. Navigate by feel.**
 
@@ -37,7 +37,7 @@ Every track is a star on the map. Click a star to snap the lens; **drag a star t
 
 **Pinch** (or Ctrl+scroll) zooms from the full sky into a neighborhood — chrome fades, nearby tracks pick up glow and names, and zoom bias pulls toward clusters under your fingers. Drag empty space to pan. Double-click empty space to show the full map again.
 
-Thousands of tracks stay smooth because the overview is one cached starfield; zooming in loads interactive stars in the viewport (drag-to-pin also works from the full sky by lifting the nearest star under the cursor).
+Thousands of tracks stay smooth because the overview is one cached starfield; zooming in loads interactive stars in the viewport. From the full sky: **click** a star to snap the lens; **drag on the star** to pin (empty space still pans).
 
 ### Eisenhower listen matrix
 
@@ -70,7 +70,7 @@ Natural advances, skips, and manual jumps always crossfade (~3s) between tracks 
 
 ### AppImage (recommended)
 
-**Latest:** [Meridian 1.3.2](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.2) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
+**Latest:** [Meridian 1.3.3](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.3) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
 
 ```bash
 chmod +x Meridian-x86_64.AppImage

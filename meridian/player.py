@@ -23,6 +23,8 @@ class Player(QObject):
     state_changed = Signal(bool)
     track_finished = Signal()
     track_nearly_finished = Signal()
+    # Fired when a natural crossfade finishes (outgoing deck fully released).
+    natural_listen_completed = Signal()
     error_occurred = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -173,6 +175,7 @@ class Player(QObject):
             self._xfade.stop()
         outgoing = self._outgoing
         self._outgoing = None
+        was_crossfading = self._crossfading
         self._crossfading = False
         if outgoing is not None:
             outgoing.player.stop()
@@ -181,6 +184,9 @@ class Player(QObject):
         self.position_changed.emit(int(self.backend.position() or 0))
         self.duration_changed.emit(int(self.backend.duration() or 0))
         self.state_changed.emit(self.is_playing())
+        # Natural fade completed (not a skip/hard cut) → credit the listen.
+        if was_crossfading and not immediate:
+            self.natural_listen_completed.emit()
 
     @Slot()
     def toggle(self) -> None:

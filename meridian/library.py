@@ -147,9 +147,19 @@ class Library:
             ).fetchone()
             if existing:
                 payload = dict(values)
+                # Preserve original import time on updates.
+                payload.pop("added_at", None)
                 if int(existing["pinned"] or 0):
-                    payload.pop("valence", None)
-                    payload.pop("energy", None)
+                    # Pins keep mood + trust metadata; analyze still protects coords.
+                    for key in (
+                        "valence",
+                        "energy",
+                        "mood_confidence",
+                        "low_trust",
+                        "confidence_note",
+                        "analyzed",
+                    ):
+                        payload.pop(key, None)
                 fields = [k for k in payload if k != "path"]
                 if fields:
                     assignments = ", ".join(f"{k} = ?" for k in fields)

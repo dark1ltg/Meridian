@@ -63,6 +63,34 @@ def check_library_moods(db_path: Path) -> None:
         pin_v = lib.get(1).valence
         assert lib.get(1).pinned and lib.get(1).mood_confidence == 1.0
 
+        # Rescan-style upsert must not strip pin confidence.
+        lib.upsert_track(
+            {
+                "path": "/m/0.mp3",
+                "title": "t0",
+                "artist": "Band",
+                "albumartist": "Band",
+                "album": "LP",
+                "genre": "Metal",
+                "duration_ms": 1,
+                "year": None,
+                "bpm": 120,
+                "valence": 0.1,
+                "energy": 0.1,
+                "mood_confidence": 0.2,
+                "confidence_note": "pre-analyze",
+                "low_trust": 1,
+                "added_at": 999,
+                "mtime": 1,
+                "analyzed": 0,
+            }
+        )
+        pinned = lib.get(1)
+        assert abs(pinned.valence - pin_v) < 1e-9
+        assert pinned.mood_confidence == 1.0
+        assert pinned.confidence_note == "pinned"
+        assert pinned.analyzed
+
         n_smooth = lib.smooth_album_moods()
         assert n_smooth >= 0
         assert any("album smooth" in (t.confidence_note or "") for t in lib.all_tracks())
@@ -98,6 +126,22 @@ def check_library_moods(db_path: Path) -> None:
         lib.close()
 
 
+def check_empty_scan_does_not_wipe(db_path: Path) -> None:
+    from meridian.scanner import ScanWorker
+
+    lib = Library(db_path)
+    try:
+        _seed_library(lib, n=4)
+        assert len(lib.all_tracks()) == 4
+        lib.add_folder("/nonexistent/meridian-empty-scan-guard")
+        worker = ScanWorker(lib, force=False)
+        added = worker._scan()
+        assert added == 0
+        assert len(lib.all_tracks()) == 4, "empty/missing folders must not wipe library"
+    finally:
+        lib.close()
+
+
 def check_mood_map_helpers() -> None:
     from PySide6.QtWidgets import QApplication
 
@@ -120,4 +164,5 @@ def run_all_smoke_checks(tmp_dir: Path) -> None:
     check_version()
     check_confidence()
     check_library_moods(tmp_dir / "smoke.sqlite")
+    check_empty_scan_does_not_wipe(tmp_dir / "wipe.sqlite")
     check_mood_map_helpers()

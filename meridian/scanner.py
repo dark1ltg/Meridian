@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, QThread
@@ -38,16 +37,20 @@ class ScanWorker(QObject):
             self.finished.emit(count)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
+            # Always close the finished channel so the UI can quit the QThread.
+            self.finished.emit(0)
 
     def _scan(self) -> int:
         folders = self.library.folders()
         found: list[str] = []
         added = 0
         now = time.time()
+        walked_ok = False
         for folder in folders:
             root = Path(folder)
             if not root.is_dir():
                 continue
+            walked_ok = True
             for dirpath, dirnames, filenames in os.walk(root):
                 dirnames[:] = [d for d in dirnames if not d.startswith(".")]
                 if self._abort:
@@ -114,7 +117,10 @@ class ScanWorker(QObject):
                         }
                     )
                     added += 1
-        self.library.delete_missing(found)
+        # Never wipe the library when nothing was discovered (moved/empty folders).
+        # Still prune when we successfully walked at least one folder (even if empty).
+        if walked_ok and not self._abort:
+            self.library.delete_missing(found)
         return added
 
 
@@ -131,42 +137,51 @@ class AnalyzeWorker(QObject):
         self._abort = True
 
     def run(self) -> None:
-        ids = self.library.unanalyzed_ids()
-        total = len(ids)
-        for index, track_id in enumerate(ids, start=1):
-            if self._abort:
-                break
-            track = self.library.get(track_id)
-            if not track:
-                continue
-            self.progress.emit(track.short_title, index, total)
-            tags = read_tags(track.path)
-            result = analyze_audio(
-                track.path,
-                track.genre or tags.get("genre") or "",
-                track.title,
-                track.artist,
-                track.bpm if track.bpm is not None else tags.get("bpm"),
-                year=track.year if track.year is not None else tags.get("year"),
-                extra_text=tags.get("extra_text") or "",
-                albumartist=track.albumartist or tags.get("albumartist") or "",
-                composer=tags.get("composer") or "",
-                replaygain_db=tags.get("replaygain_db"),
-                duration_ms=track.duration_ms or int(tags.get("duration_ms") or 0),
-            )
-            self.library.set_analyzed_mood(
-                track.id,
-                result.valence,
-                result.energy,
-                result.bpm,
-                confidence=result.confidence,
-                low_trust=result.low_trust,
-                confidence_note=result.confidence_note,
-            )
-        self.library.smooth_album_moods()
-        self.library.smooth_artist_moods()
-        self.library.rescale_moods_by_percentile()
-        self.finished.emit()
+        try:
+            ids = self.library.unanalyzed_ids()
+            total = len(ids)
+            for index, track_id in enumerate(ids, start=1):
+                if self._abort:
+                    break
+                track = self.library.get(track_id)
+                if not track:
+                    continue
+                self.progress.emit(track.short_title, index, total)
+                try:
+                    tags = read_tags(track.path)
+                    result = analyze_audio(
+                        track.path,
+                        track.genre or tags.get("genre") or "",
+                        track.title,
+                        track.artist,
+                        track.bpm if track.bpm is not None else tags.get("bpm"),
+                        year=track.year if track.year is not None else tags.get("year"),
+                        extra_text=tags.get("extra_text") or "",
+                        albumartist=track.albumartist or tags.get("albumartist") or "",
+                        composer=tags.get("composer") or "",
+                        replaygain_db=tags.get("replaygain_db"),
+                        duration_ms=track.duration_ms or int(tags.get("duration_ms") or 0),
+                    )
+                    if self._abort:
+                        break
+                    self.library.set_analyzed_mood(
+                        track.id,
+                        result.valence,
+                        result.energy,
+                        result.bpm,
+                        confidence=result.confidence,
+                        low_trust=result.low_trust,
+                        confidence_note=result.confidence_note,
+                    )
+                except Exception:
+                    # Skip bad files; keep analyzing the rest.
+                    continue
+            if not self._abort:
+                self.library.smooth_album_moods()
+                self.library.smooth_artist_moods()
+                self.library.rescale_moods_by_percentile()
+        finally:
+            self.finished.emit()
 
 
 def start_worker(worker: QObject, fn_name: str = "run") -> QThread:

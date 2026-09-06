@@ -64,6 +64,7 @@ class MainWindow(QMainWindow):
         self._scan_worker = None
         self._analyze_thread = None
         self._analyze_worker = None
+        self._pending_finish_nudge: int | None = None
         self._duration = 0
         self._rebuild_lock = False
         self._lens_timer = QTimer(self)
@@ -202,8 +203,9 @@ class MainWindow(QMainWindow):
         self.player.position_changed.connect(self._pos)
         self.player.duration_changed.connect(self._dur)
         self.player.state_changed.connect(self.transport.set_playing)
-        self.player.track_finished.connect(self._completed)
-        self.player.track_nearly_finished.connect(self._completed)
+        self.player.track_nearly_finished.connect(self._nearly_finished)
+        self.player.track_finished.connect(self._track_finished_hard)
+        self.player.natural_listen_completed.connect(self._natural_listen_completed)
         self.player.error_occurred.connect(lambda m: self.status_label.setText(m))
 
     def _restore_lens(self) -> None:
@@ -367,23 +369,13 @@ class MainWindow(QMainWindow):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        if self._analyze_worker:
-            self._analyze_worker.abort()
-        if self._analyze_thread and self._analyze_thread.isRunning():
-            self._analyze_thread.quit()
-            self._analyze_thread.wait(2000)
+        self._stop_analyze(wait_ms=8000)
         pending = self.library.mark_all_pending_analysis()
         self.status_label.setText(f"Rescanning library ({pending} tracks to re-analyze)…")
-        self._scan_worker = ScanWorker(self.library, force=True)
-        self._scan_thread = start_worker(self._scan_worker)
-        self._scan_worker.progress.connect(lambda n: self.status_label.setText(f"Rescanning {n}"))
-        self._scan_worker.failed.connect(lambda m: QMessageBox.warning(self, "Scan failed", m))
-        self._scan_worker.finished.connect(self._rescan_done)
+        self._start_scan_worker(force=True, on_finished=self._rescan_done)
 
     def _rescan_done(self, count: int) -> None:
-        if self._scan_thread:
-            self._scan_thread.quit()
-            self._scan_thread.wait(2000)
+        self._cleanup_scan_thread()
         self.status_label.setText(f"Rescanned {count} files. Re-analyzing waveforms…")
         self.refresh_plan()
         self.start_analyze()
@@ -392,22 +384,50 @@ class MainWindow(QMainWindow):
         if self._scan_thread and self._scan_thread.isRunning():
             return
         self.status_label.setText("Scanning local files…")
-        self._scan_worker = ScanWorker(self.library, force=False)
+        self._start_scan_worker(force=False, on_finished=self._scan_done)
+
+    def _start_scan_worker(self, *, force: bool, on_finished) -> None:
+        self._cleanup_scan_thread()
+        self._scan_worker = ScanWorker(self.library, force=force)
         self._scan_thread = start_worker(self._scan_worker)
         self._scan_worker.progress.connect(lambda n: self.status_label.setText(f"Found {n}"))
         self._scan_worker.failed.connect(lambda m: QMessageBox.warning(self, "Scan failed", m))
-        self._scan_worker.finished.connect(self._scan_done)
+        self._scan_worker.finished.connect(on_finished)
 
-    def _scan_done(self, added: int) -> None:
+    def _cleanup_scan_thread(self) -> None:
         if self._scan_thread:
             self._scan_thread.quit()
-            self._scan_thread.wait(2000)
+            self._scan_thread.wait(3000)
+            self._scan_thread.deleteLater()
+            self._scan_thread = None
+        if self._scan_worker:
+            self._scan_worker.deleteLater()
+            self._scan_worker = None
+
+    def _stop_analyze(self, wait_ms: int = 5000) -> None:
+        if self._analyze_worker:
+            self._analyze_worker.abort()
+        if self._analyze_thread and self._analyze_thread.isRunning():
+            self._analyze_thread.quit()
+            self._analyze_thread.wait(wait_ms)
+        if self._analyze_thread:
+            self._analyze_thread.deleteLater()
+            self._analyze_thread = None
+        if self._analyze_worker:
+            self._analyze_worker.deleteLater()
+            self._analyze_worker = None
+
+    def _scan_done(self, added: int) -> None:
+        self._cleanup_scan_thread()
         self.status_label.setText(f"Indexed {added} new files. Mapping mood…")
         self.refresh_plan()
         self.start_analyze()
 
     def start_analyze(self) -> None:
         if self._analyze_thread and self._analyze_thread.isRunning():
+            return
+        if not self.library.unanalyzed_ids():
+            self.status_label.setText("Mood map updated from local audio.")
             return
         self._analyze_worker = AnalyzeWorker(self.library)
         self._analyze_thread = start_worker(self._analyze_worker)
@@ -417,10 +437,22 @@ class MainWindow(QMainWindow):
         self._analyze_worker.finished.connect(self._analyze_done)
 
     def _analyze_done(self) -> None:
-        if self._analyze_thread:
-            self._analyze_thread.quit()
-            self._analyze_thread.wait(2000)
+        thread = self._analyze_thread
+        worker = self._analyze_worker
+        self._analyze_thread = None
+        self._analyze_worker = None
+        if thread:
+            thread.quit()
+            thread.wait(3000)
+            thread.deleteLater()
+        if worker:
+            worker.deleteLater()
         self.refresh_plan()
+        # If scan added more tracks while we were analyzing, finish them.
+        if self.library.unanalyzed_ids():
+            self.status_label.setText("More tracks to map…")
+            self.start_analyze()
+            return
         self.status_label.setText("Mood map updated from local audio.")
 
     def _queue_activated(self, item: QListWidgetItem) -> None:
@@ -491,6 +523,7 @@ class MainWindow(QMainWindow):
         self._fill_queue()
 
     def play_next(self) -> None:
+        self._pending_finish_nudge = None
         skipped = bool(self.player.current and self.player.backend.position() < 8000)
         if self.player.current:
             if skipped:
@@ -500,6 +533,7 @@ class MainWindow(QMainWindow):
         self._advance_queue(skipped=skipped)
 
     def play_prev(self) -> None:
+        self._pending_finish_nudge = None
         if not self.session_queue:
             self._replenish_queue()
         if not self.session_queue:
@@ -507,8 +541,21 @@ class MainWindow(QMainWindow):
         self.queue_index = max(0, self.queue_index - 1)
         self.play_id(self.session_queue[self.queue_index])
 
-    def _completed(self) -> None:
-        # Natural end (or pre-end crossfade arm). Skips use play_next → same play_id path.
+    def _nearly_finished(self) -> None:
+        # Arm crossfade / advance now; credit the listen when the fade completes.
+        if self.player.current:
+            self._pending_finish_nudge = self.player.current.id
+        self._advance_queue(skipped=False)
+
+    def _natural_listen_completed(self) -> None:
+        tid = self._pending_finish_nudge
+        self._pending_finish_nudge = None
+        if tid is not None:
+            self._listen_nudge(tid, skipped=False)
+
+    def _track_finished_hard(self) -> None:
+        # Short tracks (no nearly-finished arm): nudge + advance together.
+        self._pending_finish_nudge = None
         if self.player.current:
             self._listen_nudge(self.player.current.id, skipped=False)
         self._advance_queue(skipped=False)
@@ -576,12 +623,10 @@ class MainWindow(QMainWindow):
         self.transport.set_progress(self.player.backend.position(), dur)
 
     def closeEvent(self, event) -> None:
-        for worker in (self._scan_worker, self._analyze_worker):
-            if worker:
-                worker.abort()
-        for thread in (self._scan_thread, self._analyze_thread):
-            if thread:
-                thread.quit()
-                thread.wait(1500)
+        self._pending_finish_nudge = None
+        self._stop_analyze(wait_ms=12000)
+        if self._scan_worker:
+            self._scan_worker.abort()
+        self._cleanup_scan_thread()
         self.library.close()
         super().closeEvent(event)
