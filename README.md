@@ -1,7 +1,7 @@
 # Meridian
 
 [![Release](https://img.shields.io/github/v/release/dark1ltg/Meridian?label=release&color=e8b86d)](https://github.com/dark1ltg/Meridian/releases/latest)
-**Current release: [1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4)** (`v1.3.4`)
+**Current release: [1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4)** (`v1.3.4`) · [Changelog](CHANGELOG.md)
 
 **Your library is a night sky. Navigate by feel.**
 
@@ -14,6 +14,17 @@ Meridian is a local, offline Linux music player that charts every track as a sta
   &nbsp;
   <img src="docs/screenshots/03-matrix-queue.png" alt="Listen matrix and context queue" width="48%" />
 </p>
+
+## What's new in 1.3.4
+
+Queue and mood-map reliability release. Highlights:
+
+- Queue no longer freezes on missing/deleted files; failed analyzes cannot loop forever
+- Crossfade skip credits the track you left, not the one fading in
+- Lens ring matches the real selection (including mode radius); trackpad lens scroll works
+- Pinning stays stable during refreshes; double-click empty space returns to the full sky
+
+Full notes: [v1.3.4 release](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4) · [CHANGELOG](CHANGELOG.md)
 
 ## Why Meridian
 
@@ -33,9 +44,9 @@ Under the hood, Meridian reads tags, samples short waveforms (via `ffmpeg`), and
 ## How listening works
 
 ### Mood map
-Every track is a star on the map. Click a star to snap the lens; **drag a star to pin** its mood. Scroll to tighten or widen the lens (queue neighborhood).
+Every track is a star on the map. Click a star to snap the lens; **drag a star to pin** its mood. Scroll to tighten or widen the lens (queue neighborhood) — the ring matches the mood-space area the queue uses (modes can scale that radius).
 
-**Pinch** (or Ctrl+scroll) zooms from the full sky into a neighborhood — chrome fades, nearby tracks pick up glow and names, and zoom bias pulls toward clusters under your fingers. Drag empty space to pan. Double-click empty space to show the full map again.
+**Pinch** (or Ctrl+scroll) zooms from the full sky into a neighborhood — chrome fades, nearby tracks pick up glow and names, and zoom bias pulls toward clusters under your fingers. Drag empty space to pan. Double-click empty space to show the full map again (double-click a star core to play).
 
 Thousands of tracks stay smooth because the overview is one cached starfield; zooming in loads interactive stars in the viewport. From the full sky: **click** a star to snap the lens; **drag on the star** to pin (empty space still pans).
 
@@ -120,12 +131,15 @@ Output: `dist/Meridian-$(uname -m).AppImage`
 | Pinch / Ctrl+scroll on map | Zoom night sky ↔ cluster |
 | Scroll on map | Resize lens |
 | Double-click empty map | Reset to full sky |
+| Double-click star (or tight sky core) | Play that track |
 | Heart (transport) | Mark a track important |
 
 ## License
 
 Meridian is free software under the **GNU General Public License v3.0**.  
 See [LICENSE](LICENSE) / [COPYING](COPYING).
+
+Release history: [CHANGELOG.md](CHANGELOG.md) · [GitHub Releases](https://github.com/dark1ltg/Meridian/releases/latest)
 
 Third-party components are listed in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).  
 Ubuntu fonts ship under the Ubuntu Font Licence 1.0 in `resources/fonts/`.  
