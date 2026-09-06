@@ -2,6 +2,27 @@
 
 All notable Meridian releases are listed here. Download AppImages from [Releases](https://github.com/dark1ltg/Meridian/releases).
 
+## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06
+
+Richer acoustic mood cues from the existing single PCM decode (items 2–11; no distributed track sampling), placement fixes, and desktop integration.
+
+### Acoustic profile
+- Multi-band frequency energy and spectral flux from the current FFT/PCM path
+- RMS dynamics (mean, variation, peak, range, trend) and onset density/burstiness/consistency
+- Nonlinear brightness mapping; confidence reflects spectral/rhythm stability
+- Local-window aggregation inside the decode; map remains Shadow↔Glow / Still↔Kinetic
+- Pins, metadata, and decode budget unchanged (still ~one FFmpeg, ~28s mono @ 11025 Hz)
+
+### Placement fixes
+- Soft genre+BPM: tagged BPM no longer undoes the soft PCM energy envelope
+- Quiet near-floor hiss no longer maps as Glow; bass darkness counted once via band glow
+- Brightness contributes to Shadow↔Glow only (not Still↔Kinetic)
+- Relative spectral flux with log mapping — steady / evolving / noisy stay distinct
+
+### Desktop / AppImage
+- Freedesktop `.desktop`, hicolor icons (16–512 + SVG), AppStream metainfo
+- `Meridian-*.AppImage --install` / `--uninstall` registers a normal menu entry under `~/.local/share`
+
 ## [1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4) — 2026-09-06
 
 Bugfix — queue reliability and mood-map correctness.

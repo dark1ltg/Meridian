@@ -1,7 +1,7 @@
 # Meridian
 
 [![Release](https://img.shields.io/github/v/release/dark1ltg/Meridian?label=release&color=e8b86d)](https://github.com/dark1ltg/Meridian/releases/latest)
-**Current release: [1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4)** (`v1.3.4`) · [Changelog](CHANGELOG.md)
+**Current release: [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5)** (`v1.3.5`) · [Changelog](CHANGELOG.md)
 
 **Your library is a night sky. Navigate by feel.**
 
@@ -14,6 +14,18 @@ Meridian is a local, offline Linux music player that charts every track as a sta
   &nbsp;
   <img src="docs/screenshots/03-matrix-queue.png" alt="Listen matrix and context queue" width="48%" />
 </p>
+
+## What's new in 1.3.5
+
+Richer acoustic placement from the same decode budget (no extra FFmpeg regions):
+
+- Multi-band energy, spectral flux, RMS dynamics, and onset consistency/burstiness
+- Soft genre+BPM paths keep tagged tempo from blowing past the soft energy clamp
+- Quieter hiss stays near-neutral on Glow; bass darkness is counted once; brightness stays on Shadow↔Glow
+- Relative spectral flux separates steady vs busy material without saturating
+- AppImage installs like a normal app: `--install` / `--uninstall` (menu entry + icons)
+
+Full notes: [CHANGELOG](CHANGELOG.md)
 
 ## What's new in 1.3.4
 
@@ -81,12 +93,15 @@ Natural advances, skips, and manual jumps always crossfade (~3s) between tracks 
 
 ### AppImage (recommended)
 
-**Latest:** [Meridian 1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
+**Latest:** [Meridian 1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
 
 ```bash
 chmod +x Meridian-x86_64.AppImage
-./Meridian-x86_64.AppImage
+./Meridian-x86_64.AppImage --install    # menu entry + icons under ~/.local/share
+./Meridian-x86_64.AppImage              # or launch from your app menu
 ```
+
+`--uninstall` removes the menu entry and icons. AppImageLauncher / appimaged also work if you prefer those.
 
 Install **`ffmpeg`** on the host for mood analysis. Playback uses Qt Multimedia. The mood map prefers desktop OpenGL (NVIDIA / AMD / Intel) and falls back to software if needed.
 
@@ -119,6 +134,12 @@ bash packaging/build-appimage.sh
 ```
 
 Output: `dist/Meridian-$(uname -m).AppImage`
+
+Then optionally:
+
+```bash
+./dist/Meridian-$(uname -m).AppImage --install
+```
 
 ## Shortcuts
 

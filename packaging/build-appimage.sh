@@ -34,6 +34,7 @@ run_py() {
     "$PYTHON" "$@"
 }
 
+# Rasterize SVG → window icon + hicolor theme sizes for desktop integration.
 run_py - <<'PY'
 from pathlib import Path
 from PySide6.QtGui import QImage, QPainter, QGuiApplication
@@ -42,16 +43,39 @@ from PySide6.QtCore import QRectF, Qt
 import sys
 
 app = QGuiApplication(sys.argv)
-svg = Path("resources/meridian.svg").read_bytes()
-renderer = QSvgRenderer(svg)
-image = QImage(256, 256, QImage.Format.Format_ARGB32)
-image.fill(Qt.GlobalColor.transparent)
-painter = QPainter(image)
-renderer.render(painter, QRectF(0, 0, 256, 256))
-painter.end()
-image.save("resources/meridian.png")
+svg_bytes = Path("resources/meridian.svg").read_bytes()
+renderer = QSvgRenderer(svg_bytes)
+sizes = (16, 24, 32, 48, 64, 128, 256, 512)
+out_root = Path("resources/icons/hicolor")
+for size in sizes:
+    image = QImage(size, size, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    renderer.render(painter, QRectF(0, 0, size, size))
+    painter.end()
+    dest_dir = out_root / f"{size}x{size}" / "apps"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / "meridian.png"
+    image.save(str(dest))
+    print(f"wrote {dest}")
+# Canonical 256px copy used by the Qt window icon / PyInstaller datas.
+Path("resources/meridian.png").write_bytes((out_root / "256x256" / "apps" / "meridian.png").read_bytes())
 print("wrote resources/meridian.png")
+scalable = Path("resources/icons/hicolor/scalable/apps")
+scalable.mkdir(parents=True, exist_ok=True)
+(scalable / "meridian.svg").write_bytes(svg_bytes)
+print(f"wrote {scalable / 'meridian.svg'}")
 PY
+
+# Version stamp is applied to AppDir copies below (do not dirty the git tree).
+APP_VERSION="$(run_py -c 'from meridian import __version__; print(__version__)')"
+
+if [[ ! -f "$ROOT/resources/meridian.png" ]] \
+  || [[ ! -f "$ROOT/resources/icons/hicolor/scalable/apps/meridian.svg" ]]; then
+  echo "ERROR: icon generation failed" >&2
+  exit 1
+fi
 
 if [[ ! -f "$FONTS_SRC/UbuntuSans[wdth,wght].ttf" ]] \
    || [[ ! -f "$FONTS_SRC/UbuntuCondensed-Regular.ttf" ]]; then
@@ -82,15 +106,27 @@ done
 run_py -m PyInstaller --noconfirm --clean "$ROOT/packaging/meridian.spec"
 
 rm -rf "$APPDIR"
-mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/metainfo"
+mkdir -p "$APPDIR/usr/share/icons/hicolor"
 mkdir -p "$FONTS_DST" "$DOC_FONTS" "$DOC_THIRD"
 
 cp -a "$DIST/$APP/." "$APPDIR/usr/bin/"
 cp "$ROOT/resources/meridian.desktop" "$APPDIR/usr/share/applications/${APP}.desktop"
 cp "$ROOT/resources/meridian.desktop" "$APPDIR/${APP}.desktop"
-cp "$ROOT/resources/meridian.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/meridian.png"
+cp "$ROOT/resources/metainfo/io.github.dark1ltg.Meridian.metainfo.xml" \
+  "$APPDIR/usr/share/metainfo/io.github.dark1ltg.Meridian.metainfo.xml"
+# Stamp version into AppDir desktop + AppStream metadata only.
+sed -i "s/^X-AppImage-Version=.*/X-AppImage-Version=${APP_VERSION}/" \
+  "$APPDIR/usr/share/applications/${APP}.desktop" \
+  "$APPDIR/${APP}.desktop"
+TODAY="$(date -u +%Y-%m-%d)"
+sed -i "s/version=\"[0-9.]*\" date=\"[0-9-]*\"/version=\"${APP_VERSION}\" date=\"${TODAY}\"/" \
+  "$APPDIR/usr/share/metainfo/io.github.dark1ltg.Meridian.metainfo.xml"
+# Full hicolor icon theme (PNG sizes + scalable SVG) for menus / AppImageLauncher.
+cp -a "$ROOT/resources/icons/hicolor/." "$APPDIR/usr/share/icons/hicolor/"
 cp "$ROOT/resources/meridian.png" "$APPDIR/meridian.png"
 ln -sf meridian.png "$APPDIR/.DirIcon"
+install -m 0755 "$ROOT/packaging/desktop-integrate.sh" "$APPDIR/usr/bin/meridian-desktop-integrate"
 
 # --- Meridian GPL-3 + notices (required for binary redistribution) ---
 install -m 0644 "$ROOT/LICENSE" "$DOC_ROOT/LICENSE"
@@ -168,7 +204,12 @@ for f in \
   "$DOC_ROOT/COPYRIGHT.txt" \
   "$DOC_ROOT/THIRD_PARTY_NOTICES.txt" \
   "$DOC_ROOT/SOURCE_OFFER.txt" \
-  "$DOC_THIRD/qt-for-python-NOTICE.txt"
+  "$DOC_THIRD/qt-for-python-NOTICE.txt" \
+  "$APPDIR/usr/share/applications/${APP}.desktop" \
+  "$APPDIR/usr/share/metainfo/io.github.dark1ltg.Meridian.metainfo.xml" \
+  "$APPDIR/usr/share/icons/hicolor/256x256/apps/meridian.png" \
+  "$APPDIR/usr/share/icons/hicolor/scalable/apps/meridian.svg" \
+  "$APPDIR/usr/bin/meridian-desktop-integrate"
 do
   if [[ ! -f "$f" ]]; then
     echo "ERROR: missing documentation file in AppDir: $f" >&2
@@ -192,9 +233,33 @@ export MERIDIAN_FONTS_DIR="${HERE}/usr/share/fonts/truetype/meridian"
 export QT_PLUGIN_PATH="${HERE}/usr/bin/PySide6/Qt/plugins:${QT_PLUGIN_PATH:-}"
 export QT_QPA_PLATFORM_PLUGIN_PATH="${HERE}/usr/bin/PySide6/Qt/plugins/platforms"
 export QT_MEDIA_BACKEND="${QT_MEDIA_BACKEND:-ffmpeg}"
+
+case "${1:-}" in
+  --install|install)
+    exec "${HERE}/usr/bin/meridian-desktop-integrate" install
+    ;;
+  --uninstall|uninstall|--remove|remove)
+    exec "${HERE}/usr/bin/meridian-desktop-integrate" uninstall
+    ;;
+  --help|-h)
+    cat <<'HELP'
+Meridian — offline mood-map music player
+
+Usage:
+  Meridian.AppImage              Launch the app
+  Meridian.AppImage --install    Add menu entry + icons (like a normal app)
+  Meridian.AppImage --uninstall  Remove menu entry + icons
+  Meridian.AppImage --help       Show this help
+
+Host tip: install ffmpeg for mood analysis.
+HELP
+    exit 0
+    ;;
+esac
+
 exec "${HERE}/usr/bin/Meridian" "$@"
 EOF
-chmod +x "$APPDIR/AppRun" "$APPDIR/usr/bin/Meridian"
+chmod +x "$APPDIR/AppRun" "$APPDIR/usr/bin/Meridian" "$APPDIR/usr/bin/meridian-desktop-integrate"
 
 mkdir -p "$TOOLS"
 TOOL="$TOOLS/appimagetool-${ARCH}.AppImage"
@@ -210,5 +275,6 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 "$TOOL" "$APPDIR" "$DIST/${APP}-${ARCH}.AppImage"
 chmod +x "$DIST/${APP}-${ARCH}.AppImage"
 echo "Built $DIST/${APP}-${ARCH}.AppImage"
+echo "Desktop:   ${DIST}/${APP}-${ARCH}.AppImage --install"
 echo "Licences:  usr/share/doc/meridian/  (+ LICENSE at AppDir root)"
 echo "Fonts/UFL: usr/share/fonts/truetype/meridian/"

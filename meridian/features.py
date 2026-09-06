@@ -669,60 +669,30 @@ def mood_confidence(
     keyword_hit: bool = False,
     weak_tags: bool = False,
     jitter: bool = False,
+    variation: float = 0.0,
+    flux: float | None = None,
+    onset_consistency: float | None = None,
 ) -> tuple[float, str]:
     """Graduated placement confidence in 0..1 plus a short evidence note for tooltips."""
-    score = 0.0
-    reasons: list[str] = []
-    if tag_key:
-        # Seed-only genre is weaker than genre confirmed by PCM.
-        score += 0.40 if pcm_ok else 0.30
-        reasons.append(f"tag:{tag_key}")
-    if path_key:
-        if tag_key:
-            if _genre_pair_conflict(tag_key, path_key):
-                score -= 0.10
-                reasons.append("path conflict")
-            else:
-                score += 0.08
-                reasons.append("path agrees")
-        else:
-            score += 0.12 if pcm_ok else 0.15
-            reasons.append(f"path:{path_key}")
-    if pcm_ok:
-        if pcm_fallback or pcm_unstable:
-            score += 0.12
-            reasons.append("PCM weak" if pcm_unstable else "PCM fallback")
-        elif tag_key or path_key:
-            score += 0.30
-            reasons.append("PCM")
-        else:
-            # PCM-only placements are real mid-tier evidence, not "full trust".
-            score += 0.50
-            reasons.append("PCM only")
-    if bpm_conflict:
-        # Tag vs detected tempo disagree — flag only, no BPM credit (C3).
-        score -= 0.04
-        reasons.append("BPM conflict")
-    elif bpm_ok:
-        score += 0.08
-        reasons.append("BPM")
-    if replaygain:
-        score += 0.04
-        reasons.append("ReplayGain")
-    if keyword_hit:
-        score += 0.03
-        reasons.append("keywords")
-    if weak_tags:
-        score -= 0.08
-        reasons.append("weak-tag format")
-    if jitter or (not pcm_ok and not tag_key and not path_key):
-        score = min(score, 0.20)
-        if jitter:
-            reasons.append("jitter")
-        elif not reasons:
-            reasons.append("no evidence")
-    score = float(np.clip(score, 0.0, 1.0))
-    return score, " · ".join(reasons)
+    from meridian.acoustic import confidence_from_evidence
+
+    return confidence_from_evidence(
+        tag_key=tag_key,
+        path_key=path_key,
+        pcm_ok=pcm_ok,
+        pcm_fallback=pcm_fallback,
+        pcm_unstable=pcm_unstable,
+        bpm_ok=bpm_ok,
+        bpm_conflict=bpm_conflict,
+        replaygain=replaygain,
+        keyword_hit=keyword_hit,
+        weak_tags=weak_tags,
+        jitter=jitter,
+        variation=variation,
+        flux=flux,
+        onset_consistency=onset_consistency,
+        genre_conflict=_genre_pair_conflict(tag_key, path_key),
+    )
 
 
 def confidence_low_trust(confidence: float) -> bool:
@@ -732,36 +702,10 @@ def confidence_low_trust(confidence: float) -> bool:
 
 def _aubio_rhythm(pcm: np.ndarray, samplerate: int = 11025) -> tuple[float | None, float]:
     """Return (bpm_or_None, kinetic_from_onsets in 0..1). Soft-fails if aubio is missing."""
-    try:
-        import aubio
-    except ImportError:
-        return None, 0.5
+    from meridian.acoustic import onset_stats
 
-    win_s = 512
-    hop_s = 256
-    if pcm.size < hop_s * 4:
-        return None, 0.5
-
-    mono = np.ascontiguousarray(pcm, dtype=np.float32)
-    tempo_o = aubio.tempo("default", win_s, hop_s, samplerate)
-    onset_o = aubio.onset("default", win_s, hop_s, samplerate)
-    onsets = 0
-    for i in range(0, mono.size - hop_s + 1, hop_s):
-        frame = mono[i : i + hop_s]
-        if onset_o(frame):
-            onsets += 1
-        tempo_o(frame)
-
-    duration_s = max(mono.size / float(samplerate), 1e-3)
-    onset_rate = onsets / duration_s
-    kinetic = float(np.clip((onset_rate - 0.35) / 3.4, 0.05, 0.95))
-
-    bpm = float(tempo_o.get_bpm())
-    if not np.isfinite(bpm) or bpm < 40.0 or bpm > 220.0:
-        bpm_out: float | None = None
-    else:
-        bpm_out = bpm
-    return bpm_out, kinetic
+    bpm, stats = onset_stats(pcm, samplerate)
+    return bpm, float(stats["kinetic"])
 
 
 def _bpm_nudge(energy: float, out_bpm: float | None, *, soft: bool = False) -> float:
@@ -774,102 +718,33 @@ def _bpm_nudge(energy: float, out_bpm: float | None, *, soft: bool = False) -> f
 
 def _trim_silence(pcm: np.ndarray, floor: float = 0.012) -> np.ndarray:
     """Drop leading/trailing near-silence so RMS/crest aren't skewed."""
-    if pcm.size < 4096:
-        return pcm
-    abs_p = np.abs(pcm)
-    peak = float(np.max(abs_p) + 1e-12)
-    thr = max(floor * peak, 1e-4)
-    idx = np.where(abs_p >= thr)[0]
-    if idx.size < 2048:
-        return pcm
-    return pcm[int(idx[0]) : int(idx[-1]) + 1]
+    from meridian.acoustic import trim_silence
+
+    return trim_silence(pcm, floor=floor)
 
 
 def _spectral_slice(
     pcm: np.ndarray, start: int, n: int, samplerate: int
 ) -> tuple[float, float, float]:
     """Return (bright, bass_share, flatness) for one window."""
-    end = min(start + n, pcm.size)
-    if end - start < n // 2:
-        start = max(0, pcm.size - n)
-        end = pcm.size
-    frame = pcm[start:end]
-    if frame.size < 64:
-        return 0.5, 0.35, 0.3
-    if frame.size < n:
-        pad = np.zeros(n, dtype=np.float32)
-        pad[: frame.size] = frame
-        frame = pad
-    else:
-        frame = frame[:n]
-    windowed = frame * np.hanning(frame.size)
-    spec = np.abs(np.fft.rfft(windowed)) + 1e-12
-    freqs = np.fft.rfftfreq(frame.size, 1.0 / samplerate)
-    denom = float(spec.sum()) + 1e-12
-    centroid = float((freqs * spec).sum() / denom)
-    bright = float(np.clip(centroid / 4200.0, 0.05, 0.95))
-    bass = float(np.clip(spec[freqs < 250.0].sum() / denom, 0.0, 1.0))
-    power = np.square(spec)
-    flatness = float(np.exp(np.mean(np.log(power))) / (float(np.mean(power)) + 1e-12))
-    flatness = float(np.clip(flatness, 0.0, 1.0))
+    from meridian.acoustic import spectral_slice
+
+    bright, bass, flatness, _bands, _c = spectral_slice(pcm, start, n, samplerate)
     return bright, bass, flatness
 
 
 def _pcm_mood_cues(
     pcm: np.ndarray, samplerate: int = 11025
-) -> tuple[float, float, float | None, bool]:
+) -> tuple[float, float, float | None, bool, object]:
     """Derive valence/energy cues from one already-decoded PCM buffer (no extra I/O).
 
-    Returns (valence, energy, bpm, unstable) where unstable means the two FFT
-    windows disagree strongly (weaker PCM evidence for confidence).
+    Returns (valence, energy, bpm, unstable, profile). Uses local windows inside
+    the existing decode only — no distributed track-wide sampling.
     """
-    pcm = _trim_silence(np.ascontiguousarray(pcm, dtype=np.float32))
-    rms = float(np.sqrt(np.mean(np.square(pcm))) + 1e-12)
-    energy_from_rms = float(np.clip(np.log10(rms * 40 + 1e-6) / 1.6 + 0.55, 0.04, 0.96))
+    from meridian.acoustic import build_profile
 
-    zcr = float(np.mean(np.abs(np.diff(np.sign(pcm)))) / 2)
-    kinetic_zcr = float(np.clip(zcr * 3.2, 0.05, 0.95))
-
-    n = min(4096, int(pcm.size))
-    # Two windows along the same buffer (early + mid) — still one ffmpeg decode.
-    max_start = max(0, int(pcm.size) - n)
-    i0 = int(0.10 * max_start)
-    i1 = int(0.55 * max_start)
-    b0, bass0, flat0 = _spectral_slice(pcm, i0, n, samplerate)
-    b1, bass1, flat1 = _spectral_slice(pcm, i1, n, samplerate)
-    bright = 0.5 * (b0 + b1)
-    bass = 0.5 * (bass0 + bass1)
-    flatness = 0.5 * (flat0 + flat1)
-    unstable = abs(b0 - b1) > 0.28 or abs(bass0 - bass1) > 0.30
-
-    peak = float(np.max(np.abs(pcm)) + 1e-12)
-    crest = peak / rms
-    crest_n = float(np.clip((np.log10(crest) - 0.25) / 1.15, 0.05, 0.95))
-
-    detected_bpm, kinetic_onset = _aubio_rhythm(pcm, samplerate)
-    kinetic = float(np.clip(0.38 * kinetic_zcr + 0.62 * kinetic_onset, 0.05, 0.95))
-
-    # Tuned weights from synthetic bass-vs-noise checks + messy-library bias.
-    valence_pcm = float(
-        np.clip(
-            0.50 * bright
-            + 0.28 * (1.0 - bass)
-            + 0.22 * (1.0 - 0.85 * flatness),
-            0.03,
-            0.97,
-        )
-    )
-    energy_pcm = float(
-        np.clip(
-            0.30 * energy_from_rms
-            + 0.36 * kinetic
-            + 0.20 * crest_n
-            + 0.14 * bright,
-            0.03,
-            0.97,
-        )
-    )
-    return valence_pcm, energy_pcm, detected_bpm, bool(unstable)
+    profile = build_profile(pcm, samplerate=samplerate)
+    return profile.valence, profile.energy, profile.bpm, profile.unstable, profile
 
 
 def analyze_audio(
@@ -907,11 +782,12 @@ def analyze_audio(
     pcm_ok = False
     pcm_fallback = False
     pcm_unstable = False
+    profile = None
 
     pcm, pcm_fallback = _decode_pcm_with_fallback(path, duration_ms=duration_ms)
     if pcm is not None:
         pcm_ok = True
-        valence_pcm, energy_pcm, detected_bpm, pcm_unstable = _pcm_mood_cues(pcm)
+        valence_pcm, energy_pcm, detected_bpm, pcm_unstable, profile = _pcm_mood_cues(pcm)
 
         if weak_tags:
             # Dump formats: distrust tags; lean hard on waveform.
@@ -960,7 +836,28 @@ def analyze_audio(
             energy = float(np.clip(0.12 * seed.energy + 0.88 * energy_pcm, 0.03, 0.97))
 
     out_bpm = bpm if bpm else detected_bpm
-    energy = _bpm_nudge(energy, out_bpm, soft=(bpm is None and detected_bpm is not None))
+    # soft_pcm_only already trusts genre+BPM — soft nudge only, then re-clamp so
+    # tagged BPM cannot undo the ±SOFT_PCM_MAX_SHIFT energy envelope.
+    energy = _bpm_nudge(
+        energy,
+        out_bpm,
+        soft=soft_pcm_only or (bpm is None and detected_bpm is not None),
+    )
+    if soft_pcm_only and pcm_ok:
+        energy = float(
+            np.clip(
+                seed.energy
+                + float(
+                    np.clip(
+                        energy - seed.energy,
+                        -SOFT_PCM_MAX_SHIFT,
+                        SOFT_PCM_MAX_SHIFT,
+                    )
+                ),
+                0.03,
+                0.97,
+            )
+        )
 
     used_jitter = False
     if (
@@ -994,6 +891,9 @@ def analyze_audio(
         keyword_hit=seed.keyword_hit,
         weak_tags=weak_tags,
         jitter=used_jitter,
+        variation=float(getattr(profile, "variation", 0.0) or 0.0) if profile else 0.0,
+        flux=float(getattr(profile, "flux", 0.0)) if profile else None,
+        onset_consistency=float(getattr(profile, "onset_consistency", 0.5)) if profile else None,
     )
     return MoodResult(
         valence=float(valence),
