@@ -124,7 +124,7 @@ class MainWindow(QMainWindow):
         left_l = QVBoxLayout(left)
         left_l.setContentsMargins(0, 0, 0, 0)
         map_label = QLabel(
-            "MOOD MAP  ·  scroll = lens  ·  pinch / Ctrl+scroll = dive into a cluster  ·  drag empty = pan  ·  double-click empty = night sky"
+            "MOOD MAP  ·  drag a star to pin  ·  scroll = lens  ·  pinch / Ctrl+scroll = dive  ·  drag empty = pan  ·  double-click empty = night sky"
         )
         map_label.setObjectName("section")
         self.map = MoodMap()
