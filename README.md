@@ -20,80 +20,70 @@ Meridian is a local, offline Linux music player that charts every track as a sta
 Richer acoustic placement from the same decode budget (no extra FFmpeg regions):
 
 - Multi-band energy, spectral flux, RMS dynamics, and onset consistency/burstiness
-- Soft genre+BPM paths keep tagged tempo from blowing past the soft energy clamp
-- Quieter hiss stays near-neutral on Glow; bass darkness is counted once; brightness stays on Shadow↔Glow
+- Soft genre+BPM keeps tagged tempo inside the soft energy clamp
+- Quiet hiss stays near-neutral on Glow; bass darkness counted once; brightness stays on Shadow↔Glow
 - Relative spectral flux separates steady vs busy material without saturating
-- AppImage installs like a normal app: `--install` / `--uninstall` (menu entry + icons)
+- AppImage `--install` / `--uninstall` for a normal menu entry + icons
 
-Full notes: [CHANGELOG](CHANGELOG.md)
-
-## What's new in 1.3.4
-
-Queue and mood-map reliability release. Highlights:
-
-- Queue no longer freezes on missing/deleted files; failed analyzes cannot loop forever
-- Crossfade skip credits the track you left, not the one fading in
-- Lens ring matches the real selection (including mode radius); trackpad lens scroll works
-- Pinning stays stable during refreshes; double-click empty space returns to the full sky
-
-Full notes: [v1.3.4 release](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4) · [CHANGELOG](CHANGELOG.md)
+Earlier notes: [1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4) · [CHANGELOG](CHANGELOG.md)
 
 ## Why Meridian
 
 Most players ask *what album next*. Meridian asks *where do you want to be*.
 
-- **Shadow → Glow** — darker to brighter emotional color  
-- **Still → Kinetic** — calm to driving energy  
-- A **lens** you drag and resize (scroll) chooses the neighborhood the queue pulls from  
-- **Pinch** to dive from the full night sky into a local cluster; **Ctrl+scroll** zooms; drag empty space to pan; double-click empty to return to the sky  
-- Large libraries stay fluid — the sky is baked into a single starfield texture and composited with OpenGL when available  
-- Stars you move stay **pinned** so your sense of a track can override the analysis  
-- **Search** by title, artist, or album — pick a hit to snap the lens there and play  
-- Playback always **crossfades** (~3s) between tracks — queue advances, skips, matrix pulls, and double-clicks  
+- **Shadow → Glow** / **Still → Kinetic** — emotional color and energy on one map  
+- A **lens** you drag and resize (scroll) chooses the neighborhood the queue pulls from — modes can tighten or widen that radius  
+- **Pinch** / **Ctrl+scroll** zooms into a cluster; drag empty space to pan; double-click empty to return to the full sky  
+- Large libraries stay fluid — overview is one cached starfield (OpenGL when available)  
+- Stars you move stay **pinned**; analysis, album/artist smoothing, and listen nudges leave pins alone  
+- **Search** by title, artist, album, or path — pick a hit to snap the lens and play  
+- While something is already playing, advances **crossfade** (about 3s, shorter on short tracks)
 
-Under the hood, Meridian reads tags, samples short waveforms (via `ffmpeg`), and uses **aubio** for tempo and onset cues so placements stay musical without a cloud model. Stars show a **graduated confidence** score (and short evidence notes on hover); after analyze, moods get a light **library/genre percentile** nudge so neighbors rank relative to *your* collection — pins stay put.
+Under the hood: tags + a short mid-track waveform (`ffmpeg`) + optional **aubio** tempo/onset cues. Stars show **confidence** and a short evidence note on hover. After analyze, moods get a light **library/genre percentile** rescale so neighbors rank relative to *your* collection.
 
 ## How listening works
 
 ### Mood map
-Every track is a star on the map. Click a star to snap the lens; **drag a star to pin** its mood. Scroll to tighten or widen the lens (queue neighborhood) — the ring matches the mood-space area the queue uses (modes can scale that radius).
+Click a star to snap the lens; **drag a star to pin** its mood. Scroll resizes the lens (queue neighborhood). Pinch / Ctrl+scroll zooms — chrome fades, nearby tracks pick up glow and names. Drag empty space to pan. Double-click empty space for the full sky; double-click a tight star core to play.
 
-**Pinch** (or Ctrl+scroll) zooms from the full sky into a neighborhood — chrome fades, nearby tracks pick up glow and names, and zoom bias pulls toward clusters under your fingers. Drag empty space to pan. Double-click empty space to show the full map again (double-click a star core to play).
+From the full sky: **click** snaps the lens; **drag on the star** pins (empty space still pans). Zooming in loads interactive stars in the viewport.
 
-Thousands of tracks stay smooth because the overview is one cached starfield; zooming in loads interactive stars in the viewport. From the full sky: **click** a star to snap the lens; **drag on the star** to pin (empty space still pans).
+### Listen matrix
 
-### Eisenhower listen matrix
+Nearby tracks are sorted into four buckets by how close they are to the lens (and a bit of love/play history):
 
-| | Fits the lens *now* | Not urgent |
+| | Closer to the lens | Farther out |
 |---|---|---|
-| **Important** | **NOW** — play this | **DEEP** — keep close |
-| **Not important** | **FILL** — background pulse | **SHELF** — park it |
+| **More important** | **NOW** — play this | **DEEP** — keep close |
+| **Less important** | **FILL** — background pulse | **SHELF** — park it |
 
-Importance comes from mood fit, loves, and play history. Urgency comes from the lens, clock band, skips, and tracks you pull in by hand.
+Importance leans on mood fit, loves, and play history (skips lower importance). Urgency is mostly lens distance, clock band, mode energy bias, and tracks you pull in by hand. Matrix pulls play once, then drop.
 
 ### Context queue
-The queue replenishes from the lens, clock, and matrix when it runs dry. Hit **Play** (or Space) with nothing loaded and Meridian starts the context queue from the top. Modes shape the gravity:
+The queue replenishes from the lens, clock, and matrix when it runs dry. **Play** / Space with nothing loaded starts the queue from the top.
 
 | Mode | Intent |
 |---|---|
-| **Focus** | Steady mid-energy, fewer surprises |
-| **Wander** | Follow the map |
+| **Focus** | Steady mid-energy, fewer surprises (tighter lens) |
+| **Wander** | Follow the lens; let the map wander (wider lens) |
 | **Charge** | High kinetic bias |
 | **Dim** | Low light, low pulse — night gravity |
 
-Clock bands (**Dawn / Day / Dusk / Night**) nudge the target without overriding the lens you set.
+Clock bands (**Dawn / Day / Dusk / Night**) nudge the target without replacing the lens.
+
+Finishes and skips can gently nudge **unpinned** moods toward the current lens; pins stay put. After analyze, album/artist neighbors also get a light mood smooth before the library percentile pass.
 
 ### Search
-Need a known track without hunting the sky? Use the header search (or **Ctrl+F**). Type part of a title, artist, or album — results appear as you type. Choosing one **snaps the lens** to that track’s mood and starts playback, so the map and queue stay oriented around what you just found.
+Header search or **Ctrl+F**. Results as you type; choosing one snaps the lens and starts playback.
 
 ### Crossfade
-Natural advances, skips, and manual jumps always crossfade (~3s) between tracks — no toggle. Softens cuts while the queue and lens still decide *what* comes next.
+When you are already playing, queue advances, skips, and manual jumps crossfade (default ~3s; shorter when the track is short). The first start of a track is a clean cut — no toggle.
 
 ## Get Meridian
 
 ### AppImage (recommended)
 
-**Latest:** [Meridian 1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — download `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
+**Latest:** [Meridian 1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — `Meridian-x86_64.AppImage` from [Releases](https://github.com/dark1ltg/Meridian/releases/latest).
 
 ```bash
 chmod +x Meridian-x86_64.AppImage
@@ -103,7 +93,7 @@ chmod +x Meridian-x86_64.AppImage
 
 `--uninstall` removes the menu entry and icons. AppImageLauncher / appimaged also work if you prefer those.
 
-Install **`ffmpeg`** on the host for mood analysis. Playback uses Qt Multimedia. The mood map prefers desktop OpenGL (NVIDIA / AMD / Intel) and falls back to software if needed.
+Install host **`ffmpeg`** for mood analysis. Playback uses Qt Multimedia. The mood map prefers desktop OpenGL and falls back to software if needed.
 
 ### Run from source
 
@@ -117,28 +107,21 @@ bash scripts/run.sh
 
 `aubio` needs the native library (e.g. Arch/CachyOS: `sudo pacman -S aubio`). Without it, Meridian still runs; tempo/onset features are skipped.
 
-Add folders with **Add library folder**. `~/Music` is scanned on first launch if it exists. **Rescan** force-refreshes tags and re-analyzes every track in your library folders.
+**Add library folder** imports folders. `~/Music` is scanned on first launch if it exists. **Rescan** refreshes tags and re-analyzes every track in your library folders.
 
 ### Tests
 
 ```bash
 .venv/bin/python -m pip install -r requirements-dev.txt   # pytest (dev only)
-bash scripts/run_tests.sh -v     # pytest suite
-bash scripts/smoke_test.sh       # same checks, no pytest required
+bash scripts/run_tests.sh -v
+bash scripts/smoke_test.sh
 ```
 
 ### Build the AppImage yourself
 
 ```bash
 bash packaging/build-appimage.sh
-```
-
-Output: `dist/Meridian-$(uname -m).AppImage`
-
-Then optionally:
-
-```bash
-./dist/Meridian-$(uname -m).AppImage --install
+./dist/Meridian-$(uname -m).AppImage --install   # optional
 ```
 
 ## Shortcuts
@@ -146,13 +129,13 @@ Then optionally:
 | Key | Action |
 |---|---|
 | Space / Play | Play / pause — or start the context queue if nothing is loaded |
-| Ctrl+F | Focus search (title, artist, album) |
+| Ctrl+F | Focus search (title, artist, album, path) |
 | Ctrl+Left / Ctrl+Right | Previous / next |
 | Double-click star, matrix row, or queue row | Play |
 | Pinch / Ctrl+scroll on map | Zoom night sky ↔ cluster |
 | Scroll on map | Resize lens |
 | Double-click empty map | Reset to full sky |
-| Double-click star (or tight sky core) | Play that track |
+| Double-click star (tight core) | Play that track |
 | Heart (transport) | Mark a track important |
 
 ## License
@@ -162,6 +145,6 @@ See [LICENSE](LICENSE) / [COPYING](COPYING).
 
 Release history: [CHANGELOG.md](CHANGELOG.md) · [GitHub Releases](https://github.com/dark1ltg/Meridian/releases/latest)
 
-Third-party components are listed in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).  
+Third-party components: [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).  
 Ubuntu fonts ship under the Ubuntu Font Licence 1.0 in `resources/fonts/`.  
-AppImage builds include these texts under `usr/share/doc/meridian/` with [SOURCE_OFFER.txt](SOURCE_OFFER.txt).
+AppImage builds include these under `usr/share/doc/meridian/` with [SOURCE_OFFER.txt](SOURCE_OFFER.txt).
