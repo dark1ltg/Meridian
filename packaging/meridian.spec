@@ -4,11 +4,33 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 datas, binaries, hiddenimports = [], [], []
+
+
+def _is_dev_or_test_path(path: str) -> bool:
+    s = path.replace("\\", "/")
+    name = Path(s).name
+    return (
+        "/tests/" in s
+        or s.endswith("/tests")
+        or "/pytest/" in s
+        or name in {"pytest", "py", "pluggy", "iniconfig"}
+        or "pytest" in name
+        or name == "conftest.py"
+    )
+
+
 for pkg in ("mutagen", "numpy", "aubio"):
     d, b, h = collect_all(pkg)
-    datas += d
-    binaries += b
-    hiddenimports += h
+    datas += [item for item in d if not _is_dev_or_test_path(str(item[0]))]
+    binaries += [item for item in b if not _is_dev_or_test_path(str(item[0]))]
+    hiddenimports += [
+        name
+        for name in h
+        if ".tests" not in name
+        and "pytest" not in name
+        and not name.endswith(".conftest")
+        and "conftest" not in name.split(".")
+    ]
 
 root = Path(SPECPATH).resolve().parent
 datas += collect_data_files("PySide6", includes=["Qt/plugins/**"])
@@ -41,6 +63,20 @@ a = Analysis(
     excludes=[
         "tkinter",
         "matplotlib",
+        "pytest",
+        "py",
+        "pluggy",
+        "iniconfig",
+        "numpy.f2py.tests",
+        "numpy.tests",
+        "numpy.typing.tests",
+        "numpy.lib.tests",
+        "numpy.random.tests",
+        "numpy.fft.tests",
+        "numpy.ma.tests",
+        "numpy.matrixlib.tests",
+        "numpy.polynomial.tests",
+        "numpy._pyinstaller.tests",
         "PySide6.Qt3DCore",
         "PySide6.Qt3DAnimation",
         "PySide6.Qt3DExtras",
