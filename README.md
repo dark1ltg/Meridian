@@ -93,7 +93,7 @@ chmod +x Meridian-x86_64.AppImage
 
 `--uninstall` removes the menu entry and icons. AppImageLauncher / appimaged also work if you prefer those.
 
-Install host **`ffmpeg`** for mood analysis. Playback uses Qt Multimedia. The mood map prefers desktop OpenGL and falls back to software if needed.
+Install host **`ffmpeg`** for mood analysis. For H.264 playback through Qt’s FFmpeg plugin, also install the system **`x264` / `libx264`** package (Meridian does not ship libx264). If that library is missing, Meridian warns at startup. Playback uses Qt Multimedia. The mood map prefers desktop OpenGL and falls back to software if needed.
 
 ### Run from source
 

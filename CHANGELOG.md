@@ -22,6 +22,9 @@ Richer acoustic mood cues from the existing single PCM decode (items 2–11; no 
 ### Desktop / AppImage
 - Freedesktop `.desktop`, hicolor icons (16–512 + SVG), AppStream metainfo
 - `Meridian-*.AppImage --install` / `--uninstall` registers a normal menu entry under `~/.local/share`
+- AppImage does not ship `libx264` (GPL-2.0-only); host `x264`/`libx264` is used for H.264 via Qt’s FFmpeg plugin
+- Startup warning when host `libx264` is missing under the FFmpeg media backend
+- Licence compliance pack: full LGPL-3/GPL texts for Qt, `BUILD_LIBRARIES.txt` inventory, expanded `SOURCE_OFFER` for bundled GPL libs
 
 ## [1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4) — 2026-09-06
 

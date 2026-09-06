@@ -104,6 +104,13 @@ class Player(QObject):
         if index != self._active and not self._crossfading:
             return
         err = self._decks[index].player.errorString() or "Playback failed"
+        try:
+            from meridian.host_deps import libx264_missing_status, should_warn_missing_libx264
+
+            if should_warn_missing_libx264():
+                err = f"{err} — {libx264_missing_status()}"
+        except Exception:
+            pass
         self.error_occurred.emit(err)
 
     @staticmethod

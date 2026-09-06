@@ -31,6 +31,11 @@ from meridian.context import (
     make_context,
     mode_bias,
 )
+from meridian.host_deps import (
+    libx264_missing_message,
+    libx264_missing_status,
+    should_warn_missing_libx264,
+)
 from meridian.library import Library
 from meridian.player import Player
 from meridian.queue_engine import Quadrant, QueuePlan, build_plan
@@ -83,6 +88,25 @@ class MainWindow(QMainWindow):
                 self.library.add_folder(str(music))
         self.refresh_plan()
         QTimer.singleShot(400, self.start_scan)
+        QTimer.singleShot(900, self._maybe_warn_libx264)
+
+    def _maybe_warn_libx264(self) -> None:
+        """AppImage keeps libx264 on the host — tell the user if playback may be broken."""
+        if not should_warn_missing_libx264():
+            return
+        self.status_label.setText(libx264_missing_status())
+        if self.settings.value("host/skip_libx264_warning", False, type=bool):
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("System library needed for playback")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(libx264_missing_message())
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dont = box.addButton("Don’t show again", QMessageBox.ButtonRole.AcceptRole)
+        box.exec()
+        if box.clickedButton() is dont:
+            self.settings.setValue("host/skip_libx264_warning", True)
 
     def _build(self) -> None:
         root = QWidget()

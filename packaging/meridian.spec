@@ -102,6 +102,16 @@ a = Analysis(
     ],
     noarchive=False,
 )
+
+# libx264 is typically GPL-2.0-only and must not be redistributed inside a
+# GPL-3.0-only Meridian AppImage. Leave it on the host; libavcodec will dlopen
+# the system soname at runtime when present.
+a.binaries = [
+    entry
+    for entry in a.binaries
+    if not Path(str(entry[0])).name.startswith("libx264.so")
+]
+
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,

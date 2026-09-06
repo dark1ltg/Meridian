@@ -111,6 +111,22 @@ mkdir -p "$APPDIR/usr/share/icons/hicolor"
 mkdir -p "$FONTS_DST" "$DOC_FONTS" "$DOC_THIRD"
 
 cp -a "$DIST/$APP/." "$APPDIR/usr/bin/"
+
+# GPL-2.0-only x264 must not ship inside the GPL-3 AppImage. Use the host
+# libx264 (same soname) so Qt's bundled libavcodec can resolve it at runtime.
+mapfile -t _x264_hits < <(find "$APPDIR" -name 'libx264.so*' 2>/dev/null || true)
+if ((${#_x264_hits[@]})); then
+  printf 'Removing bundled libx264 (use system library):\n'
+  printf '  %s\n' "${_x264_hits[@]}"
+  rm -f "${_x264_hits[@]}"
+fi
+if find "$APPDIR" -name 'libx264.so*' 2>/dev/null | grep -q .; then
+  echo "ERROR: libx264 still present under AppDir after purge" >&2
+  find "$APPDIR" -name 'libx264.so*' >&2
+  exit 1
+fi
+echo "OK: no bundled libx264 (host library required for H.264 via FFmpeg plugin)"
+
 cp "$ROOT/resources/meridian.desktop" "$APPDIR/usr/share/applications/${APP}.desktop"
 cp "$ROOT/resources/meridian.desktop" "$APPDIR/${APP}.desktop"
 cp "$ROOT/resources/metainfo/io.github.dark1ltg.Meridian.metainfo.xml" \
@@ -165,6 +181,20 @@ if [[ ! -d "$DOC_THIRD/pyside6" ]] || [[ -z "$(ls -A "$DOC_THIRD/pyside6" 2>/dev
   install -m 0644 "$LICENSE_FALLBACKS/qt-for-python-NOTICE.txt" "$DOC_THIRD/pyside6/NOTICE.txt"
 fi
 
+# Full LGPL/GPL texts + inventory of bundled native libs (compliance minimum).
+SPDX_DIR="$ROOT/resources/licenses/spdx"
+if [[ ! -f "$SPDX_DIR/LGPL-3.0-only.txt" ]]; then
+  echo "ERROR: missing $SPDX_DIR/LGPL-3.0-only.txt" >&2
+  exit 1
+fi
+run_py "$ROOT/packaging/collect_bundled_licenses.py" "$APPDIR" "$SPDX_DIR"
+install -m 0644 "$LICENSE_FALLBACKS/qt-for-python-NOTICE.txt" "$DOC_THIRD/qt-for-python-NOTICE.txt"
+if [[ ! -f "$DOC_THIRD/qt6/LGPL-3.0-only.txt" ]] || [[ ! -f "$DOC_THIRD/BUILD_LIBRARIES.txt" ]]; then
+  echo "ERROR: bundled licence collection incomplete under $DOC_THIRD" >&2
+  ls -la "$DOC_THIRD" >&2 || true
+  exit 1
+fi
+
 # Install Font Software as ordinary files in the AppImage filesystem.
 # Do not place these under the PyInstaller onedir (usr/bin) or embed in the EXE.
 install -m 0644 "$FONTS_SRC/"*.ttf "$FONTS_DST/"
@@ -209,7 +239,10 @@ for f in \
   "$APPDIR/usr/share/metainfo/io.github.dark1ltg.Meridian.metainfo.xml" \
   "$APPDIR/usr/share/icons/hicolor/256x256/apps/meridian.png" \
   "$APPDIR/usr/share/icons/hicolor/scalable/apps/meridian.svg" \
-  "$APPDIR/usr/bin/meridian-desktop-integrate"
+  "$APPDIR/usr/bin/meridian-desktop-integrate" \
+  "$DOC_THIRD/qt6/LGPL-3.0-only.txt" \
+  "$DOC_THIRD/BUILD_LIBRARIES.txt" \
+  "$DOC_ROOT/SOURCE_OFFER.txt"
 do
   if [[ ! -f "$f" ]]; then
     echo "ERROR: missing documentation file in AppDir: $f" >&2
