@@ -17,13 +17,16 @@ Meridian is a local, offline Linux music player that charts every track as a sta
 
 ## What's new in 1.3.5
 
-Richer acoustic placement from the same decode budget (no extra FFmpeg regions):
+Richer acoustic placement from the same decode budget, desktop install, and a reliability pass (AppImage refreshed 2026-09-07):
 
 - Multi-band energy, spectral flux, RMS dynamics, and onset consistency/burstiness
 - Soft genre+BPM keeps tagged tempo inside the soft energy clamp
 - Quiet hiss stays near-neutral on Glow; bass darkness counted once; brightness stays on Shadow↔Glow
 - Relative spectral flux separates steady vs busy material without saturating
-- AppImage `--install` / `--uninstall` for a normal menu entry + icons
+- Safer scan (no empty/partial wipe; out-of-root symlinks ignored; failed scan stays failed)
+- Honest crossfade play/skip credits; tiny libraries don’t loop the just-finished track
+- Lens drag and pin update the map without rebuilding the context queue mid-listen
+- AppImage `--install` / `--uninstall`; sticky host `libx264` tip when H.264 may fail
 
 Earlier notes: [1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4) · [CHANGELOG](CHANGELOG.md)
 
@@ -44,9 +47,9 @@ Under the hood: tags + a short mid-track waveform (`ffmpeg`) + optional **aubio*
 ## How listening works
 
 ### Mood map
-Click a star to snap the lens; **drag a star to pin** its mood. Scroll resizes the lens (queue neighborhood). Pinch / Ctrl+scroll zooms — chrome fades, nearby tracks pick up glow and names. Drag empty space to pan. Double-click empty space for the full sky; double-click a tight star core to play.
+Click a star to snap the lens; **drag a star to pin** its mood (pin refreshes the map without wiping the context queue). Scroll resizes the lens (queue neighborhood). Pinch / Ctrl+scroll zooms — chrome fades, nearby tracks pick up glow and names. Drag empty space to pan. Double-click empty space for the full sky; double-click a tight star core to play.
 
-From the full sky: **click** snaps the lens; **drag on the star** pins (empty space still pans). Zooming in loads interactive stars in the viewport.
+From the full sky: **click** snaps the lens; **drag on the star** pins (empty space still pans). Zooming in loads interactive stars in the viewport. Dragging a star that disappears mid-refresh no longer crashes the map.
 
 ### Listen matrix
 
@@ -60,7 +63,7 @@ Nearby tracks are sorted into four buckets by how close they are to the lens (an
 Importance leans on mood fit, loves, and play history (skips lower importance). Urgency is mostly lens distance, clock band, mode energy bias, and tracks you pull in by hand. Matrix pulls play once, then drop.
 
 ### Context queue
-The queue replenishes from the lens, clock, and matrix when it runs dry. **Play** / Space with nothing loaded starts the queue from the top.
+The queue replenishes from the lens, clock, and matrix when it runs dry. **Play** / Space with nothing loaded starts the queue from the top. Moving the lens (or pinning a star) updates ranking without rebuilding the queue mid-listen. When the queue refills, the track that just finished is kept out so tiny libraries don’t hard-cut restart the same song.
 
 | Mode | Intent |
 |---|---|
@@ -77,7 +80,7 @@ Finishes and skips can gently nudge **unpinned** moods toward the current lens; 
 Header search or **Ctrl+F**. Results as you type; choosing one snaps the lens and starts playback.
 
 ### Crossfade
-When you are already playing, queue advances, skips, and manual jumps crossfade (default ~3s; shorter when the track is short). The first start of a track is a clean cut — no toggle.
+When you are already playing, queue advances, skips, and manual jumps crossfade (default ~3s; shorter when the track is short). The first start of a track is a clean cut — no toggle. Play counts land after a hard cut or when a fade settles; Next/Prev during a fade credit the outgoing track. Short tracks that end during a fade still advance afterward.
 
 ## Get Meridian
 
@@ -93,7 +96,7 @@ chmod +x Meridian-x86_64.AppImage
 
 `--uninstall` removes the menu entry and icons. AppImageLauncher / appimaged also work if you prefer those.
 
-Install host **`ffmpeg`** for mood analysis. For H.264 playback through Qt’s FFmpeg plugin, also install the system **`x264` / `libx264`** package (Meridian does not ship libx264). If that library is missing, Meridian warns at startup. Playback uses Qt Multimedia. The mood map prefers desktop OpenGL and falls back to software if needed.
+Install host **`ffmpeg`** for mood analysis. For H.264 playback through Qt’s FFmpeg plugin, also install the system **`x264` / `libx264`** package (Meridian does not ship libx264). If that library is missing, Meridian warns at startup and keeps a sticky tip in the status line so scan/analyze messages don’t bury it. Playback uses Qt Multimedia. The mood map prefers desktop OpenGL and falls back to software if needed.
 
 ### Run from source
 
@@ -107,7 +110,7 @@ bash scripts/run.sh
 
 `aubio` needs the native library (e.g. Arch/CachyOS: `sudo pacman -S aubio`). Without it, Meridian still runs; tempo/onset features are skipped.
 
-**Add library folder** imports folders. `~/Music` is scanned on first launch if it exists. **Rescan** refreshes tags and re-analyzes every track in your library folders.
+**Add library folder** imports folders. `~/Music` is scanned on first launch if it exists. **Rescan** refreshes tags and re-analyzes every track in your library folders. Scans never wipe the library on empty or half-readable folders; only fully walked roots prune missing files. Symlinks that point outside a library root are ignored.
 
 ### Tests
 

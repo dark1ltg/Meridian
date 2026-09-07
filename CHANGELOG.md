@@ -2,9 +2,9 @@
 
 All notable Meridian releases are listed here. Download AppImages from [Releases](https://github.com/dark1ltg/Meridian/releases).
 
-## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06
+## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-07)
 
-Richer acoustic mood cues from the existing single PCM decode (items 2–11; no distributed track sampling), placement fixes, and desktop integration.
+Richer acoustic mood cues from the existing single PCM decode, placement fixes, desktop integration, and a reliability pass for scan, queue, crossfade accounting, and quit.
 
 ### Acoustic profile
 - Multi-band frequency energy and spectral flux from the current FFT/PCM path
@@ -19,11 +19,28 @@ Richer acoustic mood cues from the existing single PCM decode (items 2–11; no 
 - Brightness contributes to Shadow↔Glow only (not Still↔Kinetic)
 - Relative spectral flux with log mapping — steady / evolving / noisy stay distinct
 
+### Library scan safety
+- Empty or missing folders no longer wipe the library (`delete_missing` only after a successful walk finds audio)
+- Partial / unreadable trees are not pruned — only fully walked roots are eligible for cleanup
+- File symlinks that resolve outside a library root are ignored; symlink directories are not descended into
+- Failed scans no longer look like success (UI does not start analyze on failure)
+
+### Queue & playback reliability
+- Lens drag and star pin refresh the map **without** rebuilding the context queue mid-listen
+- Tiny libraries no longer hard-cut restart the track that just finished (hard-exclude on replenish)
+- Short tracks that end during a crossfade still advance when the fade settles
+- Empty replenish after nearly-finished no longer leaves playback permanently stuck
+- When the playing track is absent from a rebuilt queue, Next lands on the first row (not the second)
+- Play credit is deferred until a hard cut or a settled fade; skip/prev during any fade credit the outgoing track
+- Pause / seek / stop mid-fade still commits the incoming play; jumps mid-fade clear stale finish nudges
+- Failed analyze is denylisted in-process (with DB retries) so a poison file cannot loop the worker
+
 ### Desktop / AppImage
 - Freedesktop `.desktop`, hicolor icons (16–512 + SVG), AppStream metainfo
 - `Meridian-*.AppImage --install` / `--uninstall` registers a normal menu entry under `~/.local/share`
 - AppImage does not ship `libx264` (GPL-2.0-only); host `x264`/`libx264` is used for H.264 via Qt’s FFmpeg plugin
-- Startup warning when host `libx264` is missing under the FFmpeg media backend
+- Sticky startup / status tip when host `libx264` is missing under the FFmpeg media backend
+- Safer quit: longer waits for scan/analyze; do not `deleteLater` live threads; do not close SQLite under workers that outlive the wait
 - Licence compliance pack: full LGPL-3/GPL texts for Qt, `BUILD_LIBRARIES.txt` inventory, expanded `SOURCE_OFFER` for bundled GPL libs
 
 ## [1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4) — 2026-09-06
