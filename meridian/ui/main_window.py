@@ -71,8 +71,13 @@ class MainWindow(QMainWindow):
         self._analyze_worker = None
         self._analyze_gen = 0
         self._closing = False
-        self._pending_finish_nudge: int | None = None
         self._pending_play_credit: int | None = None
+        # Outgoing track of the active crossfade (for Next/Prev / settle credit).
+        self._crossfade_outgoing_id: int | None = None
+        # When True, natural fade settle finish-nudges `_crossfade_outgoing_id`.
+        # User jumps credit immediately instead (skip vs finish from position).
+        self._outgoing_settle_finish: bool = False
+        self._expect_natural_advance: bool = False
         self._host_codec_sticky = False
         self._duration = 0
         self._rebuild_lock = False
@@ -611,20 +616,32 @@ class MainWindow(QMainWindow):
         self._rebuild_lock = True
         outgoing = self.player.current
         outgoing_id = outgoing.id if outgoing is not None else None
-        # Interrupting an in-flight fade: credit the outgoing finish if we had one.
-        if self.player.is_crossfading() and self._pending_finish_nudge is not None:
-            finished = self._pending_finish_nudge
-            self._pending_finish_nudge = None
-            if finished != track_id:
-                self._listen_nudge(finished, skipped=False)
+        outgoing_pos = int(self.player.backend.position() or 0) if outgoing is not None else 0
+        natural_advance = self._expect_natural_advance
+        self._expect_natural_advance = False
+
+        # Interrupting an in-flight fade: settle credit for the prior outgoing once.
+        if self.player.is_crossfading() and self._crossfade_outgoing_id is not None:
+            prior = self._crossfade_outgoing_id
+            settle_finish = self._outgoing_settle_finish
+            self._clear_crossfade_credit()
+            if prior != track_id and settle_finish:
+                self._listen_nudge(prior, skipped=False)
+
         self._pending_play_credit = None
         self.player.play_track(track)
         if self.player.is_crossfading() and outgoing_id is not None and outgoing_id != track_id:
-            # Any crossfade (natural or jump): credit skip/finish to the outgoing track.
-            self._pending_finish_nudge = outgoing_id
             self._pending_play_credit = track_id
+            self._crossfade_outgoing_id = outgoing_id
+            if natural_advance:
+                # End-of-track auto-advance: finish-nudge outgoing when the fade lands.
+                self._outgoing_settle_finish = True
+            else:
+                # Map / matrix / search jump: credit abandon now (same 8s rule as Next).
+                self._outgoing_settle_finish = False
+                self._credit_listen(outgoing_id, position_ms=outgoing_pos)
         else:
-            self._pending_finish_nudge = None
+            self._clear_crossfade_credit()
             self._commit_play(track_id)
         self.transport.set_track(track.short_title, f"{track.artist}  ·  {track.album or 'Single'}", track.loved)
         self._rebuild_lock = False
@@ -632,10 +649,40 @@ class MainWindow(QMainWindow):
             self.map.set_tracks(self.plan.ranked, track_id)
         self._fill_queue()
 
+    def _clear_crossfade_credit(self) -> None:
+        self._crossfade_outgoing_id = None
+        self._outgoing_settle_finish = False
+        self._pending_play_credit = None
+
+    def _credit_listen(self, track_id: int, *, position_ms: int) -> None:
+        """Skip vs finish from how far the listener got (matches Next’s 8s rule)."""
+        skipped = position_ms < 8000
+        if skipped:
+            self.library.record_skip(track_id)
+            self.skips_window.append(time())
+        self._listen_nudge(track_id, skipped=skipped)
+
     def _commit_play(self, track_id: int) -> None:
         self.library.record_play(track_id, time())
         self.played_history.append(track_id)
         self.played_history = self.played_history[-48:]
+
+    def _play_restart(self, track_id: int) -> None:
+        """Hard-restart a track without bumping play_count (Prev during crossfade)."""
+        track = self.library.get(track_id)
+        if track is None or not Path(track.path).exists():
+            return
+        self._rebuild_lock = True
+        self._clear_crossfade_credit()
+        self._expect_natural_advance = False
+        # Stop so play_track hard-cuts instead of fading and re-arming credit.
+        self.player.stop()
+        self.player.play_track(track)
+        self.transport.set_track(track.short_title, f"{track.artist}  ·  {track.album or 'Single'}", track.loved)
+        self._rebuild_lock = False
+        if self.plan:
+            self.map.set_tracks(self.plan.ranked, track_id)
+        self._fill_queue()
 
     def _skip_unplayable(self, track_id: int) -> int | None:
         """Drop a missing/deleted id from the queue and return the next candidate."""
@@ -661,16 +708,15 @@ class MainWindow(QMainWindow):
     def play_next(self) -> None:
         # During crossfade, current is already the incoming track at ~0ms.
         # Credit the skip to the outgoing track, not the new one.
-        if self.player.is_crossfading() and self._pending_finish_nudge is not None:
-            outgoing = self._pending_finish_nudge
-            self._pending_finish_nudge = None
-            self._pending_play_credit = None  # abandon uncommitted incoming play
+        if self.player.is_crossfading() and self._crossfade_outgoing_id is not None:
+            outgoing = self._crossfade_outgoing_id
+            self._clear_crossfade_credit()
             self.library.record_skip(outgoing)
             self.skips_window.append(time())
             self._listen_nudge(outgoing, skipped=True)
             self._advance_queue(skipped=True)
             return
-        self._pending_finish_nudge = None
+        self._clear_crossfade_credit()
         skipped = bool(self.player.current and self.player.backend.position() < 8000)
         if self.player.current:
             if skipped:
@@ -680,18 +726,20 @@ class MainWindow(QMainWindow):
         self._advance_queue(skipped=skipped)
 
     def play_prev(self) -> None:
-        # During crossfade, restore the outgoing song and keep its finish credit.
-        if self.player.is_crossfading() and self._pending_finish_nudge is not None:
-            outgoing = self._pending_finish_nudge
-            self._pending_finish_nudge = None
-            self._pending_play_credit = None
-            self._listen_nudge(outgoing, skipped=False)
+        # During crossfade, restore the outgoing song without double play_count or
+        # finish-nudging the barely-heard incoming track.
+        if self.player.is_crossfading() and self._crossfade_outgoing_id is not None:
+            outgoing = self._crossfade_outgoing_id
+            settle_finish = self._outgoing_settle_finish
+            self._clear_crossfade_credit()
+            if settle_finish:
+                self._listen_nudge(outgoing, skipped=False)
             if outgoing in self.session_queue:
                 self.queue_index = self.session_queue.index(outgoing)
-            self.play_id(outgoing)
+            self._play_restart(outgoing)
             return
-        self._pending_finish_nudge = None
-        self._pending_play_credit = None
+        self._clear_crossfade_credit()
+        self._expect_natural_advance = False
         if not self.session_queue:
             self._replenish_queue()
         if not self.session_queue:
@@ -700,18 +748,15 @@ class MainWindow(QMainWindow):
         self.play_id(self.session_queue[self.queue_index])
 
     def _nearly_finished(self) -> None:
-        # Arm crossfade / advance now; credit the listen when the fade settles.
+        # Arm crossfade / advance now; finish-credit the outgoing when the fade settles.
+        self._expect_natural_advance = True
         self._advance_queue(skipped=False)
 
     def _crossfade_settled(self, natural: bool) -> None:
-        if natural:
-            tid = self._pending_finish_nudge
-            self._pending_finish_nudge = None
-            if tid is not None:
-                self._listen_nudge(tid, skipped=False)
-        else:
-            # Pause/seek/stop/jump interrupted the fade — don't finish-nudge outgoing.
-            self._pending_finish_nudge = None
+        if natural and self._outgoing_settle_finish and self._crossfade_outgoing_id is not None:
+            self._listen_nudge(self._crossfade_outgoing_id, skipped=False)
+        self._crossfade_outgoing_id = None
+        self._outgoing_settle_finish = False
         credit = self._pending_play_credit
         self._pending_play_credit = None
         if (
@@ -723,8 +768,8 @@ class MainWindow(QMainWindow):
 
     def _track_finished_hard(self) -> None:
         # Short tracks (no nearly-finished arm): nudge + advance together.
-        self._pending_finish_nudge = None
-        self._pending_play_credit = None
+        self._clear_crossfade_credit()
+        self._expect_natural_advance = False
         if self.player.current:
             self._listen_nudge(self.player.current.id, skipped=False)
         self._advance_queue(skipped=False)
@@ -754,6 +799,7 @@ class MainWindow(QMainWindow):
             self._replenish_queue(avoid_id=current_id)
             self.queue_index = 0
         if not self.session_queue:
+            self._expect_natural_advance = False
             self.player.release_advance_lock()
             self._set_status("Context queue is empty — move the lens or add more music.")
             return
@@ -761,6 +807,7 @@ class MainWindow(QMainWindow):
         next_id = self.session_queue[self.queue_index]
         # Tiny libraries: never hard-cut restart the track that just ended.
         if not skipped and current_id is not None and next_id == current_id:
+            self._expect_natural_advance = False
             self.player.release_advance_lock()
             self._set_status("Only one playable track in range — waiting.")
             return
@@ -816,8 +863,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._closing = True
-        self._pending_finish_nudge = None
-        self._pending_play_credit = None
+        self._clear_crossfade_credit()
+        self._expect_natural_advance = False
         analyze_done = self._stop_analyze(wait_ms=25000)
         scan_done = self._cleanup_scan_thread(wait_ms=8000)
         # Never close SQLite under a live worker (timed-out abort path).

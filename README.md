@@ -17,15 +17,16 @@ Meridian is a local, offline Linux music player that charts every track as a sta
 
 ## What's new in 1.3.5
 
-Richer acoustic placement from the same decode budget, desktop install, and a reliability pass (AppImage refreshed 2026-09-07):
+Richer acoustic placement from the same decode budget, desktop install, and reliability passes (AppImage refreshed 2026-09-07):
 
 - Multi-band energy, spectral flux, RMS dynamics, and onset consistency/burstiness
 - Soft genre+BPM keeps tagged tempo inside the soft energy clamp
 - Quiet hiss stays near-neutral on Glow; bass darkness counted once; brightness stays on Shadow↔Glow
 - Relative spectral flux separates steady vs busy material without saturating
 - Safer scan (no empty/partial wipe; out-of-root symlinks ignored; failed scan stays failed)
-- Honest crossfade play/skip credits; tiny libraries don’t loop the just-finished track
-- Lens drag and pin update the map without rebuilding the context queue mid-listen
+- Honest crossfade play/skip credits (jumps use the same 8s rule as Next; Prev mid-fade doesn’t double-count)
+- Tiny libraries don’t loop the just-finished track; lens/pin don’t rebuild the queue mid-listen
+- Mood map: stars under the lens stay clickable; fewer full-sky rebakes; smoother pin / zoom / double-click
 - AppImage `--install` / `--uninstall`; sticky host `libx264` tip when H.264 may fail
 
 Earlier notes: [1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4) · [CHANGELOG](CHANGELOG.md)
@@ -47,9 +48,9 @@ Under the hood: tags + a short mid-track waveform (`ffmpeg`) + optional **aubio*
 ## How listening works
 
 ### Mood map
-Click a star to snap the lens; **drag a star to pin** its mood (pin refreshes the map without wiping the context queue). Scroll resizes the lens (queue neighborhood). Pinch / Ctrl+scroll zooms — chrome fades, nearby tracks pick up glow and names. Drag empty space to pan. Double-click empty space for the full sky; double-click a tight star core to play.
+Click a star to snap the lens; **drag a star to pin** its mood (pin refreshes the map without wiping the context queue). Stars under the lens stay clickable. Scroll resizes the lens (queue neighborhood). Pinch / Ctrl+scroll zooms — chrome fades, nearby tracks pick up glow and names. Drag empty space to pan. Double-click empty space for the full sky (without first snapping the lens); double-click a star body or title to play.
 
-From the full sky: **click** snaps the lens; **drag on the star** pins (empty space still pans). Zooming in loads interactive stars in the viewport. Dragging a star that disappears mid-refresh no longer crashes the map.
+From the full sky: **click** snaps the lens; **drag on the star** pins (empty space still pans, without a pre-pin viewport nudge). Zooming in loads interactive stars in the viewport; clicks on nearby baked dots still pick the nearest track. The overview starfield rebakes only when moods actually change.
 
 ### Listen matrix
 
@@ -80,7 +81,7 @@ Finishes and skips can gently nudge **unpinned** moods toward the current lens; 
 Header search or **Ctrl+F**. Results as you type; choosing one snaps the lens and starts playback.
 
 ### Crossfade
-When you are already playing, queue advances, skips, and manual jumps crossfade (default ~3s; shorter when the track is short). The first start of a track is a clean cut — no toggle. Play counts land after a hard cut or when a fade settles; Next/Prev during a fade credit the outgoing track. Short tracks that end during a fade still advance afterward.
+When you are already playing, queue advances, skips, and manual jumps crossfade (default ~3s; shorter when the track is short). The first start of a track is a clean cut — no toggle. Play counts land after a hard cut or when a fade settles; Next/Prev during a fade credit the outgoing track. Map / matrix / search jumps use the same early-skip rule as Next. Short tracks that end during a fade still advance afterward.
 
 ## Get Meridian
 

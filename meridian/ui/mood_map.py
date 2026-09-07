@@ -89,7 +89,8 @@ class TrackStar(QGraphicsEllipseItem):
 
         self._label = QGraphicsSimpleTextItem(self)
         self._label.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
-        self._label.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        # Accept clicks so double-click on the title still reaches the star.
+        self._label.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
         self._label.setZValue(30)
         self._label.setBrush(QBrush(QColor("#e8ecf7")))
         self._label.setFont(sans(10))
@@ -216,6 +217,12 @@ class TrackStar(QGraphicsEllipseItem):
             pos.setX(max(40.0, min(760.0, pos.x())))
             pos.setY(max(36.0, min(560.0, pos.y())))
             return pos
+        if (
+            change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged
+            and self._map is not None
+            and self._press_scene is not None
+        ):
+            self._map._update_drag_position(self.ranked.track.id, self.pos())
         return super().itemChange(change, value)
 
     def mousePressEvent(self, event) -> None:
@@ -247,7 +254,8 @@ class LensItem(QGraphicsEllipseItem):
         self.setPen(ring)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
-        self.setZValue(20)
+        # Below live stars (z≥7) so stars under the lens stay clickable / draggable.
+        self.setZValue(6)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
         self._map: MoodMap | None = None
         halo = QPen(QColor("#F4F1FF"), 3.7)
@@ -326,6 +334,14 @@ class MoodMap(QGraphicsView):
         self._sky_press_scene: QPointF | None = None
         self._sky_dragged = False
         self._sky_candidate_id: int | None = None
+        # Press on star core — wait for move before pan vs pin (avoids viewport nudge).
+        self._sky_defer_pan = False
+        self._field_sig: object | None = None
+        self._pending_snap_id: int | None = None
+        self._snap_timer = QTimer(self)
+        self._snap_timer.setSingleShot(True)
+        self._snap_timer.setInterval(220)
+        self._snap_timer.timeout.connect(self._flush_pending_snap)
         self._lod_timer = QTimer(self)
         self._lod_timer.setSingleShot(True)
         self._lod_timer.setInterval(LOD_DEFER_MS)
@@ -465,16 +481,45 @@ class MoodMap(QGraphicsView):
                 self._positions[tid] = pos
             elif self._sky_hold_id == tid:
                 self._sky_hold_id = None
+            elif self._sky_candidate_id == tid:
+                self._sky_candidate_id = None
+                self._sky_press_scene = None
+                self._sky_defer_pan = False
         self._rebuild_star_grid()
-        self._rebuild_starfield()
+        sig = self._field_signature()
+        if sig != self._field_sig:
+            self._field_sig = sig
+            self._rebuild_starfield()
         self._lod_band = -1
         self._sync_live_stars(force=True)
+
+    def _field_signature(self) -> object:
+        """Cheap fingerprint so play/nudge/lens refresh can skip a full rebake."""
+        parts: list[tuple] = []
+        for tid in sorted(self._ranked):
+            r = self._ranked[tid]
+            p = self._positions[tid]
+            conf = float(getattr(r.track, "mood_confidence", 0.5) or 0.5)
+            parts.append(
+                (
+                    tid,
+                    round(p.x(), 1),
+                    round(p.y(), 1),
+                    r.quadrant.value,
+                    bool(r.track.loved),
+                    bool(r.track.pinned),
+                    round(conf, 2),
+                )
+            )
+        return (self._current_id, tuple(parts))
 
     def _drag_locked_ids(self) -> set[int]:
         """Track ids currently being pressed/dragged — positions must not reset."""
         locked: set[int] = set()
         if self._sky_hold_id is not None:
             locked.add(self._sky_hold_id)
+        if self._sky_candidate_id is not None:
+            locked.add(self._sky_candidate_id)
         for tid, star in self._stars.items():
             if star._press_scene is not None:
                 locked.add(tid)
@@ -534,6 +579,7 @@ class MoodMap(QGraphicsView):
         self._field.setScale(1.0 / FIELD_SCALE)
         self._field.setPos(0, 0)
         self._field.setVisible(True)
+        self._field_sig = self._field_signature()
 
     def _rebuild_star_grid(self) -> None:
         grid: dict[tuple[int, int], list[tuple[int, QPointF]]] = {}
@@ -601,6 +647,11 @@ class MoodMap(QGraphicsView):
         self._rebuild_starfield()
         self.track_pinned.emit(star.ranked.track.id, v, e)
 
+    def _update_drag_position(self, tid: int, pos: QPointF) -> None:
+        """Keep grid in sync while a star is dragged (hover / nearest stay accurate)."""
+        self._positions[tid] = QPointF(pos)
+        self._rebuild_star_grid()
+
     def reset_view(self) -> None:
         self._end_zoom_interaction()
         self._user_zoom = VIEW_ZOOM_MIN
@@ -625,9 +676,13 @@ class MoodMap(QGraphicsView):
             return
         self._zoom_active = True
         self._cluster_once = True
-        # Hide live stars during the gesture — only the baked field + lens paint.
-        for star in self._stars.values():
-            star.hide()
+        # Hide live stars during the gesture — keep an in-progress pin visible.
+        locked = self._drag_locked_ids()
+        for tid, star in self._stars.items():
+            if tid in locked:
+                star.show()
+            else:
+                star.hide()
         self.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     def _end_zoom_interaction(self) -> None:
@@ -680,9 +735,9 @@ class MoodMap(QGraphicsView):
         self._update_chrome(zoom)
 
         if zoom < LIVE_STARS_ZOOM or self._zoom_active:
-            hold = self._sky_hold_id
+            locked = self._drag_locked_ids()
             for tid, star in self._stars.items():
-                if hold is not None and tid == hold:
+                if tid in locked:
                     # Keep drag position (may differ from DB after a mid-drag refresh).
                     if tid in self._positions:
                         star.setPos(self._positions[tid])
@@ -924,6 +979,31 @@ class MoodMap(QGraphicsView):
             item = item.parentItem()
         return False
 
+    @staticmethod
+    def _track_star_from_item(item: QGraphicsItem | None) -> TrackStar | None:
+        while item is not None:
+            if isinstance(item, TrackStar):
+                return item
+            item = item.parentItem()
+        return None
+
+    def _flush_pending_snap(self) -> None:
+        candidate = self._pending_snap_id
+        self._pending_snap_id = None
+        if candidate is None or candidate not in self._ranked:
+            return
+        live = self._ensure_interactive_star(candidate)
+        if live is not None:
+            self.snap_lens_to_star(live)
+            self.lens_moved()
+        if self._user_zoom < LIVE_STARS_ZOOM:
+            self._lod_band = -1
+            self._sync_live_stars(force=True)
+
+    def _cancel_pending_snap(self) -> None:
+        self._snap_timer.stop()
+        self._pending_snap_id = None
+
     def _finish_hand_drag(self, event) -> None:
         """Complete a ScrollHandDrag press so QGraphicsView drops sticky pan state."""
         if not self._hand_drag_armed and not self._panning:
@@ -954,27 +1034,50 @@ class MoodMap(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton:
             item = self.itemAt(event.position().toPoint())
             if not self._is_interactive_item(item):
-                # Sky mode: remember nearest star for click-snap / tight grab-to-pin.
-                # Do not steal pan until we know the gesture (move vs click).
-                if self._user_zoom < LIVE_STARS_ZOOM:
-                    scene_pt = self.mapToScene(event.position().toPoint())
+                scene_pt = self.mapToScene(event.position().toPoint())
+                # Zoomed in: baked dots aren't live — materialize the nearest star.
+                if self._user_zoom >= LIVE_STARS_ZOOM:
                     tid = self._nearest_track_id(scene_pt, HIT_RADIUS_SKY)
-                    self._sky_candidate_id = tid if tid in self._ranked else None
-                    self._sky_press_scene = QPointF(scene_pt)
-                    self._sky_hold_id = None
-                    self._sky_dragged = False
-                    if self._sky_candidate_id is not None:
-                        self.track_hovered.emit(self._ranked[self._sky_candidate_id].track.label)
-                    # Start pan; may convert to star-drag if press was on the star core.
+                    if tid is not None and tid in self._ranked:
+                        star = self._ensure_interactive_star(tid)
+                        if star is not None:
+                            super().mousePressEvent(event)
+                            return
                     self._begin_hand_pan(event)
                     return
+                # Sky mode: remember nearest star for click-snap / tight grab-to-pin.
+                tid = self._nearest_track_id(scene_pt, HIT_RADIUS_SKY)
+                self._sky_candidate_id = tid if tid in self._ranked else None
+                self._sky_press_scene = QPointF(scene_pt)
+                self._sky_hold_id = None
+                self._sky_dragged = False
+                self._sky_defer_pan = False
+                self._cancel_pending_snap()
+                if self._sky_candidate_id is not None:
+                    self.track_hovered.emit(self._ranked[self._sky_candidate_id].track.label)
+                    star_pos = self._positions.get(self._sky_candidate_id)
+                    grab = (
+                        star_pos is not None
+                        and hypot(
+                            scene_pt.x() - star_pos.x(),
+                            scene_pt.y() - star_pos.y(),
+                        )
+                        <= HIT_RADIUS_SKY_GRAB
+                    )
+                    if grab:
+                        # Wait for move — don't pan first (avoids viewport nudge on pin).
+                        self._sky_defer_pan = True
+                        event.accept()
+                        return
                 self._begin_hand_pan(event)
                 return
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton and (
-            self._sky_hold_id is not None or self._sky_candidate_id is not None
+            self._sky_hold_id is not None
+            or self._sky_candidate_id is not None
+            or self._sky_defer_pan
         ):
             tid = self._sky_hold_id
             star = self._stars.get(tid) if tid is not None else None
@@ -984,16 +1087,15 @@ class MoodMap(QGraphicsView):
             self._sky_press_scene = None
             self._sky_dragged = False
             self._sky_candidate_id = None
+            self._sky_defer_pan = False
             self._finish_hand_drag(event)
             if star is not None and dragged:
                 self.star_moved(star)
             elif not dragged and candidate is not None and candidate in self._ranked:
-                # Click (no real drag): snap lens to nearest sky star.
-                live = self._ensure_interactive_star(candidate)
-                if live is not None:
-                    self.snap_lens_to_star(live)
-                    self.lens_moved()
-            if self._user_zoom < LIVE_STARS_ZOOM:
+                # Defer snap so a double-click empty can cancel it.
+                self._pending_snap_id = candidate
+                self._snap_timer.start()
+            if self._user_zoom < LIVE_STARS_ZOOM and (star is not None and dragged):
                 self._lod_band = -1
                 self._sync_live_stars(force=True)
             event.accept()
@@ -1007,9 +1109,12 @@ class MoodMap(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
+        self._cancel_pending_snap()
         item = self.itemAt(event.position().toPoint())
-        if isinstance(item, TrackStar):
-            self.track_activated.emit(item.ranked.track.id)
+        star = self._track_star_from_item(item)
+        if star is not None:
+            self.track_activated.emit(star.ranked.track.id)
+            event.accept()
             return
         if not self._is_interactive_item(item):
             # Tight core only — otherwise empty double-click returns to the full sky.
@@ -1026,7 +1131,7 @@ class MoodMap(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
-        # Sky: convert a core-star press into drag-to-pin; otherwise keep panning.
+        # Sky: convert a core-star press into drag-to-pin without a prior pan nudge.
         if (
             self._user_zoom < LIVE_STARS_ZOOM
             and self._sky_hold_id is None
@@ -1039,17 +1144,22 @@ class MoodMap(QGraphicsView):
             if hypot(delta.x(), delta.y()) > SKY_DRAG_SLOP:
                 star_pos = self._positions.get(self._sky_candidate_id)
                 grab = (
-                    star_pos is not None
-                    and hypot(
-                        self._sky_press_scene.x() - star_pos.x(),
-                        self._sky_press_scene.y() - star_pos.y(),
+                    self._sky_defer_pan
+                    or (
+                        star_pos is not None
+                        and hypot(
+                            self._sky_press_scene.x() - star_pos.x(),
+                            self._sky_press_scene.y() - star_pos.y(),
+                        )
+                        <= HIT_RADIUS_SKY_GRAB
                     )
-                    <= HIT_RADIUS_SKY_GRAB
                 )
                 if grab:
                     star = self._ensure_interactive_star(self._sky_candidate_id)
                     if star is not None:
-                        self._finish_hand_drag(event)
+                        if self._hand_drag_armed or self._panning:
+                            self._finish_hand_drag(event)
+                        self._sky_defer_pan = False
                         self._sky_hold_id = self._sky_candidate_id
                         self._sky_dragged = True
                         star.setPos(
@@ -1058,11 +1168,18 @@ class MoodMap(QGraphicsView):
                                 max(36.0, min(560.0, pos.y())),
                             )
                         )
-                        self._positions[self._sky_hold_id] = QPointF(star.pos())
+                        self._update_drag_position(self._sky_hold_id, star.pos())
                         event.accept()
                         return
                 # Far from star core → pure pan; drop candidate so release won't snap.
                 self._sky_candidate_id = None
+                self._sky_defer_pan = False
+                if not self._hand_drag_armed and not self._panning:
+                    self._begin_hand_pan(event)
+                    return
+            elif self._sky_defer_pan:
+                event.accept()
+                return
         if self._sky_hold_id is not None and event.buttons() & Qt.MouseButton.LeftButton:
             star = self._stars.get(self._sky_hold_id)
             if star is not None:
@@ -1070,15 +1187,22 @@ class MoodMap(QGraphicsView):
                 pos.setX(max(40.0, min(760.0, pos.x())))
                 pos.setY(max(36.0, min(560.0, pos.y())))
                 star.setPos(pos)
-                self._positions[self._sky_hold_id] = QPointF(pos)
+                self._update_drag_position(self._sky_hold_id, pos)
                 self._sky_dragged = True
                 self.track_hovered.emit(star.ranked.track.label)
                 event.accept()
                 return
         item = self.itemAt(event.position().toPoint())
-        if isinstance(item, TrackStar):
-            self.track_hovered.emit(item.ranked.track.label)
+        star = self._track_star_from_item(item)
+        if star is not None:
+            self.track_hovered.emit(star.ranked.track.label)
         elif self._user_zoom < LIVE_STARS_ZOOM:
+            tid = self._nearest_track_id(
+                self.mapToScene(event.position().toPoint()), HIT_RADIUS_SKY
+            )
+            if tid is not None and tid in self._ranked:
+                self.track_hovered.emit(self._ranked[tid].track.label)
+        elif self._user_zoom >= LIVE_STARS_ZOOM:
             tid = self._nearest_track_id(
                 self.mapToScene(event.position().toPoint()), HIT_RADIUS_SKY
             )

@@ -4,7 +4,7 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-07)
 
-Richer acoustic mood cues from the existing single PCM decode, placement fixes, desktop integration, and a reliability pass for scan, queue, crossfade accounting, and quit.
+Richer acoustic mood cues from the existing single PCM decode, placement fixes, desktop integration, and reliability passes for scan, queue, crossfade accounting, quit, and the mood map.
 
 ### Acoustic profile
 - Multi-band frequency energy and spectral flux from the current FFT/PCM path
@@ -32,8 +32,18 @@ Richer acoustic mood cues from the existing single PCM decode, placement fixes, 
 - Empty replenish after nearly-finished no longer leaves playback permanently stuck
 - When the playing track is absent from a rebuilt queue, Next lands on the first row (not the second)
 - Play credit is deferred until a hard cut or a settled fade; skip/prev during any fade credit the outgoing track
+- Map / matrix / search jumps use the same 8s skip-vs-finish rule as Next (not always “finished”)
+- Prev during crossfade restores the outgoing track without double `play_count` or spurious finish on the next song
 - Pause / seek / stop mid-fade still commits the incoming play; jumps mid-fade clear stale finish nudges
 - Failed analyze is denylisted in-process (with DB retries) so a poison file cannot loop the worker
+
+### Mood map interaction
+- Lens sits under live stars so tracks inside the lens stay clickable and draggable
+- Starfield rebakes only when the bake fingerprint changes (fewer hitches on large libraries)
+- Sky press candidates survive mid-press refreshes; core-star pin no longer pans the viewport first
+- Zoomed-in clicks materialize the nearest baked star; title double-click plays the track
+- Deferred lens snap so double-click empty can reset without first snapping the lens
+- In-progress pins stay visible during pinch/zoom; star grid updates while dragging
 
 ### Desktop / AppImage
 - Freedesktop `.desktop`, hicolor icons (16–512 + SVG), AppStream metainfo

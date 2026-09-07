@@ -321,9 +321,12 @@ def check_mood_map_helpers() -> None:
     assert hasattr(m, "_sky_hold_id")
     assert hasattr(m, "_drag_locked_ids")
     assert hasattr(m, "set_radius_scale")
+    assert hasattr(m, "_field_signature")
+    assert hasattr(m, "_track_star_from_item")
     assert LIVE_STARS_ZOOM == 2.4
     assert HIT_RADIUS_SKY >= 10
     assert HIT_RADIUS_SKY_GRAB < HIT_RADIUS_SKY
+    assert m.lens.zValue() < 7, "lens must sit under live stars for hit-testing"
     assert m._ensure_interactive_star(999) is None
 
     # Lens ellipse matches mood radius on map axes (and mode scale).
@@ -358,6 +361,23 @@ def check_mood_map_helpers() -> None:
     m.set_tracks([ranked], None)
     assert abs(m._stars[1].pos().x() - 600.0) < 0.5
     assert abs(m._positions[1].x() - 600.0) < 0.5
+
+    # Sky candidate (press before drag) must also survive set_tracks.
+    m._sky_hold_id = None
+    m._sky_candidate_id = 1
+    star.setPos(QPointF(610.0, 260.0))
+    m._positions[1] = QPointF(610.0, 260.0)
+    assert 1 in m._drag_locked_ids()
+    m.set_tracks([ranked], None)
+    assert abs(m._positions[1].x() - 610.0) < 0.5
+    m._sky_candidate_id = None
+
+    # Identical set_tracks must not allocate a new starfield pixmap.
+    m.set_tracks([ranked], None)  # settle positions from mood coords
+    pix0 = m._field.pixmap()
+    key0 = pix0.cacheKey()
+    m.set_tracks([ranked], None)
+    assert m._field.pixmap().cacheKey() == key0
 
     # Backdrop rebuild must not leak chrome items.
     n0 = len(m._sky_chrome)

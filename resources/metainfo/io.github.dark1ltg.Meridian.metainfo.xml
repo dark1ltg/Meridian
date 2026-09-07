@@ -48,7 +48,8 @@
         <p>
           Acoustic mood cues and placement fixes, AppImage desktop install,
           and reliability fixes for library scan, context queue, crossfade
-          play/skip credit, and safer quit during analyze.
+          play/skip credit, safer quit, and mood-map interaction (lens hits,
+          pin/zoom, starfield rebake).
         </p>
       </description>
     </release>
