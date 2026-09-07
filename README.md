@@ -26,6 +26,7 @@ Richer acoustic placement from the same decode budget, desktop install, and reli
 - Honest BPM/signal trust: no invented silence BPM; tag `0`/NaN ignored; Inf PCM rejected; pins keep BPM; denylist clears on re-queue
 - Safer scan (no empty/partial wipe; out-of-root symlinks ignored; failed scan stays failed)
 - Honest crossfade play/skip credits (jumps use the same 8s rule as Next; Prev mid-fade doesn’t double-count)
+- Matrix / context queue: map play syncs Next; scan/analyze don’t rebuild the live queue; Next mid end-fade doesn’t false-skip; search refreshes the matrix
 - Tiny libraries don’t loop the just-finished track; lens/pin don’t rebuild the queue mid-listen
 - Mood map: stars under the lens stay clickable; fewer full-sky rebakes; smoother pin / zoom / double-click
 - AppImage `--install` / `--uninstall`; sticky host `libx264` tip when H.264 may fail

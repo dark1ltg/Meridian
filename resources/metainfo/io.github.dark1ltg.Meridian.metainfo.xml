@@ -47,9 +47,9 @@
       <description>
         <p>
           Acoustic mood cues and placement fixes, AppImage desktop install,
-          and reliability fixes for BPM/signal trust, library scan, context
-          queue, crossfade play/skip credit, safer quit, and mood-map
-          interaction (lens hits, pin/zoom, starfield rebake).
+          and reliability fixes for BPM/signal trust, library scan, matrix /
+          context queue continuity, crossfade play/skip credit, safer quit,
+          and mood-map interaction (lens hits, pin/zoom, starfield rebake).
         </p>
       </description>
     </release>

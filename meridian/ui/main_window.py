@@ -81,6 +81,8 @@ class MainWindow(QMainWindow):
         self._host_codec_sticky = False
         self._duration = 0
         self._rebuild_lock = False
+        # Listen-nudge / lens refresh requested while play_id holds the rebuild lock.
+        self._pending_plan_refresh = False
         self._lens_timer = QTimer(self)
         self._lens_timer.setSingleShot(True)
         self._lens_timer.setInterval(180)
@@ -237,7 +239,7 @@ class MainWindow(QMainWindow):
         self.mode_box.currentIndexChanged.connect(self._mode_changed)
         self.map.lens_changed.connect(self._lens_changed)
         self.map.track_pinned.connect(self._pin_track)
-        self.map.track_activated.connect(self.play_id)
+        self.map.track_activated.connect(self._map_activated)
         self.map.track_hovered.connect(self._set_status)
         self.matrix.track_activated.connect(self._pull_and_play)
         self.queue_list.itemDoubleClicked.connect(self._queue_activated)
@@ -277,19 +279,34 @@ class MainWindow(QMainWindow):
         _, _, scale = mode_bias(self.mode)
         self.map.set_radius_scale(scale)
 
+    def _playable_tracks(self):
+        """Library rows whose files still exist (shared by plan refresh and replenish)."""
+        return [t for t in self.library.all_tracks() if Path(t.path).exists()]
+
+    def _flush_pending_plan_refresh(self) -> None:
+        if not self._pending_plan_refresh:
+            return
+        self._pending_plan_refresh = False
+        self.refresh_plan(rebuild_queue=False)
+
     def refresh_plan(self, keep_current: bool = True, rebuild_queue: bool = True) -> None:
         if self._rebuild_lock:
+            # Never drop a non-rebuild refresh (listen nudge / lens) permanently.
+            if not rebuild_queue:
+                self._pending_plan_refresh = True
             return
         ctx = self.current_context()
         self.band_chip.setText(ctx.band_label)
-        tracks = self.library.all_tracks()
+        tracks = self._playable_tracks()
         current_id = self.player.current.id if self.player.current else None
         self.plan = build_plan(tracks, ctx, self.explicit)
         self.map.set_tracks(self.plan.ranked, current_id)
         self.matrix.set_plan(self.plan.by_quadrant)
         if rebuild_queue:
-            self.ephemeral.clear()
+            # Keep one-shot matrix pulls that still appear in the new order.
+            kept_ephemeral = {tid for tid in self.ephemeral if tid in self.plan.order}
             self.session_queue = list(self.plan.order)
+            self.ephemeral = kept_ephemeral
             if keep_current and current_id and current_id in self.session_queue:
                 self.queue_index = self.session_queue.index(current_id)
             elif keep_current and current_id:
@@ -395,6 +412,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue("lens_y", track.energy)
         self.settings.setValue("lens_r", radius)
         self._set_status(f"Lens on {track.label}")
+        # set_lens does not emit lens_changed — refresh matrix/plan for the new lens.
+        self.refresh_plan(rebuild_queue=False)
         self._pull_and_play(track_id)
 
     def _pin_track(self, track_id: int, valence: float, energy: float) -> None:
@@ -440,7 +459,7 @@ class MainWindow(QMainWindow):
             self._set_status("Rescan failed.")
             return
         self._set_status(f"Rescanned {count} files. Re-analyzing waveforms…")
-        self.refresh_plan()
+        self.refresh_plan(rebuild_queue=False)
         self.start_analyze()
 
     def start_scan(self) -> None:
@@ -509,7 +528,7 @@ class MainWindow(QMainWindow):
             self._set_status("Scan failed.")
             return
         self._set_status(f"Indexed {added} new files. Mapping mood…")
-        self.refresh_plan()
+        self.refresh_plan(rebuild_queue=False)
         self.start_analyze()
 
     def start_analyze(self) -> None:
@@ -545,13 +564,21 @@ class MainWindow(QMainWindow):
             worker.deleteLater()
         if self._closing:
             return
-        self.refresh_plan()
+        self.refresh_plan(rebuild_queue=False)
         # If scan added more tracks while we were analyzing, finish them.
         if self.library.unanalyzed_ids():
             self._set_status("More tracks to map…")
             self.start_analyze()
             return
         self._set_status("Mood map updated from local audio.")
+
+    def _map_activated(self, track_id: int) -> None:
+        """Play a map star and keep context-queue Next/Prev aligned with it."""
+        if track_id in self.session_queue:
+            self.queue_index = self.session_queue.index(track_id)
+            self.play_id(track_id)
+        else:
+            self._pull_and_play(track_id)
 
     def _queue_activated(self, item: QListWidgetItem) -> None:
         tid = item.data(Qt.ItemDataRole.UserRole)
@@ -620,13 +647,22 @@ class MainWindow(QMainWindow):
         natural_advance = self._expect_natural_advance
         self._expect_natural_advance = False
 
-        # Interrupting an in-flight fade: settle credit for the prior outgoing once.
+        # Interrupting an in-flight fade: settle credit for prior outgoing + pending.
         if self.player.is_crossfading() and self._crossfade_outgoing_id is not None:
             prior = self._crossfade_outgoing_id
             settle_finish = self._outgoing_settle_finish
+            pending = self._pending_play_credit
             self._clear_crossfade_credit()
             if prior != track_id and settle_finish:
                 self._listen_nudge(prior, skipped=False)
+            # Armed incoming that we are abandoning still counts as a play.
+            if (
+                pending is not None
+                and pending != track_id
+                and self.player.current is not None
+                and pending == self.player.current.id
+            ):
+                self._commit_play(pending)
 
         self._pending_play_credit = None
         self.player.play_track(track)
@@ -645,6 +681,7 @@ class MainWindow(QMainWindow):
             self._commit_play(track_id)
         self.transport.set_track(track.short_title, f"{track.artist}  ·  {track.album or 'Single'}", track.loved)
         self._rebuild_lock = False
+        self._flush_pending_plan_refresh()
         if self.plan:
             self.map.set_tracks(self.plan.ranked, track_id)
         self._fill_queue()
@@ -680,6 +717,7 @@ class MainWindow(QMainWindow):
         self.player.play_track(track)
         self.transport.set_track(track.short_title, f"{track.artist}  ·  {track.album or 'Single'}", track.loved)
         self._rebuild_lock = False
+        self._flush_pending_plan_refresh()
         if self.plan:
             self.map.set_tracks(self.plan.ranked, track_id)
         self._fill_queue()
@@ -707,14 +745,29 @@ class MainWindow(QMainWindow):
 
     def play_next(self) -> None:
         # During crossfade, current is already the incoming track at ~0ms.
-        # Credit the skip to the outgoing track, not the new one.
         if self.player.is_crossfading() and self._crossfade_outgoing_id is not None:
             outgoing = self._crossfade_outgoing_id
+            settle_finish = self._outgoing_settle_finish
+            pending = self._pending_play_credit
             self._clear_crossfade_credit()
-            self.library.record_skip(outgoing)
-            self.skips_window.append(time())
-            self._listen_nudge(outgoing, skipped=True)
-            self._advance_queue(skipped=True)
+            if settle_finish:
+                # Natural A→B: A essentially finished — never skip-credit it.
+                self._listen_nudge(outgoing, skipped=False)
+            # Jump fades already credited outgoing in play_id; do not credit again.
+            if (
+                pending is not None
+                and self.player.current is not None
+                and pending == self.player.current.id
+            ):
+                self._commit_play(pending)
+            # Next means leave the incoming (current) track under the 8s rule.
+            skipped = bool(self.player.current and self.player.backend.position() < 8000)
+            if self.player.current:
+                if skipped:
+                    self.library.record_skip(self.player.current.id)
+                    self.skips_window.append(time())
+                self._listen_nudge(self.player.current.id, skipped=skipped)
+            self._advance_queue(skipped=skipped)
             return
         self._clear_crossfade_credit()
         skipped = bool(self.player.current and self.player.backend.position() < 8000)
@@ -753,7 +806,10 @@ class MainWindow(QMainWindow):
         self._advance_queue(skipped=False)
 
     def _crossfade_settled(self, natural: bool) -> None:
-        if natural and self._outgoing_settle_finish and self._crossfade_outgoing_id is not None:
+        # Finish-nudge on natural settle *and* pause/seek abort of an end-of-track fade.
+        # `natural` is False when pause/seek/stop forced an immediate settle.
+        _ = natural
+        if self._outgoing_settle_finish and self._crossfade_outgoing_id is not None:
             self._listen_nudge(self._crossfade_outgoing_id, skipped=False)
         self._crossfade_outgoing_id = None
         self._outgoing_settle_finish = False
@@ -818,7 +874,7 @@ class MainWindow(QMainWindow):
         ctx = self.current_context()
         self.band_chip.setText(ctx.band_label)
         # Skip ghost rows whose files are gone so the queue cannot refill with them.
-        tracks = [t for t in self.library.all_tracks() if Path(t.path).exists()]
+        tracks = self._playable_tracks()
         current_id = self.player.current.id if self.player.current else None
         avoid = avoid_id if avoid_id is not None else current_id
         exclude = set(self.played_history[-24:])
@@ -828,7 +884,6 @@ class MainWindow(QMainWindow):
         )
         self.map.set_tracks(self.plan.ranked, current_id)
         self.matrix.set_plan(self.plan.by_quadrant)
-        self.ephemeral.clear()
         order = list(self.plan.order)
         if avoid is not None:
             filtered = [tid for tid in order if tid != avoid]
@@ -839,6 +894,7 @@ class MainWindow(QMainWindow):
             else:
                 # Single-track library: do not loop the same song via hard-cut.
                 order = []
+        self.ephemeral = {tid for tid in self.ephemeral if tid in order}
         self.session_queue = order
         self._fill_queue()
         self._set_status(

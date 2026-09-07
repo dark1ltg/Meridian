@@ -4,7 +4,7 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-07)
 
-Richer acoustic mood cues from the existing single PCM decode, placement fixes, desktop integration, and reliability passes for scan, queue, crossfade accounting, quit, mood map, and BPM/signal trust.
+Richer acoustic mood cues from the existing single PCM decode, placement fixes, desktop integration, and reliability passes for scan, matrix/context queue, crossfade accounting, quit, mood map, and BPM/signal trust.
 
 ### Acoustic profile
 - Multi-band frequency energy and spectral flux from the current FFT/PCM path
@@ -35,14 +35,20 @@ Richer acoustic mood cues from the existing single PCM decode, placement fixes, 
 
 ### Queue & playback reliability
 - Lens drag and star pin refresh the map **without** rebuilding the context queue mid-listen
+- Scan / rescan / analyze refresh the matrix and map without replacing the live context queue
+- Map star play syncs `queue_index` (or inserts like a matrix pull) so Next/Prev stay aligned
+- Search snaps the lens and refreshes the Eisenhower matrix before pulling the hit
+- Plan refresh and replenish both skip missing files; rebuilds keep ephemeral “play once” rows still in order
+- Listen-nudge plan refreshes deferred under the play lock are flushed after unlock
 - Tiny libraries no longer hard-cut restart the track that just finished (hard-exclude on replenish)
 - Short tracks that end during a crossfade still advance when the fade settles
 - Empty replenish after nearly-finished no longer leaves playback permanently stuck
 - When the playing track is absent from a rebuilt queue, Next lands on the first row (not the second)
-- Play credit is deferred until a hard cut or a settled fade; skip/prev during any fade credit the outgoing track
+- Play credit is deferred until a hard cut or a settled fade; aborting a fade commits the armed incoming play
+- Next during a natural end-of-track fade finish-nudges the outgoing track (never skip-credits it), then leaves the incoming under the 8s rule
 - Map / matrix / search jumps use the same 8s skip-vs-finish rule as Next (not always “finished”)
 - Prev during crossfade restores the outgoing track without double `play_count` or spurious finish on the next song
-- Pause / seek / stop mid-fade still commits the incoming play; jumps mid-fade clear stale finish nudges
+- Pause / seek / stop mid end-of-track fade still finish-nudges the outgoing track and commits the incoming play
 - Failed analyze is denylisted in-process (with DB retries) so a poison file cannot loop the worker
 
 ### Mood map interaction
