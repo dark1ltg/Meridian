@@ -1,9 +1,9 @@
-"""Expanded acoustic profile from the existing single PCM decode (no extra FFmpeg).
+"""Expanded acoustic profile from the existing PCM decode budget (no extra FFmpeg beyond ~28s).
 
 Items 2–11: multi-band energy, spectral flux, RMS dynamics, onset stats,
 brightness normalization, confidence, local-window aggregation — still projecting
-onto Shadow↔Glow / Still↔Kinetic only. Distributed track-wide sampling (#1) is
-intentionally not implemented here.
+onto Shadow↔Glow / Still↔Kinetic only. Dual mid-track windows (two ~14s seeks)
+are orchestrated in features when duration allows; this module profiles one buffer.
 """
 
 from __future__ import annotations

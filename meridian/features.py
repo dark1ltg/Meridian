@@ -574,12 +574,13 @@ def _stable_jitter(path: str) -> tuple[float, float]:
     )
 
 
-def _decode_pcm(path: str, *, start_s: float = 12.0) -> np.ndarray | None:
+def _decode_pcm(path: str, *, start_s: float = 12.0, duration_s: float = 28.0) -> np.ndarray | None:
     global _decode_pcm_calls
     _decode_pcm_calls += 1
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None
+    dur = max(2.0, float(duration_s))
     cmd = [
         ffmpeg,
         "-v",
@@ -587,7 +588,7 @@ def _decode_pcm(path: str, *, start_s: float = 12.0) -> np.ndarray | None:
         "-ss",
         f"{float(start_s):.3f}",
         "-t",
-        "28",
+        f"{dur:.3f}",
         "-i",
         path,
         "-ac",
@@ -634,21 +635,84 @@ def _coerce_bpm(bpm: float | None) -> float | None:
     return value
 
 
-def _decode_pcm_with_fallback(path: str, duration_ms: int = 0) -> tuple[np.ndarray | None, bool]:
-    """Decode at +12s; if near-silent, retry mid-track (or earlier for short files).
-
-    Returns (pcm_or_None, used_fallback). used_fallback True when the primary
-    +12s window failed signal checks and a later seek was used.
-    """
-    starts = [12.0]
+def _secondary_seek_s(duration_ms: int) -> float | None:
+    """Mid-track seek for dual-window / fallback decode, or None when too short."""
     dur_s = max(0.0, float(duration_ms) / 1000.0) if duration_ms else 0.0
-    if dur_s > 0:
-        if dur_s < 40.0:
-            starts.append(max(1.0, dur_s * 0.15))
-        else:
-            starts.append(float(np.clip(dur_s * 0.35, 20.0, max(20.0, dur_s - 30.0))))
+    if dur_s <= 0:
+        return 45.0
+    if dur_s < 40.0:
+        return max(1.0, dur_s * 0.15)
+    return float(np.clip(dur_s * 0.35, 20.0, max(20.0, dur_s - 30.0)))
+
+
+def _merge_pcm_profiles(primary, secondary):
+    """Median valence/energy from two windows; keep the stabler rhythm cues."""
+    from meridian.acoustic import AcousticProfile
+
+    valence = float(np.median([primary.valence, secondary.valence]))
+    energy = float(np.median([primary.energy, secondary.energy]))
+    bpms = [b for b in (primary.bpm, secondary.bpm) if b is not None]
+    bpm = float(np.median(bpms)) if bpms else None
+    # Prefer the more consistent onset reading when both exist.
+    if primary.onset_consistency >= secondary.onset_consistency:
+        ostats_src = primary
     else:
-        starts.append(45.0)
+        ostats_src = secondary
+    return AcousticProfile(
+        valence=float(np.clip(valence, 0.03, 0.97)),
+        energy=float(np.clip(energy, 0.03, 0.97)),
+        bpm=bpm,
+        unstable=bool(primary.unstable or secondary.unstable),
+        brightness=float(np.median([primary.brightness, secondary.brightness])),
+        flux=float(np.median([primary.flux, secondary.flux])),
+        band_energy=dict(ostats_src.band_energy),
+        energy_mean=float(np.median([primary.energy_mean, secondary.energy_mean])),
+        energy_std=float(np.median([primary.energy_std, secondary.energy_std])),
+        energy_peak=float(max(primary.energy_peak, secondary.energy_peak)),
+        energy_range=float(np.median([primary.energy_range, secondary.energy_range])),
+        energy_trend=float(np.median([primary.energy_trend, secondary.energy_trend])),
+        onset_rate=float(np.median([primary.onset_rate, secondary.onset_rate])),
+        onset_burstiness=float(np.median([primary.onset_burstiness, secondary.onset_burstiness])),
+        onset_consistency=float(ostats_src.onset_consistency),
+        variation=float(np.median([primary.variation, secondary.variation])),
+        window_count=int(primary.window_count + secondary.window_count),
+        pcm_samples=int(primary.pcm_samples + secondary.pcm_samples),
+    )
+
+
+def _decode_pcm_with_fallback(
+    path: str, duration_ms: int = 0
+) -> tuple[np.ndarray | None, bool, object | None]:
+    """Decode within ~28s total budget; dual 14s windows when the track is long enough.
+
+    Returns (pcm_or_None, used_secondary_seek, merged_profile_or_None).
+    When dual windows succeed, pcm is the first window (for callers that need a
+    buffer) and merged_profile carries median mood cues from both seeks.
+    """
+    from meridian.acoustic import build_profile
+
+    dur_s = max(0.0, float(duration_ms) / 1000.0) if duration_ms else 0.0
+    secondary = _secondary_seek_s(duration_ms)
+
+    # Dual-window path: same total seconds (~28) as a single long window.
+    if dur_s >= 55.0 and secondary is not None and abs(secondary - 12.0) >= 8.0:
+        pcm_a = _decode_pcm(path, start_s=12.0, duration_s=14.0)
+        pcm_b = _decode_pcm(path, start_s=float(secondary), duration_s=14.0)
+        ok_a = pcm_a is not None and _pcm_signal_ok(pcm_a)
+        ok_b = pcm_b is not None and _pcm_signal_ok(pcm_b)
+        if ok_a and ok_b:
+            p1 = build_profile(pcm_a)
+            p2 = build_profile(pcm_b)
+            return pcm_a, True, _merge_pcm_profiles(p1, p2)
+        if ok_a:
+            return pcm_a, False, None
+        if ok_b:
+            return pcm_b, True, None
+
+    # Single 28s window with silence fallback (short tracks / dual failed).
+    starts = [12.0]
+    if secondary is not None:
+        starts.append(float(secondary))
 
     seen: set[float] = set()
     for index, ss in enumerate(starts):
@@ -656,10 +720,10 @@ def _decode_pcm_with_fallback(path: str, duration_ms: int = 0) -> tuple[np.ndarr
         if key in seen:
             continue
         seen.add(key)
-        pcm = _decode_pcm(path, start_s=float(ss))
+        pcm = _decode_pcm(path, start_s=float(ss), duration_s=28.0)
         if pcm is not None and _pcm_signal_ok(pcm):
-            return pcm, index > 0
-    return None, False
+            return pcm, index > 0, None
+    return None, False, None
 
 
 def _genre_pair_conflict(tag_key: str | None, path_key: str | None) -> bool:
@@ -799,12 +863,40 @@ def analyze_audio(
     pcm_fallback = False
     pcm_unstable = False
     profile = None
+    soft_shift = SOFT_PCM_MAX_SHIFT
 
-    pcm, pcm_fallback = _decode_pcm_with_fallback(path, duration_ms=duration_ms)
+    pcm, pcm_fallback, merged_profile = _decode_pcm_with_fallback(path, duration_ms=duration_ms)
     if pcm is not None:
         pcm_ok = True
-        valence_pcm, energy_pcm, detected_bpm, pcm_unstable, profile = _pcm_mood_cues(pcm)
+        if merged_profile is not None:
+            profile = merged_profile
+            valence_pcm = float(profile.valence)
+            energy_pcm = float(profile.energy)
+            detected_bpm = profile.bpm
+            pcm_unstable = bool(profile.unstable)
+        else:
+            valence_pcm, energy_pcm, detected_bpm, pcm_unstable, profile = _pcm_mood_cues(pcm)
         detected_bpm = _coerce_bpm(detected_bpm)
+
+        onset_c = float(getattr(profile, "onset_consistency", 0.5) or 0.5) if profile else 0.5
+        variation = float(getattr(profile, "variation", 0.0) or 0.0) if profile else 0.0
+        unstable = bool(pcm_unstable or variation > 0.28)
+        disagree = float(
+            np.hypot(valence_pcm - seed.valence, energy_pcm - seed.energy)
+        )
+        # Structure-aware clamps: steady rhythm + genre disagreement → trust PCM more;
+        # unstable / uneven onsets → hug the genre seed tighter.
+        soft_shift = SOFT_PCM_MAX_SHIFT
+        pcm_w_v, pcm_w_e = 0.40, 0.48
+        clamp_shift = PCM_MAX_SHIFT
+        if onset_c > 0.70 and disagree > 0.12:
+            soft_shift = min(0.09, SOFT_PCM_MAX_SHIFT * 1.45)
+            pcm_w_v, pcm_w_e = 0.55, 0.62
+            clamp_shift = min(0.16, PCM_MAX_SHIFT * 1.25)
+        elif unstable or onset_c < 0.35:
+            soft_shift = SOFT_PCM_MAX_SHIFT * 0.55
+            pcm_w_v, pcm_w_e = 0.28, 0.32
+            clamp_shift = PCM_MAX_SHIFT * 0.70
 
         if weak_tags:
             # Dump formats: distrust tags; lean hard on waveform.
@@ -815,7 +907,7 @@ def analyze_audio(
             valence = float(
                 np.clip(
                     seed.valence
-                    + float(np.clip(valence_pcm - seed.valence, -SOFT_PCM_MAX_SHIFT, SOFT_PCM_MAX_SHIFT)),
+                    + float(np.clip(valence_pcm - seed.valence, -soft_shift, soft_shift)),
                     0.03,
                     0.97,
                 )
@@ -823,18 +915,18 @@ def analyze_audio(
             energy = float(
                 np.clip(
                     seed.energy
-                    + float(np.clip(energy_pcm - seed.energy, -SOFT_PCM_MAX_SHIFT, SOFT_PCM_MAX_SHIFT)),
+                    + float(np.clip(energy_pcm - seed.energy, -soft_shift, soft_shift)),
                     0.03,
                     0.97,
                 )
             )
         elif seed.clamp_match:
-            valence = float(np.clip(0.60 * seed.valence + 0.40 * valence_pcm, 0.03, 0.97))
-            energy = float(np.clip(0.52 * seed.energy + 0.48 * energy_pcm, 0.03, 0.97))
+            valence = float(np.clip((1.0 - pcm_w_v) * seed.valence + pcm_w_v * valence_pcm, 0.03, 0.97))
+            energy = float(np.clip((1.0 - pcm_w_e) * seed.energy + pcm_w_e * energy_pcm, 0.03, 0.97))
             valence = float(
                 np.clip(
                     seed.valence
-                    + float(np.clip(valence - seed.valence, -PCM_MAX_SHIFT, PCM_MAX_SHIFT)),
+                    + float(np.clip(valence - seed.valence, -clamp_shift, clamp_shift)),
                     0.03,
                     0.97,
                 )
@@ -842,7 +934,7 @@ def analyze_audio(
             energy = float(
                 np.clip(
                     seed.energy
-                    + float(np.clip(energy - seed.energy, -PCM_MAX_SHIFT, PCM_MAX_SHIFT)),
+                    + float(np.clip(energy - seed.energy, -clamp_shift, clamp_shift)),
                     0.03,
                     0.97,
                 )
@@ -855,7 +947,7 @@ def analyze_audio(
     # Prefer a real tag BPM; never treat 0/NaN as present (falsy/`if bpm` traps).
     out_bpm = tag_bpm if tag_bpm is not None else detected_bpm
     # soft_pcm_only already trusts genre+BPM — soft nudge only, then re-clamp so
-    # tagged BPM cannot undo the ±SOFT_PCM_MAX_SHIFT energy envelope.
+    # tagged BPM cannot undo the soft PCM energy envelope.
     energy = _bpm_nudge(
         energy,
         out_bpm,
@@ -868,8 +960,8 @@ def analyze_audio(
                 + float(
                     np.clip(
                         energy - seed.energy,
-                        -SOFT_PCM_MAX_SHIFT,
-                        SOFT_PCM_MAX_SHIFT,
+                        -soft_shift,
+                        soft_shift,
                     )
                 ),
                 0.03,

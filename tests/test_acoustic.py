@@ -104,6 +104,22 @@ def test_build_profile_bounded() -> None:
     assert "burstiness" in ostats and "consistency" in ostats
 
 
+def test_soft_pcm_bpm_stays_clamped() -> None:
+    """Tagged BPM must not pull energy outside the soft PCM envelope."""
+    from unittest.mock import patch
+
+    from meridian.features import SOFT_PCM_MAX_SHIFT, analyze_audio, genre_seed
+
+    sr = SAMPLERATE
+    t = np.arange(sr * 3, dtype=np.float32) / sr
+    pcm = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    seed = genre_seed("metal", "x", "y", path="/tmp/x.flac")
+    assert seed.clamp_match
+    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None)):
+        result = analyze_audio("/tmp/x.flac", "metal", "x", "y", 180.0)
+    assert abs(result.energy - seed.energy) <= max(SOFT_PCM_MAX_SHIFT, 0.09) + 1e-9
+
+
 def test_onset_stats_rejects_spurious_bpm() -> None:
     """Silence / no-onset PCM must not invent a BPM."""
     sr = SAMPLERATE
@@ -144,7 +160,7 @@ def test_zero_tag_bpm_not_trusted() -> None:
     assert seed.clamp_match
     # Extreme PCM energy — soft envelope would hold within ±SOFT; zero BPM must not.
     cues = (0.05, 0.05, None, False, None)
-    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False)):
+    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None)):
         with patch("meridian.features._pcm_mood_cues", return_value=cues):
             soft = analyze_audio("/tmp/x.flac", "metal", "x", "y", 180.0)
             zero = analyze_audio("/tmp/x.flac", "metal", "x", "y", 0.0)
@@ -163,7 +179,7 @@ def test_out_bpm_prefers_detected_over_zero_tag() -> None:
     sr = SAMPLERATE
     t = np.arange(sr * 3, dtype=np.float32) / sr
     pcm = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
-    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False)):
+    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None)):
         with patch(
             "meridian.features._pcm_mood_cues",
             return_value=(0.5, 0.5, 118.0, False, None),
@@ -173,7 +189,41 @@ def test_out_bpm_prefers_detected_over_zero_tag() -> None:
     assert "BPM" in (result.confidence_note or "")
 
 
-def test_confidence_consistency() -> None:
+def test_merge_dual_window_profiles() -> None:
+    from meridian.acoustic import AcousticProfile
+    from meridian.features import _merge_pcm_profiles
+
+    a = AcousticProfile(
+        valence=0.3,
+        energy=0.4,
+        bpm=120.0,
+        unstable=False,
+        brightness=0.4,
+        flux=0.3,
+        onset_consistency=0.8,
+        variation=0.1,
+        window_count=3,
+        pcm_samples=1000,
+    )
+    b = AcousticProfile(
+        valence=0.5,
+        energy=0.6,
+        bpm=124.0,
+        unstable=True,
+        brightness=0.5,
+        flux=0.4,
+        onset_consistency=0.4,
+        variation=0.2,
+        window_count=3,
+        pcm_samples=1000,
+    )
+    m = _merge_pcm_profiles(a, b)
+    assert abs(m.valence - 0.4) < 1e-9
+    assert abs(m.energy - 0.5) < 1e-9
+    assert m.unstable is True
+    assert m.onset_consistency == 0.8
+    assert m.window_count == 6
+
     strong, _ = confidence_from_evidence(
         tag_key="metal",
         pcm_ok=True,

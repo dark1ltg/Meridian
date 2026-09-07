@@ -4,14 +4,22 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-07)
 
-Richer acoustic mood cues from the existing single PCM decode, placement fixes, desktop integration, and reliability passes for scan, matrix/context queue, crossfade accounting, quit, mood map, and BPM/signal trust.
+Richer acoustic mood cues from the existing PCM decode budget, smarter local recommendations, placement fixes, desktop integration, and reliability passes for scan, matrix/context queue, crossfade accounting, quit, mood map, and BPM/signal trust.
 
 ### Acoustic profile
 - Multi-band frequency energy and spectral flux from the current FFT/PCM path
 - RMS dynamics (mean, variation, peak, range, trend) and onset density/burstiness/consistency
 - Nonlinear brightness mapping; confidence reflects spectral/rhythm stability
 - Local-window aggregation inside the decode; map remains Shadow↔Glow / Still↔Kinetic
-- Pins, metadata, and decode budget unchanged (still ~one FFmpeg, ~28s mono @ 11025 Hz)
+- Longer tracks use two ~14s windows (early + mid) within the same ~28s mono @ 11025 Hz budget; short tracks keep a single window
+- Structure-aware soft/genre clamps: steady rhythm + genre disagreement trusts PCM more; unstable material hugs the seed
+- Pins, metadata, and total decode budget unchanged
+
+### Recommendations (local)
+- Skip pressure (recent skips) widens the lens neighborhood, softens NOW stickiness, and steals queue slots into FILL
+- Context queue soft-caps artist/album repeats (2) while alternatives exist, then relaxes to fill gaps
+- Mode-aware matrix mix: Focus steadier NOW/DEEP; Charge more NOW; Dim more DEEP; Wander balanced
+- Finish vs skip history weights importance more strongly; listen nudges on unpinned stars are slightly stronger
 
 ### Acoustic reliability
 - Spurious aubio BPM on silence / near-zero onsets is rejected (needs real onset evidence)

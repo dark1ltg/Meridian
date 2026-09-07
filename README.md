@@ -20,10 +20,12 @@ Meridian is a local, offline Linux music player that charts every track as a sta
 Richer acoustic placement from the same decode budget, desktop install, and reliability passes (AppImage refreshed 2026-09-07):
 
 - Multi-band energy, spectral flux, RMS dynamics, and onset consistency/burstiness
+- Dual mid-track windows on longer files (~14s + ~14s) within the same ~28s budget; structure-aware soft/genre clamps
 - Soft genre+BPM keeps tagged tempo inside the soft energy clamp
 - Quiet hiss stays near-neutral on Glow; bass darkness counted once; brightness stays on Shadow↔Glow
 - Relative spectral flux separates steady vs busy material without saturating
 - Honest BPM/signal trust: no invented silence BPM; tag `0`/NaN ignored; Inf PCM rejected; pins keep BPM; denylist clears on re-queue
+- Smarter local queue: skip-pressure widens the neighborhood; artist/album anti-repeat; mode-aware NOW/DEEP/FILL mix; finish/skip importance
 - Safer scan (no empty/partial wipe; out-of-root symlinks ignored; failed scan stays failed)
 - Honest crossfade play/skip credits (jumps use the same 8s rule as Next; Prev mid-fade doesn’t double-count)
 - Matrix / context queue: map play syncs Next; scan/analyze don’t rebuild the live queue; Next mid end-fade doesn’t false-skip; search refreshes the matrix
@@ -45,7 +47,7 @@ Most players ask *what album next*. Meridian asks *where do you want to be*.
 - **Search** by title, artist, album, or path — pick a hit to snap the lens and play  
 - While something is already playing, advances **crossfade** (about 3s, shorter on short tracks)
 
-Under the hood: tags + a short mid-track waveform (`ffmpeg`) + optional **aubio** tempo/onset cues. Stars show **confidence** and a short evidence note on hover. After analyze, moods get a light **library/genre percentile** rescale so neighbors rank relative to *your* collection.
+Under the hood: tags + a short mid-track waveform (`ffmpeg`, dual windows on longer tracks) + optional **aubio** tempo/onset cues. Stars show **confidence** and a short evidence note on hover. After analyze, moods get a light **library/genre percentile** rescale so neighbors rank relative to *your* collection. Recent skips, finishes, and mode shape the context queue without leaving your disk.
 
 ## How listening works
 
@@ -63,7 +65,7 @@ Nearby tracks are sorted into four buckets by how close they are to the lens (an
 | **More important** | **NOW** — play this | **DEEP** — keep close |
 | **Less important** | **FILL** — background pulse | **SHELF** — park it |
 
-Importance leans on mood fit, loves, and play history (skips lower importance). Urgency is mostly lens distance, clock band, mode energy bias, and tracks you pull in by hand. Matrix pulls play once, then drop.
+Importance leans on mood fit, loves, and play/skip history (finishes boost; skips lower importance). Urgency is mostly lens distance, clock band, mode energy bias, and tracks you pull in by hand. A recent skip streak gently widens the neighborhood and feeds more FILL. The queue mix follows the mode (Focus steadier, Charge more NOW, Dim more DEEP). Artist/album repeats are soft-capped while alternatives exist. Matrix pulls play once, then drop.
 
 ### Context queue
 The queue replenishes from the lens, clock, and matrix when it runs dry. **Play** / Space with nothing loaded starts the queue from the top. Moving the lens (or pinning a star) updates ranking without rebuilding the queue mid-listen. When the queue refills, the track that just finished is kept out so tiny libraries don’t hard-cut restart the same song.

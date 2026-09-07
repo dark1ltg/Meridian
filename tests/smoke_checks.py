@@ -288,16 +288,16 @@ def check_analyze_failed_marks_done(db_path: Path) -> None:
 def check_build_plan_hard_exclude() -> None:
     from meridian.context import Mode, make_context
     from meridian.library import Track
-    from meridian.queue_engine import build_plan
+    from meridian.queue_engine import build_plan, mix_counts
 
-    def t(i: int) -> Track:
+    def t(i: int, *, artist: str = "Band", album: str = "LP", plays: int = 0, skips: int = 0) -> Track:
         return Track(
             id=i,
             path=f"/m/{i}.mp3",
             title=f"t{i}",
-            artist="Band",
-            album="LP",
-            albumartist="Band",
+            artist=artist,
+            album=album,
+            albumartist=artist,
             genre="Metal",
             duration_ms=1000,
             year=None,
@@ -309,8 +309,8 @@ def check_build_plan_hard_exclude() -> None:
             low_trust=False,
             pinned=False,
             loved=False,
-            play_count=0,
-            skip_count=0,
+            play_count=plays,
+            skip_count=skips,
             last_played=None,
             added_at=0.0,
             mtime=0.0,
@@ -323,6 +323,35 @@ def check_build_plan_hard_exclude() -> None:
     assert 1 not in plan.order, "hard_exclude must keep the just-finished track out"
     solo = build_plan([t(1)], ctx, [], hard_exclude_ids={1})
     assert solo.order == [], "single-track hard_exclude must not refill with itself"
+
+    # Artist anti-repeat when alternatives exist.
+    mixed = [t(i, artist=f"A{i % 5}", album=f"Alb{i}") for i in range(1, 21)]
+    plan2 = build_plan(mixed, ctx, [], length=10)
+    from collections import Counter
+
+    artist_counts = Counter(
+        next(x.artist for x in mixed if x.id == tid) for tid in plan2.order
+    )
+    assert all(n <= 2 for n in artist_counts.values()), artist_counts
+
+    # Mode mix + skip pressure reshape take sizes.
+    focus = mix_counts(make_context(Mode.FOCUS, 0.5, 0.5, 0.25, 0.0))
+    charge = mix_counts(make_context(Mode.CHARGE, 0.5, 0.5, 0.25, 0.0))
+    pressured = mix_counts(make_context(Mode.WANDER, 0.5, 0.5, 0.25, 1.0))
+    calm = mix_counts(make_context(Mode.WANDER, 0.5, 0.5, 0.25, 0.0))
+    assert focus[1] >= focus[3]  # NOW >= FILL in Focus
+    assert charge[1] >= calm[1]  # Charge leans NOW
+    assert pressured[3] > calm[3]  # skip pressure grows FILL
+    assert pressured[1] < calm[1]  # and shrinks NOW
+
+    # Finish/skip importance: finished tracks outrank often-skipped peers at same mood.
+    from meridian.queue_engine import classify
+
+    finished = t(1, plays=8, skips=1)
+    skipped = t(2, plays=1, skips=8)
+    ranked = classify([finished, skipped], ctx, set())
+    by_id = {r.track.id: r for r in ranked}
+    assert by_id[1].importance > by_id[2].importance
 
 
 def check_mood_map_helpers() -> None:

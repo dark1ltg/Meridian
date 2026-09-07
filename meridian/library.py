@@ -220,8 +220,8 @@ class Library:
         lens_x: float,
         lens_y: float,
         skipped: bool,
-        amount: float = 0.014,
-        max_step: float = 0.025,
+        amount: float = 0.018,
+        max_step: float = 0.032,
     ) -> bool:
         """Offline personalization: tiny unpinned drift from skip vs finish under the lens."""
         from meridian.features import confidence_low_trust
@@ -256,10 +256,10 @@ class Library:
             nv = max(0.03, min(0.97, v + dv))
             ne = max(0.03, min(0.97, e + de))
             if skipped:
-                nconf = max(0.12, conf - 0.04)
+                nconf = max(0.12, conf - 0.05)
                 note = self._append_note(row["confidence_note"], "listen skip")
             else:
-                nconf = min(0.95, conf + 0.05)
+                nconf = min(0.95, conf + 0.06)
                 note = self._append_note(row["confidence_note"], "listen finish")
             self.conn.execute(
                 """
