@@ -105,10 +105,10 @@ def test_build_profile_bounded() -> None:
 
 
 def test_soft_pcm_bpm_stays_clamped() -> None:
-    """Tagged BPM must not pull energy outside the soft PCM envelope."""
+    """Tagged BPM must not pull energy outside the soft / evidence envelope."""
     from unittest.mock import patch
 
-    from meridian.features import SOFT_PCM_MAX_SHIFT, analyze_audio, genre_seed
+    from meridian.features import EVIDENCE_SOFT_ENERGY_MAX, analyze_audio, genre_seed
 
     sr = SAMPLERATE
     t = np.arange(sr * 3, dtype=np.float32) / sr
@@ -117,7 +117,7 @@ def test_soft_pcm_bpm_stays_clamped() -> None:
     assert seed.clamp_match
     with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None)):
         result = analyze_audio("/tmp/x.flac", "metal", "x", "y", 180.0)
-    assert abs(result.energy - seed.energy) <= max(SOFT_PCM_MAX_SHIFT, 0.09) + 1e-9
+    assert abs(result.energy - seed.energy) <= EVIDENCE_SOFT_ENERGY_MAX + 1e-9
 
 
 def test_onset_stats_rejects_spurious_bpm() -> None:
@@ -271,3 +271,150 @@ def test_genre_dictionary_has_contemporary_seeds() -> None:
     assert "BPM conflict" in note_c
     c, note = mood_confidence(tag_key="metal", pcm_ok=True, bpm_ok=True)
     assert c > 0.7 and "tag:metal" in note
+
+
+def test_rms_consistency_and_peak_affect_energy() -> None:
+    """Uneven / peaky loudness should read more Kinetic than flat sustained tone."""
+    sr = SAMPLERATE
+    n = sr * 4
+    t = np.arange(n, dtype=np.float32) / sr
+    tone = np.sin(2 * np.pi * 220 * t).astype(np.float32)
+    steady = (0.35 * tone).astype(np.float32)
+    # Long quiet gaps with short loud hits → low RMS consistency, high peak.
+    dynamic = (0.04 * tone).astype(np.float32)
+    for i in range(0, n, sr):
+        dynamic[i : i + sr // 8] = (0.85 * tone[i : i + sr // 8]).astype(np.float32)
+    assert energy_stats(steady)["consistency"] > energy_stats(dynamic)["consistency"] + 0.2
+    assert energy_stats(dynamic)["range"] > energy_stats(steady)["range"]
+    ps = build_profile(steady)
+    pd = build_profile(dynamic)
+    assert pd.energy > ps.energy + 0.03
+
+
+def test_burstiness_modulates_not_drives_kinetic() -> None:
+    """Burstiness may texture Kinetic slightly; unstable material should not fake energy."""
+    sr = SAMPLERATE
+    n = sr * 4
+    regular = np.zeros(n, dtype=np.float32)
+    bursty = np.zeros(n, dtype=np.float32)
+    for i in range(0, n, sr // 4):
+        regular[i : i + 48] = 0.9
+    pos = 0
+    while pos < n - 200:
+        bursty[pos : pos + 48] = 0.9
+        bursty[pos + 80 : pos + 128] = 0.9
+        pos += sr // 2
+    pr = build_profile(regular)
+    pb = build_profile(bursty)
+    # Texture only — not a large Kinetic jump from burstiness alone.
+    assert abs(pb.energy - pr.energy) < 0.12
+    # High-variation / shaky buffer: burst gate should not invent Kinetic.
+    shaky = bursty.copy()
+    shaky[n // 2 :] *= 0.05
+    ps = build_profile(shaky)
+    assert ps.energy < 0.85
+
+
+def test_evidence_soft_widens_valence() -> None:
+    """Steady PCM far from a soft genre seed may move Glow beyond the tiny soft envelope."""
+    from unittest.mock import patch
+
+    from meridian.acoustic import AcousticProfile
+    from meridian.features import (
+        EVIDENCE_SOFT_VALENCE_MAX,
+        SOFT_PCM_MAX_SHIFT,
+        analyze_audio,
+        genre_seed,
+    )
+
+    seed = genre_seed("metal", "x", "y", path="/tmp/x.flac")
+    profile = AcousticProfile(
+        valence=0.88,
+        energy=0.30,
+        bpm=120.0,
+        unstable=False,
+        brightness=0.85,
+        flux=0.25,
+        onset_consistency=0.88,
+        variation=0.06,
+        window_count=3,
+        pcm_samples=8000,
+    )
+    pcm = np.zeros(SAMPLERATE, dtype=np.float32)
+    with patch(
+        "meridian.features._decode_pcm_with_fallback",
+        return_value=(pcm, False, profile),
+    ):
+        result = analyze_audio("/tmp/x.flac", "metal", "x", "y", 180.0)
+    moved = abs(result.valence - seed.valence)
+    assert moved > SOFT_PCM_MAX_SHIFT + 0.02
+    assert moved <= EVIDENCE_SOFT_VALENCE_MAX + 1e-9
+
+
+def test_genre_conflict_reduces_metadata_not_max_pcm() -> None:
+    """Conflict frees seed authority for PCM; unstable PCM claims little of that weight."""
+    from unittest.mock import patch
+
+    from meridian.acoustic import AcousticProfile
+    from meridian.features import (
+        EVIDENCE_SOFT_ENERGY_MAX,
+        SOFT_PCM_MAX_SHIFT,
+        _genre_pair_conflict,
+        analyze_audio,
+        genre_seed,
+    )
+
+    path_conflict = "/music/Ambient/Album/track.flac"
+    path_aligned = "/music/Metal/Album/track.flac"
+    seed_c = genre_seed("metal", "x", "y", path=path_conflict)
+    seed_a = genre_seed("metal", "x", "y", path=path_aligned)
+    assert _genre_pair_conflict(seed_c.tag_key, seed_c.path_key)
+    assert not _genre_pair_conflict(seed_a.tag_key, seed_a.path_key)
+
+    stable = AcousticProfile(
+        valence=0.55,
+        energy=0.25,
+        bpm=90.0,
+        unstable=False,
+        brightness=0.5,
+        flux=0.2,
+        # Below evidence-widen gate (0.70) so conflict transfer is the only soft open.
+        onset_consistency=0.60,
+        variation=0.08,
+        window_count=3,
+        pcm_samples=8000,
+    )
+    unstable_p = AcousticProfile(
+        valence=0.55,
+        energy=0.25,
+        bpm=90.0,
+        unstable=True,
+        brightness=0.5,
+        flux=0.2,
+        onset_consistency=0.25,
+        variation=0.40,
+        window_count=3,
+        pcm_samples=8000,
+    )
+    pcm = np.zeros(SAMPLERATE, dtype=np.float32)
+
+    with patch(
+        "meridian.features._decode_pcm_with_fallback",
+        return_value=(pcm, False, stable),
+    ):
+        conflicted = analyze_audio(path_conflict, "metal", "x", "y", 120.0)
+        aligned = analyze_audio(path_aligned, "metal", "x", "y", 120.0)
+    moved_c = abs(conflicted.energy - seed_c.energy)
+    moved_a = abs(aligned.energy - seed_a.energy)
+    # Freed metadata → a bit more PCM residual than aligned soft, but not evidence-max crank.
+    assert moved_c > moved_a + 0.005
+    assert moved_c < EVIDENCE_SOFT_ENERGY_MAX - 0.005
+    assert moved_c > SOFT_PCM_MAX_SHIFT - 1e-9
+
+    with patch(
+        "meridian.features._decode_pcm_with_fallback",
+        return_value=(pcm, False, unstable_p),
+    ):
+        conflicted_weak = analyze_audio(path_conflict, "metal", "x", "y", 120.0)
+    # Unstable PCM must not inherit most of the freed metadata authority.
+    assert abs(conflicted_weak.energy - seed_c.energy) < moved_c - 0.005

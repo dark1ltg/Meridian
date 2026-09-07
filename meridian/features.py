@@ -203,6 +203,9 @@ WORD_ENERGY = {
 PCM_MAX_SHIFT = 0.12
 # Tiny residual when genre+BPM are already strong — spreads neighbors without leaving the cluster.
 SOFT_PCM_MAX_SHIFT = 0.06
+# Evidence-gated soft widen: steady PCM that clearly disagrees with the seed.
+EVIDENCE_SOFT_VALENCE_MAX = 0.12
+EVIDENCE_SOFT_ENERGY_MAX = 0.10
 KEYWORD_SHIFT_CAP = 0.18
 REPLAYGAIN_ENERGY_CAP = 0.06
 DEFAULT_VALENCE = 0.5
@@ -1001,30 +1004,72 @@ def analyze_audio(
         disagree = float(
             np.hypot(valence_pcm - seed.valence, energy_pcm - seed.energy)
         )
+        genre_conflict = _genre_pair_conflict(seed.tag_key, seed.path_key)
         # Structure-aware clamps: steady rhythm + genre disagreement → trust PCM more;
         # unstable / uneven onsets → hug the genre seed tighter.
-        soft_shift = SOFT_PCM_MAX_SHIFT
+        soft_shift_v = SOFT_PCM_MAX_SHIFT
+        soft_shift_e = SOFT_PCM_MAX_SHIFT
         pcm_w_v, pcm_w_e = 0.40, 0.48
         clamp_shift = PCM_MAX_SHIFT
         if onset_c > 0.70 and disagree > 0.12:
-            soft_shift = min(0.09, SOFT_PCM_MAX_SHIFT * 1.45)
+            widened = min(0.09, SOFT_PCM_MAX_SHIFT * 1.45)
+            soft_shift_v = widened
+            soft_shift_e = widened
             pcm_w_v, pcm_w_e = 0.55, 0.62
             clamp_shift = min(0.16, PCM_MAX_SHIFT * 1.25)
         elif unstable or onset_c < 0.35:
-            soft_shift = SOFT_PCM_MAX_SHIFT * 0.55
+            soft_shift_v = SOFT_PCM_MAX_SHIFT * 0.55
+            soft_shift_e = SOFT_PCM_MAX_SHIFT * 0.55
             pcm_w_v, pcm_w_e = 0.28, 0.32
             clamp_shift = PCM_MAX_SHIFT * 0.70
+
+        # Evidence-gated soft widen: stable PCM that clearly disagrees with the seed.
+        # Glow may move farther than Kinetic (genre+BPM usually encode pace better).
+        if (
+            soft_pcm_only
+            and onset_c > 0.70
+            and not unstable
+            and variation < 0.22
+            and disagree > 0.18
+        ):
+            soft_shift_v = max(soft_shift_v, EVIDENCE_SOFT_VALENCE_MAX)
+            soft_shift_e = max(soft_shift_e, min(EVIDENCE_SOFT_ENERGY_MAX, EVIDENCE_SOFT_VALENCE_MAX))
+
+        # Tag vs path conflict: metadata is unreliable — reduce seed authority.
+        # Freed weight goes to PCM only in proportion to how trustworthy PCM is
+        # (conflict alone must not crank waveform authority to maximum).
+        if genre_conflict and seed.tag_key and seed.path_key:
+            tv, te = GENRE_MOOD[seed.tag_key]
+            pv, pe = GENRE_MOOD[seed.path_key]
+            conflict_d = float(np.hypot(tv - pv, te - pe))
+            conflict_amt = float(np.clip((conflict_d - 0.35) / 0.40, 0.0, 1.0))
+            if unstable or onset_c < 0.35:
+                pcm_claim = 0.20
+            elif variation > 0.22 or onset_c < 0.55:
+                pcm_claim = 0.50
+            else:
+                pcm_claim = 0.85
+            transfer = conflict_amt * pcm_claim
+            # Soft residual: open the envelope a little with freed metadata weight.
+            soft_shift_v = min(0.10, soft_shift_v + transfer * 0.045)
+            soft_shift_e = min(0.09, soft_shift_e + transfer * 0.035)
+            # Clamp blend: move weight from seed → PCM (capped; not untagged-level).
+            pcm_w_v = min(0.58, pcm_w_v + transfer * 0.18)
+            pcm_w_e = min(0.65, pcm_w_e + transfer * 0.18)
+            clamp_shift = min(0.15, clamp_shift + transfer * 0.025)
+
+        soft_shift = soft_shift_e  # post-BPM energy reclamp uses Kinetic envelope
 
         if weak_tags:
             # Dump formats: distrust tags; lean hard on waveform.
             valence = float(np.clip(0.22 * seed.valence + 0.78 * valence_pcm, 0.03, 0.97))
             energy = float(np.clip(0.18 * seed.energy + 0.82 * energy_pcm, 0.03, 0.97))
         elif soft_pcm_only:
-            # Genre+BPM already trusted — soft residual spreads same-genre neighbors.
+            # Genre+BPM already trusted — residual spreads neighbors (wider when evidence is strong).
             valence = float(
                 np.clip(
                     seed.valence
-                    + float(np.clip(valence_pcm - seed.valence, -soft_shift, soft_shift)),
+                    + float(np.clip(valence_pcm - seed.valence, -soft_shift_v, soft_shift_v)),
                     0.03,
                     0.97,
                 )
@@ -1032,7 +1077,7 @@ def analyze_audio(
             energy = float(
                 np.clip(
                     seed.energy
-                    + float(np.clip(energy_pcm - seed.energy, -soft_shift, soft_shift)),
+                    + float(np.clip(energy_pcm - seed.energy, -soft_shift_e, soft_shift_e)),
                     0.03,
                     0.97,
                 )

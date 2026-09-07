@@ -4,16 +4,19 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-07)
 
-Richer acoustic mood cues from the existing PCM decode budget, smarter local recommendations, placement fixes, desktop integration, and reliability passes for scan, matrix/context queue, crossfade accounting, quit, mood map, and BPM/signal trust.
+Richer acoustic mood cues from the existing PCM decode budget, smarter local recommendations, more honest initial placement (soft-PCM and conflict handling), desktop integration, and reliability passes for scan, matrix/context queue, crossfade accounting, quit, mood map, and BPM/signal trust.
 
 ### Acoustic profile
 - Multi-band frequency energy and spectral flux from the current FFT/PCM path
-- RMS dynamics (mean, variation, peak, range, trend) and onset density/burstiness/consistency
+- RMS dynamics (mean, variation, peak, range, trend, consistency) and onset density/burstiness/consistency
 - Nonlinear brightness mapping; confidence reflects spectral/rhythm stability
 - Local-window aggregation inside the decode; map remains Shadow↔Glow / Still↔Kinetic
 - Longer tracks use two ~14s windows (early + mid) within the same ~28s mono @ 11025 Hz budget; short tracks keep a single window
 - Disagree-aware dual-window merge: strong intro/drop mismatch keeps the stabler window instead of a false middle
 - Richer 2D blend from band/mid balance, flux, and energy trend; tonal vs noisy weighting (flatness pulls Glow down)
+- Energy uses RMS consistency and peak; burstiness textures Kinetic only when onset structure is trustworthy
+- Evidence-gated soft-PCM: stable waveform that clearly disagrees with a genre+BPM seed may move farther (Glow freer than Kinetic)
+- Tag vs path genre conflict reduces metadata authority; freed weight goes to PCM only in proportion to PCM trust (not maxed)
 - Structure-aware soft/genre clamps: steady rhythm + genre disagreement trusts PCM more; unstable material hugs the seed
 - When tag and detected BPM conflict, energy nudge trusts detected if rhythm is steady, otherwise the tag
 - Persists onset consistency, spectral flux, and brightness for Focus ranking and album spread (no re-decode)

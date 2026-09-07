@@ -391,26 +391,43 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
         )
     )
 
-    kinetic = float(
+    # Base Kinetic from rate-like cues — burstiness is texture, not a primary driver.
+    kinetic_base = float(
         np.clip(
             0.26 * kinetic_zcr
-            + 0.32 * float(ostats["kinetic"])
-            + 0.22 * flux
-            + 0.12 * float(np.clip(ostats["density"] + 0.35 * ostats["burstiness"], 0.05, 0.95))
-            + 0.08 * float(np.clip(est["std"], 0.0, 1.0)),
+            + 0.34 * float(ostats["kinetic"])
+            + 0.24 * flux
+            + 0.10 * float(np.clip(ostats["density"], 0.05, 0.95))
+            + 0.06 * float(np.clip(est["std"], 0.0, 1.0)),
             0.05,
             0.95,
         )
     )
+    # Burstiness modulates Kinetic only when onset structure is trustworthy.
+    # Unstable / high-variation windows (intro/drop, shaky PCM) get almost no burst lift.
+    burst = float(np.clip(ostats["burstiness"], 0.0, 1.0))
+    onset_c_local = float(np.clip(ostats["consistency"], 0.0, 1.0))
+    burst_gate = onset_c_local
+    if unstable or variation > 0.28:
+        burst_gate *= 0.25
+    elif variation > 0.18:
+        burst_gate *= 0.55
+    # ~±12% texture around the base when gated; irregular ambient won't fake energy.
+    burst_mod = 1.0 + 0.12 * burst_gate * (burst - 0.35)
+    kinetic = float(np.clip(kinetic_base * burst_mod, 0.05, 0.95))
     # Brightness belongs on Shadow↔Glow only — keep energy Still↔Kinetic.
-    # Use flux + energy_trend a bit more so evolving tracks feel more kinetic.
+    # Consistency: even loudness → Still; uneven → Kinetic. Peak adds punch beyond mean RMS.
+    dyn_from_consistency = float(np.clip(1.0 - float(est["consistency"]), 0.0, 1.0))
+    peak_n = float(np.clip(est["peak"], 0.05, 0.95))
     energy = float(
         np.clip(
-            0.28 * float(est["mean"])
-            + 0.34 * kinetic
-            + 0.16 * crest_n
-            + 0.12 * float(np.clip(est["range"] / 2.0, 0.0, 1.0))
-            + 0.10 * float(np.clip(0.5 + 0.35 * est["trend"], 0.05, 0.95)),
+            0.24 * float(est["mean"])
+            + 0.30 * kinetic
+            + 0.14 * crest_n
+            + 0.10 * float(np.clip(est["range"] / 2.0, 0.0, 1.0))
+            + 0.08 * float(np.clip(0.5 + 0.35 * est["trend"], 0.05, 0.95))
+            + 0.08 * dyn_from_consistency
+            + 0.06 * peak_n,
             0.03,
             0.97,
         )
