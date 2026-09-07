@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -98,6 +99,8 @@ class Library:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.lock = threading.Lock()
+        # Process-local: keeps analyze from looping when DB mark_analyze_failed fails.
+        self._analyze_denylist: set[int] = set()
         self._migrate()
 
     def _migrate(self) -> None:
@@ -298,32 +301,51 @@ class Library:
             self.conn.commit()
 
     def mark_analyze_failed(self, track_id: int) -> None:
-        """Mark a track analyzed so a poison file cannot loop the analyze worker forever."""
+        """Mark a track analyzed so a poison file cannot loop the analyze worker forever.
+
+        Always denylists in-process first so a failed DB write cannot restart the loop.
+        """
         from meridian.features import confidence_low_trust
 
-        with self.lock:
-            row = self.conn.execute(
-                "SELECT pinned, mood_confidence, confidence_note, low_trust FROM tracks WHERE id = ?",
-                (track_id,),
-            ).fetchone()
-            if not row:
+        self._analyze_denylist.add(int(track_id))
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                with self.lock:
+                    row = self.conn.execute(
+                        "SELECT pinned, mood_confidence, confidence_note FROM tracks WHERE id = ?",
+                        (track_id,),
+                    ).fetchone()
+                    if not row:
+                        return
+                    if int(row["pinned"] or 0):
+                        # Pins keep mood/trust; only clear the pending-analyze flag.
+                        self.conn.execute(
+                            "UPDATE tracks SET analyzed = 1 WHERE id = ?", (track_id,)
+                        )
+                    else:
+                        conf = float(
+                            row["mood_confidence"]
+                            if row["mood_confidence"] is not None
+                            else 0.25
+                        )
+                        conf = min(conf, 0.28)
+                        note = self._append_note(row["confidence_note"], "analyze failed")
+                        self.conn.execute(
+                            """
+                            UPDATE tracks
+                            SET analyzed = 1, mood_confidence = ?, low_trust = ?, confidence_note = ?
+                            WHERE id = ? AND pinned = 0
+                            """,
+                            (conf, int(confidence_low_trust(conf)), note, track_id),
+                        )
+                    self.conn.commit()
                 return
-            if int(row["pinned"] or 0):
-                # Pins keep mood/trust; only clear the pending-analyze flag.
-                self.conn.execute("UPDATE tracks SET analyzed = 1 WHERE id = ?", (track_id,))
-            else:
-                conf = float(row["mood_confidence"] if row["mood_confidence"] is not None else 0.25)
-                conf = min(conf, 0.28)
-                note = self._append_note(row["confidence_note"], "analyze failed")
-                self.conn.execute(
-                    """
-                    UPDATE tracks
-                    SET analyzed = 1, mood_confidence = ?, low_trust = ?, confidence_note = ?
-                    WHERE id = ? AND pinned = 0
-                    """,
-                    (conf, int(confidence_low_trust(conf)), note, track_id),
-                )
-            self.conn.commit()
+            except sqlite3.Error as exc:
+                last_err = exc
+                time.sleep(0.05 * (attempt + 1))
+        # Denylist already prevents the session poison loop.
+        _ = last_err
 
     def smooth_album_moods(self, max_shift: float = 0.08, blend: float = 0.30) -> int:
         """Gently pull unpinned tracks toward their album median mood (no ffmpeg).
@@ -565,11 +587,47 @@ class Library:
             )
             self.conn.commit()
 
-    def delete_missing(self, existing_paths: Iterable[str]) -> None:
+    def delete_missing(
+        self,
+        existing_paths: Iterable[str],
+        *,
+        only_under: Iterable[Path | str] | None = None,
+    ) -> None:
+        """Remove DB rows for files not seen in this scan.
+
+        When only_under is set, only delete tracks whose resolved path sits under
+        one of those fully-walked roots (partial/unreadable trees stay intact).
+        """
         keep = set(existing_paths)
+        roots: list[Path] = []
+        for raw in only_under or ():
+            try:
+                roots.append(Path(raw).resolve())
+            except OSError:
+                continue
+
+        def _under_scanned_root(path: str) -> bool:
+            if not roots:
+                return True
+            try:
+                resolved = Path(path).resolve()
+            except OSError:
+                return False
+            for root in roots:
+                try:
+                    resolved.relative_to(root)
+                    return True
+                except ValueError:
+                    continue
+            return False
+
         with self.lock:
             rows = self.conn.execute("SELECT id, path FROM tracks").fetchall()
-            dead = [r["id"] for r in rows if r["path"] not in keep]
+            dead = [
+                r["id"]
+                for r in rows
+                if r["path"] not in keep and _under_scanned_root(r["path"])
+            ]
             if dead:
                 self.conn.executemany("DELETE FROM tracks WHERE id = ?", [(i,) for i in dead])
                 self.conn.commit()
@@ -616,10 +674,12 @@ class Library:
             rows = self.conn.execute(
                 "SELECT id FROM tracks WHERE analyzed = 0"
             ).fetchall()
-        return [int(r["id"]) for r in rows]
+            deny = set(self._analyze_denylist)
+        return [int(r["id"]) for r in rows if int(r["id"]) not in deny]
 
     def mark_all_pending_analysis(self) -> int:
         """Mark every track for re-analysis (Rescan). Pinned moods stay protected in set_analyzed_mood."""
+        self._analyze_denylist.clear()
         with self.lock:
             cur = self.conn.execute("UPDATE tracks SET analyzed = 0")
             self.conn.commit()

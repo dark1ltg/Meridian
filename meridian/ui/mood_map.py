@@ -450,16 +450,21 @@ class MoodMap(QGraphicsView):
                 preserved[tid] = QPointF(star.pos())
             elif tid in self._positions:
                 preserved[tid] = QPointF(self._positions[tid])
-        self._positions = {
-            r.track.id: self.mood_to_pos(r.track.valence, r.track.energy) for r in ranked
-        }
-        self._positions.update(preserved)
         # Drop live stars that vanished; keep others until LOD sync.
         for tid in list(self._stars):
             if tid not in self._ranked:
                 self._scene.removeItem(self._stars.pop(tid))
                 if self._sky_hold_id == tid:
                     self._sky_hold_id = None
+        # Never keep drag positions for tracks that left the ranked set (KeyError guard).
+        self._positions = {
+            r.track.id: self.mood_to_pos(r.track.valence, r.track.energy) for r in ranked
+        }
+        for tid, pos in preserved.items():
+            if tid in self._ranked:
+                self._positions[tid] = pos
+            elif self._sky_hold_id == tid:
+                self._sky_hold_id = None
         self._rebuild_star_grid()
         self._rebuild_starfield()
         self._lod_band = -1
@@ -698,7 +703,9 @@ class MoodMap(QGraphicsView):
         for tid, pos in self._positions.items():
             if not vis.contains(pos) and tid not in locked:
                 continue
-            item = self._ranked[tid]
+            item = self._ranked.get(tid)
+            if item is None:
+                continue
             score = item.fit * 0.7 + item.importance * 0.3
             if item.track.loved:
                 score += 0.5

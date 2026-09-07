@@ -72,12 +72,14 @@ class MainWindow(QMainWindow):
         self._analyze_gen = 0
         self._closing = False
         self._pending_finish_nudge: int | None = None
+        self._pending_play_credit: int | None = None
+        self._host_codec_sticky = False
         self._duration = 0
         self._rebuild_lock = False
         self._lens_timer = QTimer(self)
         self._lens_timer.setSingleShot(True)
         self._lens_timer.setInterval(180)
-        self._lens_timer.timeout.connect(self.refresh_plan)
+        self._lens_timer.timeout.connect(lambda: self.refresh_plan(rebuild_queue=False))
 
         self._build()
         self._bind()
@@ -90,11 +92,24 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(400, self.start_scan)
         QTimer.singleShot(900, self._maybe_warn_libx264)
 
+    def _set_status(self, message: str) -> None:
+        """Set the status bar, keeping a sticky libx264 tip when the host lacks it."""
+        text = message or ""
+        if self._host_codec_sticky and should_warn_missing_libx264():
+            tip = libx264_missing_status()
+            if tip and tip not in text:
+                text = f"{text} · {tip}" if text else tip
+        else:
+            self._host_codec_sticky = False
+        self.status_label.setText(text)
+
     def _maybe_warn_libx264(self) -> None:
         """AppImage keeps libx264 on the host — tell the user if playback may be broken."""
         if not should_warn_missing_libx264():
+            self._host_codec_sticky = False
             return
-        self.status_label.setText(libx264_missing_status())
+        self._host_codec_sticky = True
+        self._set_status(libx264_missing_status())
         if self.settings.value("host/skip_libx264_warning", False, type=bool):
             return
         box = QMessageBox(self)
@@ -107,6 +122,8 @@ class MainWindow(QMainWindow):
         box.exec()
         if box.clickedButton() is dont:
             self.settings.setValue("host/skip_libx264_warning", True)
+        # Re-assert after the dialog so scan/analyze progress cannot bury the tip forever.
+        self._set_status(libx264_missing_status())
 
     def _build(self) -> None:
         root = QWidget()
@@ -216,7 +233,7 @@ class MainWindow(QMainWindow):
         self.map.lens_changed.connect(self._lens_changed)
         self.map.track_pinned.connect(self._pin_track)
         self.map.track_activated.connect(self.play_id)
-        self.map.track_hovered.connect(self.status_label.setText)
+        self.map.track_hovered.connect(self._set_status)
         self.matrix.track_activated.connect(self._pull_and_play)
         self.queue_list.itemDoubleClicked.connect(self._queue_activated)
         self.search.track_chosen.connect(self._search_picked)
@@ -231,8 +248,8 @@ class MainWindow(QMainWindow):
         self.player.state_changed.connect(self.transport.set_playing)
         self.player.track_nearly_finished.connect(self._nearly_finished)
         self.player.track_finished.connect(self._track_finished_hard)
-        self.player.natural_listen_completed.connect(self._natural_listen_completed)
-        self.player.error_occurred.connect(lambda m: self.status_label.setText(m))
+        self.player.crossfade_settled.connect(self._crossfade_settled)
+        self.player.error_occurred.connect(self._set_status)
 
     def _restore_lens(self) -> None:
         x = float(self.settings.value("lens_x", 0.52))
@@ -270,11 +287,15 @@ class MainWindow(QMainWindow):
             self.session_queue = list(self.plan.order)
             if keep_current and current_id and current_id in self.session_queue:
                 self.queue_index = self.session_queue.index(current_id)
+            elif keep_current and current_id:
+                # Still playing something absent from the new queue: Next should
+                # land on slot 0, not skip it via queue_index += 1 from 0.
+                self.queue_index = -1
             else:
                 self.queue_index = 0
         self._fill_queue()
         n = len(tracks)
-        self.status_label.setText(f"{n} local tracks · lens at mood {ctx.lens_x:.2f},{ctx.lens_y:.2f}")
+        self._set_status(f"{n} local tracks · lens at mood {ctx.lens_x:.2f},{ctx.lens_y:.2f}")
 
     def _fill_queue(self) -> None:
         self.queue_list.clear()
@@ -368,12 +389,12 @@ class MainWindow(QMainWindow):
         self.settings.setValue("lens_x", track.valence)
         self.settings.setValue("lens_y", track.energy)
         self.settings.setValue("lens_r", radius)
-        self.status_label.setText(f"Lens on {track.label}")
+        self._set_status(f"Lens on {track.label}")
         self._pull_and_play(track_id)
 
     def _pin_track(self, track_id: int, valence: float, energy: float) -> None:
         self.library.set_mood(track_id, valence, energy, pinned=True)
-        self.refresh_plan()
+        self.refresh_plan(rebuild_queue=False)
 
     def add_folder(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Add music folder", str(Path.home() / "Music"))
@@ -403,43 +424,57 @@ class MainWindow(QMainWindow):
             return
         self._stop_analyze(wait_ms=8000)
         pending = self.library.mark_all_pending_analysis()
-        self.status_label.setText(f"Rescanning library ({pending} tracks to re-analyze)…")
+        self._set_status(f"Rescanning library ({pending} tracks to re-analyze)…")
         self._start_scan_worker(force=True, on_finished=self._rescan_done)
 
     def _rescan_done(self, count: int) -> None:
         self._cleanup_scan_thread()
         if self._closing:
             return
-        self.status_label.setText(f"Rescanned {count} files. Re-analyzing waveforms…")
+        if count < 0:
+            self._set_status("Rescan failed.")
+            return
+        self._set_status(f"Rescanned {count} files. Re-analyzing waveforms…")
         self.refresh_plan()
         self.start_analyze()
 
     def start_scan(self) -> None:
         if self._scan_thread and self._scan_thread.isRunning():
             return
-        self.status_label.setText("Scanning local files…")
+        self._set_status("Scanning local files…")
         self._start_scan_worker(force=False, on_finished=self._scan_done)
 
     def _start_scan_worker(self, *, force: bool, on_finished) -> None:
         self._cleanup_scan_thread()
         self._scan_worker = ScanWorker(self.library, force=force)
         self._scan_thread = start_worker(self._scan_worker)
-        self._scan_worker.progress.connect(lambda n: self.status_label.setText(f"Found {n}"))
+        self._scan_worker.progress.connect(lambda n: self._set_status(f"Found {n}"))
         self._scan_worker.failed.connect(lambda m: QMessageBox.warning(self, "Scan failed", m))
         self._scan_worker.finished.connect(on_finished)
 
-    def _cleanup_scan_thread(self) -> None:
-        if self._scan_thread:
-            self._scan_thread.quit()
-            self._scan_thread.wait(3000)
-            self._scan_thread.deleteLater()
-            self._scan_thread = None
-        if self._scan_worker:
-            self._scan_worker.deleteLater()
-            self._scan_worker = None
+    def _cleanup_scan_thread(self, wait_ms: int = 3000) -> bool:
+        """Stop the scan worker. Returns True when the thread is fully stopped."""
+        worker = self._scan_worker
+        thread = self._scan_thread
+        self._scan_worker = None
+        self._scan_thread = None
+        if worker is not None:
+            worker.abort()
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            if not thread.wait(wait_ms):
+                # Still running — avoid deleteLater on a live QThread.
+                return False
+        if thread is not None:
+            thread.deleteLater()
+        if worker is not None:
+            worker.deleteLater()
+        return True
 
-    def _stop_analyze(self, wait_ms: int = 5000) -> None:
+    def _stop_analyze(self, wait_ms: int = 25000) -> bool:
+        """Stop analyze. Returns True when the thread is fully stopped."""
         # Bump generation first so a late finished signal cannot restart analyze.
+        # Wait past features.analyze ffmpeg timeout (20s) so quit does not UAF the worker.
         self._analyze_gen += 1
         worker = self._analyze_worker
         thread = self._analyze_thread
@@ -453,17 +488,22 @@ class MainWindow(QMainWindow):
                 pass
         if thread is not None and thread.isRunning():
             thread.quit()
-            thread.wait(wait_ms)
+            if not thread.wait(wait_ms):
+                return False
         if thread is not None:
             thread.deleteLater()
         if worker is not None:
             worker.deleteLater()
+        return True
 
     def _scan_done(self, added: int) -> None:
         self._cleanup_scan_thread()
         if self._closing:
             return
-        self.status_label.setText(f"Indexed {added} new files. Mapping mood…")
+        if added < 0:
+            self._set_status("Scan failed.")
+            return
+        self._set_status(f"Indexed {added} new files. Mapping mood…")
         self.refresh_plan()
         self.start_analyze()
 
@@ -473,14 +513,14 @@ class MainWindow(QMainWindow):
         if self._analyze_thread and self._analyze_thread.isRunning():
             return
         if not self.library.unanalyzed_ids():
-            self.status_label.setText("Mood map updated from local audio.")
+            self._set_status("Mood map updated from local audio.")
             return
         self._analyze_gen += 1
         gen = self._analyze_gen
         self._analyze_worker = AnalyzeWorker(self.library)
         self._analyze_thread = start_worker(self._analyze_worker)
         self._analyze_worker.progress.connect(
-            lambda name, i, n: self.status_label.setText(f"Listening to waveform {i}/{n}: {name}")
+            lambda name, i, n: self._set_status(f"Listening to waveform {i}/{n}: {name}")
         )
         self._analyze_worker.finished.connect(lambda g=gen: self._analyze_done(g))
 
@@ -503,10 +543,10 @@ class MainWindow(QMainWindow):
         self.refresh_plan()
         # If scan added more tracks while we were analyzing, finish them.
         if self.library.unanalyzed_ids():
-            self.status_label.setText("More tracks to map…")
+            self._set_status("More tracks to map…")
             self.start_analyze()
             return
-        self.status_label.setText("Mood map updated from local audio.")
+        self._set_status("Mood map updated from local audio.")
 
     def _queue_activated(self, item: QListWidgetItem) -> None:
         tid = item.data(Qt.ItemDataRole.UserRole)
@@ -550,7 +590,7 @@ class MainWindow(QMainWindow):
         if not self.session_queue:
             self._replenish_queue()
         if not self.session_queue:
-            self.status_label.setText("Context queue is empty — move the lens or replenish.")
+            self._set_status("Context queue is empty — move the lens or replenish.")
             return
         self.queue_index = max(0, min(self.queue_index, len(self.session_queue) - 1))
         self.play_id(self.session_queue[self.queue_index])
@@ -558,26 +598,44 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def play_id(self, track_id: int, *, _depth: int = 0) -> None:
         if _depth > 48:
-            self.status_label.setText("No playable tracks left in the queue.")
+            self._set_status("No playable tracks left in the queue.")
             return
         track = self.library.get(track_id)
         if track is None or not Path(track.path).exists():
             msg = "Track removed from library." if track is None else "File missing on disk."
-            self.status_label.setText(msg)
+            self._set_status(msg)
             next_id = self._skip_unplayable(track_id)
             if next_id is not None:
                 self.play_id(next_id, _depth=_depth + 1)
             return
         self._rebuild_lock = True
-        self.library.record_play(track_id, time())
-        self.played_history.append(track_id)
-        self.played_history = self.played_history[-48:]
+        outgoing = self.player.current
+        outgoing_id = outgoing.id if outgoing is not None else None
+        # Interrupting an in-flight fade: credit the outgoing finish if we had one.
+        if self.player.is_crossfading() and self._pending_finish_nudge is not None:
+            finished = self._pending_finish_nudge
+            self._pending_finish_nudge = None
+            if finished != track_id:
+                self._listen_nudge(finished, skipped=False)
+        self._pending_play_credit = None
         self.player.play_track(track)
+        if self.player.is_crossfading() and outgoing_id is not None and outgoing_id != track_id:
+            # Any crossfade (natural or jump): credit skip/finish to the outgoing track.
+            self._pending_finish_nudge = outgoing_id
+            self._pending_play_credit = track_id
+        else:
+            self._pending_finish_nudge = None
+            self._commit_play(track_id)
         self.transport.set_track(track.short_title, f"{track.artist}  ·  {track.album or 'Single'}", track.loved)
         self._rebuild_lock = False
         if self.plan:
             self.map.set_tracks(self.plan.ranked, track_id)
         self._fill_queue()
+
+    def _commit_play(self, track_id: int) -> None:
+        self.library.record_play(track_id, time())
+        self.played_history.append(track_id)
+        self.played_history = self.played_history[-48:]
 
     def _skip_unplayable(self, track_id: int) -> int | None:
         """Drop a missing/deleted id from the queue and return the next candidate."""
@@ -591,20 +649,22 @@ class MainWindow(QMainWindow):
         else:
             self.queue_index += 1
         if self.queue_index >= len(self.session_queue) or not self.session_queue:
-            self._replenish_queue()
+            self._replenish_queue(avoid_id=track_id)
             self.queue_index = 0
         if not self.session_queue:
+            self.player.release_advance_lock()
             return None
         self.queue_index = min(self.queue_index, len(self.session_queue) - 1)
         self._fill_queue()
         return self.session_queue[self.queue_index]
 
     def play_next(self) -> None:
-        # During natural crossfade, current is already the incoming track at ~0ms.
-        # Credit the skip to the outgoing track (pending finish), not the new one.
+        # During crossfade, current is already the incoming track at ~0ms.
+        # Credit the skip to the outgoing track, not the new one.
         if self.player.is_crossfading() and self._pending_finish_nudge is not None:
             outgoing = self._pending_finish_nudge
             self._pending_finish_nudge = None
+            self._pending_play_credit = None  # abandon uncommitted incoming play
             self.library.record_skip(outgoing)
             self.skips_window.append(time())
             self._listen_nudge(outgoing, skipped=True)
@@ -620,7 +680,18 @@ class MainWindow(QMainWindow):
         self._advance_queue(skipped=skipped)
 
     def play_prev(self) -> None:
+        # During crossfade, restore the outgoing song and keep its finish credit.
+        if self.player.is_crossfading() and self._pending_finish_nudge is not None:
+            outgoing = self._pending_finish_nudge
+            self._pending_finish_nudge = None
+            self._pending_play_credit = None
+            self._listen_nudge(outgoing, skipped=False)
+            if outgoing in self.session_queue:
+                self.queue_index = self.session_queue.index(outgoing)
+            self.play_id(outgoing)
+            return
         self._pending_finish_nudge = None
+        self._pending_play_credit = None
         if not self.session_queue:
             self._replenish_queue()
         if not self.session_queue:
@@ -629,20 +700,31 @@ class MainWindow(QMainWindow):
         self.play_id(self.session_queue[self.queue_index])
 
     def _nearly_finished(self) -> None:
-        # Arm crossfade / advance now; credit the listen when the fade completes.
-        if self.player.current:
-            self._pending_finish_nudge = self.player.current.id
+        # Arm crossfade / advance now; credit the listen when the fade settles.
         self._advance_queue(skipped=False)
 
-    def _natural_listen_completed(self) -> None:
-        tid = self._pending_finish_nudge
-        self._pending_finish_nudge = None
-        if tid is not None:
-            self._listen_nudge(tid, skipped=False)
+    def _crossfade_settled(self, natural: bool) -> None:
+        if natural:
+            tid = self._pending_finish_nudge
+            self._pending_finish_nudge = None
+            if tid is not None:
+                self._listen_nudge(tid, skipped=False)
+        else:
+            # Pause/seek/stop/jump interrupted the fade — don't finish-nudge outgoing.
+            self._pending_finish_nudge = None
+        credit = self._pending_play_credit
+        self._pending_play_credit = None
+        if (
+            credit is not None
+            and self.player.current is not None
+            and credit == self.player.current.id
+        ):
+            self._commit_play(credit)
 
     def _track_finished_hard(self) -> None:
         # Short tracks (no nearly-finished arm): nudge + advance together.
         self._pending_finish_nudge = None
+        self._pending_play_credit = None
         if self.player.current:
             self._listen_nudge(self.player.current.id, skipped=False)
         self._advance_queue(skipped=False)
@@ -669,28 +751,50 @@ class MainWindow(QMainWindow):
         else:
             self.queue_index += 1
         if self.queue_index >= len(self.session_queue) or not self.session_queue:
-            self._replenish_queue()
+            self._replenish_queue(avoid_id=current_id)
             self.queue_index = 0
         if not self.session_queue:
+            self.player.release_advance_lock()
+            self._set_status("Context queue is empty — move the lens or add more music.")
             return
-        self.queue_index = min(self.queue_index, len(self.session_queue) - 1)
-        self.play_id(self.session_queue[self.queue_index])
+        self.queue_index = min(max(0, self.queue_index), len(self.session_queue) - 1)
+        next_id = self.session_queue[self.queue_index]
+        # Tiny libraries: never hard-cut restart the track that just ended.
+        if not skipped and current_id is not None and next_id == current_id:
+            self.player.release_advance_lock()
+            self._set_status("Only one playable track in range — waiting.")
+            return
+        self.play_id(next_id)
 
-    def _replenish_queue(self) -> None:
+    def _replenish_queue(self, *, avoid_id: int | None = None) -> None:
         """Build a fresh context queue from lens, time of day, and matrix lists."""
         ctx = self.current_context()
         self.band_chip.setText(ctx.band_label)
         # Skip ghost rows whose files are gone so the queue cannot refill with them.
         tracks = [t for t in self.library.all_tracks() if Path(t.path).exists()]
-        exclude = set(self.played_history[-24:])
-        self.plan = build_plan(tracks, ctx, self.explicit, exclude_ids=exclude)
         current_id = self.player.current.id if self.player.current else None
+        avoid = avoid_id if avoid_id is not None else current_id
+        exclude = set(self.played_history[-24:])
+        hard = {avoid} if avoid is not None else set()
+        self.plan = build_plan(
+            tracks, ctx, self.explicit, exclude_ids=exclude, hard_exclude_ids=hard
+        )
         self.map.set_tracks(self.plan.ranked, current_id)
         self.matrix.set_plan(self.plan.by_quadrant)
         self.ephemeral.clear()
-        self.session_queue = list(self.plan.order)
+        order = list(self.plan.order)
+        if avoid is not None:
+            filtered = [tid for tid in order if tid != avoid]
+            if filtered:
+                order = filtered
+            elif len(tracks) > 1:
+                order = [t.id for t in tracks if t.id != avoid][:18]
+            else:
+                # Single-track library: do not loop the same song via hard-cut.
+                order = []
+        self.session_queue = order
         self._fill_queue()
-        self.status_label.setText(
+        self._set_status(
             f"Context queue replenished · {ctx.band_label} · {len(self.session_queue)} tracks from the matrix"
         )
 
@@ -713,9 +817,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         self._closing = True
         self._pending_finish_nudge = None
-        self._stop_analyze(wait_ms=12000)
-        if self._scan_worker:
-            self._scan_worker.abort()
-        self._cleanup_scan_thread()
-        self.library.close()
+        self._pending_play_credit = None
+        analyze_done = self._stop_analyze(wait_ms=25000)
+        scan_done = self._cleanup_scan_thread(wait_ms=8000)
+        # Never close SQLite under a live worker (timed-out abort path).
+        if analyze_done and scan_done:
+            self.library.close()
         super().closeEvent(event)

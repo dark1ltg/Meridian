@@ -147,10 +147,13 @@ def build_plan(
     explicit_ids: list[int],
     length: int = 18,
     exclude_ids: set[int] | None = None,
+    hard_exclude_ids: set[int] | None = None,
 ) -> QueuePlan:
     """Build a context queue from lens fit, time-of-day, and the four matrix lists."""
     explicit_set = set(explicit_ids)
     skip = set(exclude_ids or ())
+    hard_exclude = set(hard_exclude_ids or ())
+    skip |= hard_exclude
     ranked = classify(tracks, ctx, explicit_set)
     buckets: dict[Quadrant, list[RankedTrack]] = {q: [] for q in Quadrant}
     for item in ranked:
@@ -172,6 +175,10 @@ def build_plan(
                 break
             tid = item.track.id
             if tid in used:
+                continue
+            # Recently played are soft-skipped first; hard-excluded ids stay out even
+            # when allow_recent fills gaps (tiny libraries must not loop the same song).
+            if tid in hard_exclude:
                 continue
             if not allow_recent and tid in skip:
                 continue

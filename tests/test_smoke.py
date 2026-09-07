@@ -6,10 +6,12 @@ import pytest
 
 from tests.smoke_checks import (
     check_analyze_failed_marks_done,
+    check_build_plan_hard_exclude,
     check_confidence,
     check_empty_scan_does_not_wipe,
     check_library_moods,
     check_mood_map_helpers,
+    check_partial_and_symlink_scan,
     check_version,
 )
 
@@ -35,8 +37,16 @@ def test_empty_scan_does_not_wipe_library(tmp_path: Path) -> None:
     check_empty_scan_does_not_wipe(tmp_path / "wipe.sqlite")
 
 
+def test_partial_and_symlink_scan(tmp_path: Path) -> None:
+    check_partial_and_symlink_scan(tmp_path / "scan-guards")
+
+
 def test_analyze_failed_marks_done(tmp_path: Path) -> None:
     check_analyze_failed_marks_done(tmp_path / "fail.sqlite")
+
+
+def test_build_plan_hard_exclude() -> None:
+    check_build_plan_hard_exclude()
 
 
 def test_mood_map_sky_drag_helpers() -> None:

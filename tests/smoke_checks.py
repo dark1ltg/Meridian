@@ -138,7 +138,102 @@ def check_empty_scan_does_not_wipe(db_path: Path) -> None:
         added = worker._scan()
         assert added == 0
         assert len(lib.all_tracks()) == 4, "empty/missing folders must not wipe library"
+
+        # Existing but empty folder must also keep prior rows (no delete_missing wipe).
+        empty = db_path.parent / "empty-music-root"
+        empty.mkdir(parents=True, exist_ok=True)
+        lib.add_folder(str(empty))
+        added = ScanWorker(lib, force=False)._scan()
+        assert added == 0
+        assert len(lib.all_tracks()) == 4, "empty existing folder must not wipe library"
     finally:
+        lib.close()
+
+
+def check_partial_and_symlink_scan(tmp_dir: Path) -> None:
+    from meridian.scanner import ScanWorker
+
+    db_path = tmp_dir / "partial.sqlite"
+    music = tmp_dir / "music"
+    visible = music / "ok"
+    blocked = music / "blocked"
+    visible.mkdir(parents=True)
+    blocked.mkdir(parents=True)
+    (visible / "keep.mp3").write_bytes(b"ID3")
+    (blocked / "hidden.mp3").write_bytes(b"ID3")
+
+    outside = tmp_dir / "outside"
+    outside.mkdir()
+    (outside / "leak.mp3").write_bytes(b"ID3")
+    leak_link = visible / "leak-link.mp3"
+    leak_link.symlink_to(outside / "leak.mp3")
+
+    lib = Library(db_path)
+    try:
+        # Seed a track under the blocked subtree so a partial walk must not delete it.
+        lib.upsert_track(
+            {
+                "path": str(blocked / "hidden.mp3"),
+                "title": "hidden",
+                "artist": "Band",
+                "albumartist": "Band",
+                "album": "LP",
+                "genre": "Metal",
+                "duration_ms": 1,
+                "year": None,
+                "bpm": 120,
+                "valence": 0.5,
+                "energy": 0.5,
+                "mood_confidence": 0.5,
+                "confidence_note": "seed",
+                "low_trust": 0,
+                "added_at": 0,
+                "mtime": 0,
+                "analyzed": 1,
+            }
+        )
+        lib.add_folder(str(music))
+        blocked.chmod(0o000)
+        try:
+            ScanWorker(lib, force=False)._scan()
+        finally:
+            blocked.chmod(0o755)
+        paths = {t.path for t in lib.all_tracks()}
+        assert str(blocked / "hidden.mp3") in paths, "partial/unreadable tree must not prune"
+        assert str(leak_link) not in paths, "out-of-root file symlink must be ignored"
+        # only_under: tracks outside pruned roots stay
+        other = tmp_dir / "other-lib" / "song.mp3"
+        other.parent.mkdir(parents=True)
+        other.write_bytes(b"ID3")
+        lib.upsert_track(
+            {
+                "path": str(other),
+                "title": "other",
+                "artist": "Band",
+                "albumartist": "Band",
+                "album": "LP",
+                "genre": "Metal",
+                "duration_ms": 1,
+                "year": None,
+                "bpm": 120,
+                "valence": 0.5,
+                "energy": 0.5,
+                "mood_confidence": 0.5,
+                "confidence_note": "seed",
+                "low_trust": 0,
+                "added_at": 0,
+                "mtime": 0,
+                "analyzed": 1,
+            }
+        )
+        lib.delete_missing([str(visible / "keep.mp3")], only_under=[music.resolve()])
+        paths = {t.path for t in lib.all_tracks()}
+        assert str(other) in paths, "delete_missing must not touch paths outside only_under"
+    finally:
+        try:
+            blocked.chmod(0o755)
+        except OSError:
+            pass
         lib.close()
 
 
@@ -154,8 +249,53 @@ def check_analyze_failed_marks_done(db_path: Path) -> None:
         assert t is not None and t.analyzed
         assert "analyze failed" in (t.confidence_note or "")
         assert tid not in lib.unanalyzed_ids()
+
+        # Even if the DB row is forced back to pending, process denylist blocks the poison loop.
+        lib.conn.execute("UPDATE tracks SET analyzed = 0 WHERE id = ?", (tid,))
+        lib.conn.commit()
+        assert tid not in lib.unanalyzed_ids()
     finally:
         lib.close()
+
+
+def check_build_plan_hard_exclude() -> None:
+    from meridian.context import Mode, make_context
+    from meridian.library import Track
+    from meridian.queue_engine import build_plan
+
+    def t(i: int) -> Track:
+        return Track(
+            id=i,
+            path=f"/m/{i}.mp3",
+            title=f"t{i}",
+            artist="Band",
+            album="LP",
+            albumartist="Band",
+            genre="Metal",
+            duration_ms=1000,
+            year=None,
+            bpm=120.0,
+            valence=0.5,
+            energy=0.5,
+            mood_confidence=0.8,
+            confidence_note="seed",
+            low_trust=False,
+            pinned=False,
+            loved=False,
+            play_count=0,
+            skip_count=0,
+            last_played=None,
+            added_at=0.0,
+            mtime=0.0,
+            analyzed=True,
+        )
+
+    tracks = [t(1), t(2), t(3)]
+    ctx = make_context(Mode.WANDER, 0.5, 0.5, 0.25, 0.0)
+    plan = build_plan(tracks, ctx, [], exclude_ids={1}, hard_exclude_ids={1})
+    assert 1 not in plan.order, "hard_exclude must keep the just-finished track out"
+    solo = build_plan([t(1)], ctx, [], hard_exclude_ids={1})
+    assert solo.order == [], "single-track hard_exclude must not refill with itself"
 
 
 def check_mood_map_helpers() -> None:
@@ -231,5 +371,7 @@ def run_all_smoke_checks(tmp_dir: Path) -> None:
     check_confidence()
     check_library_moods(tmp_dir / "smoke.sqlite")
     check_empty_scan_does_not_wipe(tmp_dir / "wipe.sqlite")
+    check_partial_and_symlink_scan(tmp_dir / "scan-guards")
     check_analyze_failed_marks_done(tmp_dir / "fail.sqlite")
+    check_build_plan_hard_exclude()
     check_mood_map_helpers()

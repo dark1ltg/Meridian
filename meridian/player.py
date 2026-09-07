@@ -23,8 +23,8 @@ class Player(QObject):
     state_changed = Signal(bool)
     track_finished = Signal()
     track_nearly_finished = Signal()
-    # Fired when a natural crossfade finishes (outgoing deck fully released).
-    natural_listen_completed = Signal()
+    # True = natural fade completed; False = interrupted (skip/pause/seek/jump).
+    crossfade_settled = Signal(bool)
     error_occurred = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -37,6 +37,7 @@ class Player(QObject):
         self.current: Track | None = None
         self._crossfading = False
         self._advance_emitted = False
+        self._incoming_ended = False
         self._outgoing: _Deck | None = None
         self._xfade = QVariantAnimation(self)
         self._xfade.setEasingCurve(QEasingCurve.Type.InOutQuad)
@@ -92,9 +93,11 @@ class Player(QObject):
     def _on_status(self, index: int, status: QMediaPlayer.MediaStatus) -> None:
         if status != QMediaPlayer.MediaStatus.EndOfMedia:
             return
-        if self._crossfading:
-            return
         if index != self._active:
+            return
+        if self._crossfading:
+            # Short incoming can end while the outgoing fade is still running.
+            self._incoming_ended = True
             return
         if self._advance_emitted:
             return
@@ -132,6 +135,7 @@ class Player(QObject):
         )
         self.current = track
         self._advance_emitted = False
+        self._incoming_ended = False
         if can_fade:
             self._start_crossfade(track)
         else:
@@ -153,6 +157,7 @@ class Player(QObject):
         self._outgoing = outgoing
         self._active = incoming_index
         self._crossfading = True
+        self._incoming_ended = False
 
         duration = int(outgoing.player.duration() or 0)
         fade = self._fade_ms(duration) if duration > 0 else CROSSFADE_MS
@@ -184,6 +189,8 @@ class Player(QObject):
         self._outgoing = None
         was_crossfading = self._crossfading
         self._crossfading = False
+        incoming_ended = self._incoming_ended
+        self._incoming_ended = False
         if outgoing is not None:
             outgoing.player.stop()
             outgoing.output.setVolume(0.0)
@@ -191,9 +198,23 @@ class Player(QObject):
         self.position_changed.emit(int(self.backend.position() or 0))
         self.duration_changed.emit(int(self.backend.duration() or 0))
         self.state_changed.emit(self.is_playing())
-        # Natural fade completed (not a skip/hard cut) → credit the listen.
-        if was_crossfading and not immediate:
-            self.natural_listen_completed.emit()
+        if not was_crossfading:
+            return
+        # Also catch EndOfMedia that arrived on the same tick as fade end.
+        if (
+            not immediate
+            and not incoming_ended
+            and self.backend.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia
+        ):
+            incoming_ended = True
+        self.crossfade_settled.emit(not immediate)
+        if not immediate and incoming_ended and not self._advance_emitted:
+            self._advance_emitted = True
+            self.track_finished.emit()
+
+    def release_advance_lock(self) -> None:
+        """Allow EndOfMedia / manual Next after a failed auto-advance."""
+        self._advance_emitted = False
 
     @Slot()
     def toggle(self) -> None:
