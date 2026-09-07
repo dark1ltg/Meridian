@@ -12,7 +12,13 @@ Richer acoustic mood cues from the existing PCM decode budget, smarter local rec
 - Nonlinear brightness mapping; confidence reflects spectral/rhythm stability
 - Local-window aggregation inside the decode; map remains Shadow↔Glow / Still↔Kinetic
 - Longer tracks use two ~14s windows (early + mid) within the same ~28s mono @ 11025 Hz budget; short tracks keep a single window
+- Disagree-aware dual-window merge: strong intro/drop mismatch keeps the stabler window instead of a false middle
+- Richer 2D blend from band/mid balance, flux, and energy trend; tonal vs noisy weighting (flatness pulls Glow down)
 - Structure-aware soft/genre clamps: steady rhythm + genre disagreement trusts PCM more; unstable material hugs the seed
+- When tag and detected BPM conflict, energy nudge trusts detected if rhythm is steady, otherwise the tag
+- Persists onset consistency, spectral flux, and brightness for Focus ranking and album spread (no re-decode)
+- After album smooth, within-album acoustic spread unsticks clones using those cues (pins untouched)
+- Expanded local genre seeds (phonk, hyperpop, drill, vaporwave, amapiano, city pop, and related aliases)
 - Pins, metadata, and total decode budget unchanged
 
 ### Recommendations (local)
@@ -20,6 +26,7 @@ Richer acoustic mood cues from the existing PCM decode budget, smarter local rec
 - Context queue soft-caps artist/album repeats (2) while alternatives exist, then relaxes to fill gaps
 - Mode-aware matrix mix: Focus steadier NOW/DEEP; Charge more NOW; Dim more DEEP; Wander balanced
 - Finish vs skip history weights importance more strongly; listen nudges on unpinned stars are slightly stronger
+- Focus mode lightly prefers tracks with steady persisted onset consistency
 
 ### Acoustic reliability
 - Spurious aubio BPM on silence / near-zero onsets is rejected (needs real onset evidence)

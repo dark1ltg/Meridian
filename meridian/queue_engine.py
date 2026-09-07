@@ -132,6 +132,13 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
         if plays + skips >= 3:
             finish_ratio = plays / total
             importance += 0.14 * (finish_ratio - 0.5)
+        # Focus prefers steady rhythm when we have a persisted onset cue.
+        if ctx.mode == Mode.FOCUS and track.onset_consistency is not None:
+            oc = float(track.onset_consistency)
+            if oc > 0.70:
+                importance += 0.06
+            elif oc < 0.35:
+                importance -= 0.04
         importance = min(1.0, max(0.0, importance)) * (1.0 - 0.45 * skip_ratio)
         # High skip pressure softens NOW stickiness (favor exploring the ring).
         urgency = fit * (1.0 - 0.18 * pressure)

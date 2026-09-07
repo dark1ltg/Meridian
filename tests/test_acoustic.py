@@ -217,12 +217,44 @@ def test_merge_dual_window_profiles() -> None:
         window_count=3,
         pcm_samples=1000,
     )
+    # Mild disagreement → weighted toward stabler (a).
     m = _merge_pcm_profiles(a, b)
-    assert abs(m.valence - 0.4) < 1e-9
-    assert abs(m.energy - 0.5) < 1e-9
-    assert m.unstable is True
+    assert m.valence < 0.45
     assert m.onset_consistency == 0.8
     assert m.window_count == 6
+
+    # Strong disagreement → take stabler window outright (no false middle).
+    far = AcousticProfile(
+        valence=0.85,
+        energy=0.9,
+        bpm=140.0,
+        unstable=True,
+        brightness=0.8,
+        flux=0.7,
+        onset_consistency=0.2,
+        variation=0.5,
+        window_count=3,
+        pcm_samples=1000,
+    )
+    hard = _merge_pcm_profiles(a, far)
+    assert abs(hard.valence - a.valence) < 1e-9
+    assert abs(hard.energy - a.energy) < 1e-9
+
+
+def test_energy_bpm_arbitration() -> None:
+    from meridian.features import _energy_bpm_for_nudge
+
+    assert _energy_bpm_for_nudge(120.0, 160.0, onset_consistency=0.85, unstable=False) == 160.0
+    assert _energy_bpm_for_nudge(120.0, 160.0, onset_consistency=0.2, unstable=True) == 120.0
+    assert _energy_bpm_for_nudge(120.0, 125.0, onset_consistency=0.9, unstable=False) == 120.0
+
+
+def test_genre_dictionary_has_contemporary_seeds() -> None:
+    from meridian.features import GENRE_MOOD, genre_match
+
+    for key in ("phonk", "hyperpop", "drill", "vaporwave", "amapiano", "city pop"):
+        assert key in GENRE_MOOD
+    assert genre_match("Drift Phonk") == "drift phonk" or genre_match("phonk") == "phonk"
 
     strong, _ = confidence_from_evidence(
         tag_key="metal",

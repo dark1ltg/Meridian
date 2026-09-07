@@ -106,6 +106,57 @@ GENRE_MOOD: dict[str, tuple[float, float]] = {
     "latin": (0.66, 0.58),
     "afrobeats": (0.68, 0.72),
     "afrobeat": (0.68, 0.72),
+    # Contemporary / long-tail tags (local seeds only — longest match wins).
+    "phonk": (0.36, 0.78),
+    "drift phonk": (0.34, 0.80),
+    "hyperpop": (0.78, 0.82),
+    "digicore": (0.72, 0.76),
+    "drill": (0.34, 0.80),
+    "uk drill": (0.32, 0.78),
+    "jersey club": (0.70, 0.84),
+    "baile funk": (0.72, 0.86),
+    "funk carioca": (0.72, 0.86),
+    "breakcore": (0.42, 0.92),
+    "jungle terror": (0.48, 0.88),
+    "vaporwave": (0.48, 0.24),
+    "future funk": (0.70, 0.58),
+    "city pop": (0.72, 0.52),
+    "citypop": (0.72, 0.52),
+    "pluggnb": (0.56, 0.48),
+    "plugg": (0.54, 0.50),
+    "rage": (0.44, 0.88),
+    "opium": (0.40, 0.82),
+    "dream pop": (0.58, 0.36),
+    "dreampop": (0.58, 0.36),
+    "math rock": (0.50, 0.66),
+    "post-punk": (0.36, 0.62),
+    "post punk": (0.36, 0.62),
+    "garage rock": (0.44, 0.74),
+    "psychedelic": (0.48, 0.52),
+    "psych": (0.48, 0.52),
+    "boom bap": (0.46, 0.58),
+    "cloud rap": (0.50, 0.42),
+    "detroit techno": (0.38, 0.86),
+    "minimal techno": (0.36, 0.78),
+    "deep house": (0.62, 0.68),
+    "afro house": (0.66, 0.74),
+    "amapiano": (0.64, 0.70),
+    "kwaito": (0.62, 0.66),
+    "soca": (0.74, 0.78),
+    "compas": (0.68, 0.60),
+    "highlife": (0.70, 0.58),
+    "bossa nova": (0.62, 0.32),
+    "bossa": (0.62, 0.32),
+    "mpb": (0.60, 0.42),
+    "cumbia": (0.66, 0.62),
+    "tango": (0.44, 0.48),
+    "flamenco": (0.52, 0.56),
+    "grime": (0.40, 0.82),
+    "garage": (0.52, 0.76),
+    "uk garage": (0.54, 0.78),
+    "2-step": (0.56, 0.74),
+    "footwork": (0.48, 0.90),
+    "juke": (0.50, 0.88),
 }
 
 # Lowercase alias table once (match path always lowercases haystacks).
@@ -188,6 +239,10 @@ class MoodResult:
     confidence: float
     low_trust: bool
     confidence_note: str = ""
+    # Optional acoustic cues persisted for ranking / album spread (no re-decode).
+    onset_consistency: float | None = None
+    acoustic_flux: float | None = None
+    brightness: float | None = None
 
 def _text(tag) -> str:
     if tag is None:
@@ -646,35 +701,77 @@ def _secondary_seek_s(duration_ms: int) -> float | None:
 
 
 def _merge_pcm_profiles(primary, secondary):
-    """Median valence/energy from two windows; keep the stabler rhythm cues."""
+    """Combine two window profiles; on strong disagreement prefer the stabler song-like window."""
     from meridian.acoustic import AcousticProfile
 
-    valence = float(np.median([primary.valence, secondary.valence]))
-    energy = float(np.median([primary.energy, secondary.energy]))
-    bpms = [b for b in (primary.bpm, secondary.bpm) if b is not None]
-    bpm = float(np.median(bpms)) if bpms else None
-    # Prefer the more consistent onset reading when both exist.
-    if primary.onset_consistency >= secondary.onset_consistency:
-        ostats_src = primary
+    def _stability(p) -> float:
+        # Higher is better: consistent onsets, low variation, not marked unstable.
+        return (
+            float(p.onset_consistency)
+            + (0.0 if p.unstable else 0.25)
+            + float(np.clip(1.0 - float(p.variation), 0.0, 1.0)) * 0.35
+        )
+
+    disagree = float(
+        np.hypot(primary.valence - secondary.valence, primary.energy - secondary.energy)
+    )
+    s1, s2 = _stability(primary), _stability(secondary)
+    if s1 >= s2:
+        winner, loser = primary, secondary
     else:
-        ostats_src = secondary
+        winner, loser = secondary, primary
+
+    if disagree > 0.18:
+        # Intro vs drop (etc.): don't average into a false middle.
+        valence = float(winner.valence)
+        energy = float(winner.energy)
+        brightness = float(winner.brightness)
+        flux = float(winner.flux)
+        trend = float(winner.energy_trend)
+        bands = dict(winner.band_energy)
+        bpm = winner.bpm if winner.bpm is not None else loser.bpm
+        onset_consistency = float(winner.onset_consistency)
+        variation = float(winner.variation)
+        unstable = bool(winner.unstable)
+        ostats_src = winner
+    else:
+        # Mild disagreement: lean toward the stabler window.
+        w = 0.62 if s1 != s2 else 0.5
+        if winner is secondary:
+            w = 1.0 - w
+        # w = weight on primary when winner is primary… simplify:
+        wp = 0.62 if primary is winner else 0.38
+        ws = 1.0 - wp
+        valence = float(wp * primary.valence + ws * secondary.valence)
+        energy = float(wp * primary.energy + ws * secondary.energy)
+        brightness = float(wp * primary.brightness + ws * secondary.brightness)
+        flux = float(wp * primary.flux + ws * secondary.flux)
+        trend = float(wp * primary.energy_trend + ws * secondary.energy_trend)
+        bands = dict(winner.band_energy)
+        bpms = [b for b in (primary.bpm, secondary.bpm) if b is not None]
+        bpm = float(np.median(bpms)) if bpms else None
+        onset_consistency = float(winner.onset_consistency)
+        variation = float(wp * primary.variation + ws * secondary.variation)
+        unstable = bool(primary.unstable or secondary.unstable)
+        ostats_src = winner
+
     return AcousticProfile(
         valence=float(np.clip(valence, 0.03, 0.97)),
         energy=float(np.clip(energy, 0.03, 0.97)),
         bpm=bpm,
-        unstable=bool(primary.unstable or secondary.unstable),
-        brightness=float(np.median([primary.brightness, secondary.brightness])),
-        flux=float(np.median([primary.flux, secondary.flux])),
-        band_energy=dict(ostats_src.band_energy),
+        unstable=unstable,
+        brightness=brightness,
+        flux=flux,
+        band_energy=bands,
         energy_mean=float(np.median([primary.energy_mean, secondary.energy_mean])),
         energy_std=float(np.median([primary.energy_std, secondary.energy_std])),
         energy_peak=float(max(primary.energy_peak, secondary.energy_peak)),
         energy_range=float(np.median([primary.energy_range, secondary.energy_range])),
-        energy_trend=float(np.median([primary.energy_trend, secondary.energy_trend])),
-        onset_rate=float(np.median([primary.onset_rate, secondary.onset_rate])),
-        onset_burstiness=float(np.median([primary.onset_burstiness, secondary.onset_burstiness])),
-        onset_consistency=float(ostats_src.onset_consistency),
-        variation=float(np.median([primary.variation, secondary.variation])),
+        energy_trend=trend,
+        onset_rate=float(ostats_src.onset_rate),
+        onset_burstiness=float(ostats_src.onset_burstiness),
+        onset_consistency=onset_consistency,
+        variation=variation,
         window_count=int(primary.window_count + secondary.window_count),
         pcm_samples=int(primary.pcm_samples + secondary.pcm_samples),
     )
@@ -793,6 +890,26 @@ def _bpm_nudge(energy: float, out_bpm: float | None, *, soft: bool = False) -> f
     pace = float(np.clip((out_bpm - 70) / 110, 0, 1))
     w = 0.18 if soft else 0.30
     return float(np.clip((1.0 - w) * energy + w * pace, 0.03, 0.97))
+
+
+def _energy_bpm_for_nudge(
+    tag_bpm: float | None,
+    detected_bpm: float | None,
+    *,
+    onset_consistency: float,
+    unstable: bool,
+) -> float | None:
+    """Pick which BPM drives the energy nudge when tag and waveform disagree."""
+    if tag_bpm is None:
+        return detected_bpm
+    if detected_bpm is None:
+        return tag_bpm
+    if abs(float(tag_bpm) - float(detected_bpm)) <= 18.0:
+        return tag_bpm
+    # Conflict: steady rhythm → trust detected for pace; messy audio → keep tag.
+    if onset_consistency > 0.70 and not unstable:
+        return detected_bpm
+    return tag_bpm
 
 
 def _trim_silence(pcm: np.ndarray, floor: float = 0.012) -> np.ndarray:
@@ -944,13 +1061,18 @@ def analyze_audio(
             valence = float(np.clip(0.15 * seed.valence + 0.85 * valence_pcm, 0.03, 0.97))
             energy = float(np.clip(0.12 * seed.energy + 0.88 * energy_pcm, 0.03, 0.97))
 
-    # Prefer a real tag BPM; never treat 0/NaN as present (falsy/`if bpm` traps).
+    # Prefer a real tag BPM for storage; energy nudge may use detected when rhythm is steady.
     out_bpm = tag_bpm if tag_bpm is not None else detected_bpm
-    # soft_pcm_only already trusts genre+BPM — soft nudge only, then re-clamp so
-    # tagged BPM cannot undo the soft PCM energy envelope.
+    onset_for_bpm = float(getattr(profile, "onset_consistency", 0.5) or 0.5) if profile else 0.5
+    nudge_bpm = _energy_bpm_for_nudge(
+        tag_bpm,
+        detected_bpm,
+        onset_consistency=onset_for_bpm,
+        unstable=bool(pcm_unstable),
+    )
     energy = _bpm_nudge(
         energy,
-        out_bpm,
+        nudge_bpm,
         soft=soft_pcm_only or (tag_bpm is None and detected_bpm is not None),
     )
     if soft_pcm_only and pcm_ok:
@@ -1020,4 +1142,9 @@ def analyze_audio(
         confidence=float(confidence),
         low_trust=confidence_low_trust(confidence),
         confidence_note=note,
+        onset_consistency=(
+            float(getattr(profile, "onset_consistency", 0.5)) if profile else None
+        ),
+        acoustic_flux=float(getattr(profile, "flux", 0.0)) if profile else None,
+        brightness=float(getattr(profile, "brightness", 0.5)) if profile else None,
     )

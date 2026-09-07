@@ -221,6 +221,9 @@ class AnalyzeWorker(QObject):
                         confidence=result.confidence,
                         low_trust=result.low_trust,
                         confidence_note=result.confidence_note,
+                        onset_consistency=result.onset_consistency,
+                        acoustic_flux=result.acoustic_flux,
+                        brightness=result.brightness,
                     )
                 except Exception:
                     # Always denylist in-process; DB mark may fail under lock contention.
@@ -229,6 +232,7 @@ class AnalyzeWorker(QObject):
             if not self._abort:
                 self.library.smooth_album_moods()
                 self.library.smooth_artist_moods()
+                self.library.spread_album_acoustics()
                 self.library.rescale_moods_by_percentile()
         finally:
             self.finished.emit()

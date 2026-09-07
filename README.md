@@ -21,6 +21,8 @@ Richer acoustic placement from the same decode budget, desktop install, and reli
 
 - Multi-band energy, spectral flux, RMS dynamics, and onset consistency/burstiness
 - Dual mid-track windows on longer files (~14s + ~14s) within the same ~28s budget; structure-aware soft/genre clamps
+- Disagree-aware window merge; richer band/flux/trend blend; tonal vs noisy Glow; tag vs detected BPM arbitration for energy
+- Persisted onset/flux/brightness cues; within-album acoustic spread; expanded local genre seeds (phonk, hyperpop, drill, …)
 - Soft genre+BPM keeps tagged tempo inside the soft energy clamp
 - Quiet hiss stays near-neutral on Glow; bass darkness counted once; brightness stays on Shadow↔Glow
 - Relative spectral flux separates steady vs busy material without saturating
@@ -47,7 +49,7 @@ Most players ask *what album next*. Meridian asks *where do you want to be*.
 - **Search** by title, artist, album, or path — pick a hit to snap the lens and play  
 - While something is already playing, advances **crossfade** (about 3s, shorter on short tracks)
 
-Under the hood: tags + a short mid-track waveform (`ffmpeg`, dual windows on longer tracks) + optional **aubio** tempo/onset cues. Stars show **confidence** and a short evidence note on hover. After analyze, moods get a light **library/genre percentile** rescale so neighbors rank relative to *your* collection. Recent skips, finishes, and mode shape the context queue without leaving your disk.
+Under the hood: tags + a short mid-track waveform (`ffmpeg`, dual windows on longer tracks) + optional **aubio** tempo/onset cues. Stars show **confidence** and a short evidence note on hover. After analyze, moods get album/artist smooth, a light **within-album acoustic spread**, and **library/genre percentile** rescale. Recent skips, finishes, and mode shape the context queue without leaving your disk.
 
 ## How listening works
 

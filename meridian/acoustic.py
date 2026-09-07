@@ -371,15 +371,21 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
 
     warm = float(bands_m.get("bass", 0.2) + bands_m.get("low_mid", 0.2))
     present = float(bands_m.get("high_mid", 0.2) + bands_m.get("high", 0.2))
+    mid = float(bands_m.get("mid", 0.2))
     band_glow = float(np.clip(0.5 + 0.55 * (present - warm), 0.05, 0.95))
     band_glow_v = 0.50 + (band_glow - 0.50) * audibility
 
+    # Tonal vs noisy: high flatness (noise-like) pulls Glow down; clear tones keep Glow.
+    tonal = float(np.clip(1.0 - 0.85 * flatness, 0.05, 0.95))
+    noise_pull = float(np.clip((flatness - 0.35) / 0.45, 0.0, 1.0))
     # band_glow already encodes bass/low-mid darkness — do not also use (1-bass).
     valence = float(
         np.clip(
-            0.46 * bright_v
-            + 0.32 * band_glow_v
-            + 0.22 * (1.0 - 0.85 * flatness),
+            0.40 * bright_v
+            + 0.28 * band_glow_v
+            + 0.24 * tonal
+            + 0.08 * float(np.clip(0.5 + 0.4 * (mid - warm), 0.05, 0.95))
+            - 0.06 * noise_pull * audibility,
             0.03,
             0.97,
         )
@@ -387,9 +393,9 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
 
     kinetic = float(
         np.clip(
-            0.28 * kinetic_zcr
-            + 0.34 * float(ostats["kinetic"])
-            + 0.18 * flux
+            0.26 * kinetic_zcr
+            + 0.32 * float(ostats["kinetic"])
+            + 0.22 * flux
             + 0.12 * float(np.clip(ostats["density"] + 0.35 * ostats["burstiness"], 0.05, 0.95))
             + 0.08 * float(np.clip(est["std"], 0.0, 1.0)),
             0.05,
@@ -397,13 +403,14 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
         )
     )
     # Brightness belongs on Shadow↔Glow only — keep energy Still↔Kinetic.
+    # Use flux + energy_trend a bit more so evolving tracks feel more kinetic.
     energy = float(
         np.clip(
-            0.30 * float(est["mean"])
-            + 0.36 * kinetic
-            + 0.18 * crest_n
-            + 0.10 * float(np.clip(est["range"] / 2.0, 0.0, 1.0))
-            + 0.06 * float(np.clip(0.5 + 0.35 * est["trend"], 0.05, 0.95)),
+            0.28 * float(est["mean"])
+            + 0.34 * kinetic
+            + 0.16 * crest_n
+            + 0.12 * float(np.clip(est["range"] / 2.0, 0.0, 1.0))
+            + 0.10 * float(np.clip(0.5 + 0.35 * est["trend"], 0.05, 0.95)),
             0.03,
             0.97,
         )

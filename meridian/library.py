@@ -41,7 +41,10 @@ CREATE TABLE IF NOT EXISTS tracks (
     last_played REAL,
     added_at REAL,
     mtime REAL,
-    analyzed INTEGER NOT NULL DEFAULT 0
+    analyzed INTEGER NOT NULL DEFAULT 0,
+    acoustic_flux REAL,
+    onset_consistency REAL,
+    brightness REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_tracks_mood ON tracks(valence, energy);
@@ -73,6 +76,9 @@ class Track:
     added_at: float | None
     mtime: float | None
     analyzed: bool
+    acoustic_flux: float | None = None
+    onset_consistency: float | None = None
+    brightness: float | None = None
 
     @property
     def label(self) -> str:
@@ -122,6 +128,12 @@ class Library:
                 )
             if "confidence_note" not in cols:
                 self.conn.execute("ALTER TABLE tracks ADD COLUMN confidence_note TEXT")
+            if "acoustic_flux" not in cols:
+                self.conn.execute("ALTER TABLE tracks ADD COLUMN acoustic_flux REAL")
+            if "onset_consistency" not in cols:
+                self.conn.execute("ALTER TABLE tracks ADD COLUMN onset_consistency REAL")
+            if "brightness" not in cols:
+                self.conn.execute("ALTER TABLE tracks ADD COLUMN brightness REAL")
             self.conn.commit()
 
     def close(self) -> None:
@@ -282,6 +294,9 @@ class Library:
         confidence: float = 0.5,
         low_trust: bool = False,
         confidence_note: str = "",
+        onset_consistency: float | None = None,
+        acoustic_flux: float | None = None,
+        brightness: float | None = None,
     ) -> None:
         with self.lock:
             self.conn.execute(
@@ -293,6 +308,9 @@ class Library:
                     mood_confidence = CASE WHEN pinned = 1 THEN mood_confidence ELSE ? END,
                     low_trust = CASE WHEN pinned = 1 THEN low_trust ELSE ? END,
                     confidence_note = CASE WHEN pinned = 1 THEN confidence_note ELSE ? END,
+                    onset_consistency = CASE WHEN pinned = 1 THEN onset_consistency ELSE ? END,
+                    acoustic_flux = CASE WHEN pinned = 1 THEN acoustic_flux ELSE ? END,
+                    brightness = CASE WHEN pinned = 1 THEN brightness ELSE ? END,
                     analyzed = 1
                 WHERE id = ?
                 """,
@@ -303,6 +321,9 @@ class Library:
                     float(confidence),
                     int(low_trust),
                     confidence_note or "",
+                    onset_consistency,
+                    acoustic_flux,
+                    brightness,
                     track_id,
                 ),
             )
@@ -463,6 +484,99 @@ class Library:
                 """
                 UPDATE tracks
                 SET valence = ?, energy = ?, mood_confidence = ?, low_trust = ?, confidence_note = ?
+                WHERE id = ? AND pinned = 0
+                """,
+                updates,
+            )
+            self.conn.commit()
+        return len(updates)
+
+    def spread_album_acoustics(self, max_shift: float = 0.035) -> int:
+        """Unstick same-album clones using persisted brightness/flux (no ffmpeg).
+
+        After album smooth, unpinned tracks get a tiny offset from the album median
+        brightness/flux so neighbors stay in the album cloud without stacking.
+        """
+        import math
+
+        with self.lock:
+            rows = self.conn.execute(
+                """
+                SELECT id, artist, albumartist, album, valence, energy, pinned,
+                       brightness, acoustic_flux, confidence_note
+                FROM tracks
+                WHERE album IS NOT NULL AND TRIM(album) != ''
+                  AND (
+                    (albumartist IS NOT NULL AND TRIM(albumartist) != '')
+                    OR (artist IS NOT NULL AND TRIM(artist) != '')
+                  )
+                """
+            ).fetchall()
+
+        def album_key(row) -> tuple[str, str]:
+            aa = str(row["albumartist"] or "").strip()
+            ar = str(row["artist"] or "").strip()
+            credit = aa if aa and aa.lower() not in {"various artists", "various", "va"} else ar
+            return (credit.lower(), str(row["album"] or "").lower().strip())
+
+        def _finite(value) -> bool:
+            try:
+                return math.isfinite(float(value))
+            except (TypeError, ValueError):
+                return False
+
+        groups: dict[tuple[str, str], list] = {}
+        for row in rows:
+            groups.setdefault(album_key(row), []).append(row)
+
+        updates: list[tuple[float, float, str, int]] = []
+        for items in groups.values():
+            if len(items) < 4:
+                continue
+            bright_vals = [
+                float(i["brightness"])
+                for i in items
+                if i["brightness"] is not None and _finite(i["brightness"])
+            ]
+            flux_vals = [
+                float(i["acoustic_flux"])
+                for i in items
+                if i["acoustic_flux"] is not None and _finite(i["acoustic_flux"])
+            ]
+            if len(bright_vals) < 2 and len(flux_vals) < 2:
+                continue
+            med_b = float(sum(bright_vals) / len(bright_vals)) if bright_vals else 0.5
+            med_f = float(sum(flux_vals) / len(flux_vals)) if flux_vals else 0.5
+            for item in items:
+                if int(item["pinned"]):
+                    continue
+                b = float(item["brightness"]) if item["brightness"] is not None and _finite(item["brightness"]) else med_b
+                f = (
+                    float(item["acoustic_flux"])
+                    if item["acoustic_flux"] is not None and _finite(item["acoustic_flux"])
+                    else med_f
+                )
+                dv = max(-max_shift, min(max_shift, 0.55 * (b - med_b)))
+                de = max(-max_shift, min(max_shift, 0.45 * (f - med_f)))
+                if abs(dv) < 1e-4 and abs(de) < 1e-4:
+                    continue
+                v0 = float(item["valence"])
+                e0 = float(item["energy"])
+                v = max(0.03, min(0.97, v0 + dv))
+                e = max(0.03, min(0.97, e0 + de))
+                note = self._append_note(
+                    item["confidence_note"] if "confidence_note" in item.keys() else "",
+                    "album spread",
+                )
+                updates.append((v, e, note, int(item["id"])))
+
+        if not updates:
+            return 0
+        with self.lock:
+            self.conn.executemany(
+                """
+                UPDATE tracks
+                SET valence = ?, energy = ?, confidence_note = ?
                 WHERE id = ? AND pinned = 0
                 """,
                 updates,
@@ -732,4 +846,19 @@ class Library:
             added_at=row["added_at"],
             mtime=row["mtime"],
             analyzed=bool(row["analyzed"]),
+            acoustic_flux=(
+                float(row["acoustic_flux"])
+                if "acoustic_flux" in row.keys() and row["acoustic_flux"] is not None
+                else None
+            ),
+            onset_consistency=(
+                float(row["onset_consistency"])
+                if "onset_consistency" in row.keys() and row["onset_consistency"] is not None
+                else None
+            ),
+            brightness=(
+                float(row["brightness"])
+                if "brightness" in row.keys() and row["brightness"] is not None
+                else None
+            ),
         )

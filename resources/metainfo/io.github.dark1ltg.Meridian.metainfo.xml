@@ -46,11 +46,12 @@
     <release version="1.3.5" date="2026-09-07">
       <description>
         <p>
-          Acoustic mood cues (dual-window decode, structure-aware clamps),
-          smarter local recommendations (skip pressure, anti-repeat, mode mix),
-          AppImage desktop install, and reliability fixes for BPM/signal trust,
-          library scan, matrix / context queue continuity, crossfade play/skip
-          credit, safer quit, and mood-map interaction.
+          Acoustic mood cues (dual-window decode, disagree-aware merge,
+          tonal/noisy blend, BPM arbitration, persisted cues, album spread,
+          expanded genre seeds), smarter local recommendations (skip pressure,
+          anti-repeat, mode mix), AppImage desktop install, and reliability
+          fixes for BPM/signal trust, library scan, matrix / context queue,
+          crossfade credit, safer quit, and mood-map interaction.
         </p>
       </description>
     </release>
