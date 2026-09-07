@@ -23,6 +23,7 @@ Richer acoustic placement from the same decode budget, desktop install, and reli
 - Soft genre+BPM keeps tagged tempo inside the soft energy clamp
 - Quiet hiss stays near-neutral on Glow; bass darkness counted once; brightness stays on Shadow↔Glow
 - Relative spectral flux separates steady vs busy material without saturating
+- Honest BPM/signal trust: no invented silence BPM; tag `0`/NaN ignored; Inf PCM rejected; pins keep BPM; denylist clears on re-queue
 - Safer scan (no empty/partial wipe; out-of-root symlinks ignored; failed scan stays failed)
 - Honest crossfade play/skip credits (jumps use the same 8s rule as Next; Prev mid-fade doesn’t double-count)
 - Tiny libraries don’t loop the just-finished track; lens/pin don’t rebuild the queue mid-listen

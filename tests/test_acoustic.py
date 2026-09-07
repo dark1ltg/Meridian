@@ -104,20 +104,73 @@ def test_build_profile_bounded() -> None:
     assert "burstiness" in ostats and "consistency" in ostats
 
 
-def test_soft_pcm_bpm_stays_clamped() -> None:
-    """Tagged BPM must not pull energy outside the soft PCM envelope."""
+def test_onset_stats_rejects_spurious_bpm() -> None:
+    """Silence / no-onset PCM must not invent a BPM."""
+    sr = SAMPLERATE
+    silence = np.zeros(sr * 4, dtype=np.float32)
+    bpm, _ostats = onset_stats(silence)
+    assert bpm is None
+
+
+def test_pcm_signal_rejects_nonfinite() -> None:
+    from meridian.features import _pcm_signal_ok
+
+    sr = SAMPLERATE
+    t = np.arange(sr * 3, dtype=np.float32) / sr
+    pcm = (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    assert _pcm_signal_ok(pcm)
+    bad = pcm.copy()
+    bad[1000] = np.inf
+    assert not _pcm_signal_ok(bad)
+    bad2 = pcm.copy()
+    bad2[1000] = np.nan
+    assert not _pcm_signal_ok(bad2)
+
+
+def test_zero_tag_bpm_not_trusted() -> None:
+    """BPM 0 / NaN must not enable soft-PCM or claim BPM in confidence."""
     from unittest.mock import patch
 
-    from meridian.features import SOFT_PCM_MAX_SHIFT, analyze_audio, genre_seed
+    from meridian.features import SOFT_PCM_MAX_SHIFT, _coerce_bpm, analyze_audio, genre_seed
+
+    assert _coerce_bpm(0.0) is None
+    assert _coerce_bpm(float("nan")) is None
+    assert _coerce_bpm(128.0) == 128.0
 
     sr = SAMPLERATE
     t = np.arange(sr * 3, dtype=np.float32) / sr
     pcm = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
     seed = genre_seed("metal", "x", "y", path="/tmp/x.flac")
     assert seed.clamp_match
+    # Extreme PCM energy — soft envelope would hold within ±SOFT; zero BPM must not.
+    cues = (0.05, 0.05, None, False, None)
     with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False)):
-        result = analyze_audio("/tmp/x.flac", "metal", "x", "y", 180.0)
-    assert abs(result.energy - seed.energy) <= SOFT_PCM_MAX_SHIFT + 1e-9
+        with patch("meridian.features._pcm_mood_cues", return_value=cues):
+            soft = analyze_audio("/tmp/x.flac", "metal", "x", "y", 180.0)
+            zero = analyze_audio("/tmp/x.flac", "metal", "x", "y", 0.0)
+    assert abs(soft.energy - seed.energy) <= SOFT_PCM_MAX_SHIFT + 1e-9
+    assert abs(zero.energy - seed.energy) > SOFT_PCM_MAX_SHIFT
+    assert zero.bpm is None
+    assert "BPM" not in (zero.confidence_note or "")
+    assert "BPM" in (soft.confidence_note or "")
+
+
+def test_out_bpm_prefers_detected_over_zero_tag() -> None:
+    from unittest.mock import patch
+
+    from meridian.features import analyze_audio
+
+    sr = SAMPLERATE
+    t = np.arange(sr * 3, dtype=np.float32) / sr
+    pcm = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False)):
+        with patch(
+            "meridian.features._pcm_mood_cues",
+            return_value=(0.5, 0.5, 118.0, False, None),
+        ):
+            result = analyze_audio("/tmp/x.flac", "metal", "x", "y", 0.0)
+    assert result.bpm == 118.0
+    assert "BPM" in (result.confidence_note or "")
 
 
 def test_confidence_consistency() -> None:

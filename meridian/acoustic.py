@@ -248,7 +248,14 @@ def onset_stats(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> tuple[float | 
 
     bpm = float(tempo_o.get_bpm())
     bpm_out: float | None
-    if not np.isfinite(bpm) or bpm < 40.0 or bpm > 220.0:
+    # Require real onset evidence — aubio often invents ~60–90 BPM on silence.
+    if (
+        len(onset_times) < 3
+        or rate < 0.25
+        or not np.isfinite(bpm)
+        or bpm < 40.0
+        or bpm > 220.0
+    ):
         bpm_out = None
     else:
         bpm_out = bpm
@@ -352,8 +359,8 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
     zcr = float(np.mean(np.abs(np.diff(np.sign(pcm)))) / 2) if pcm.size > 2 else 0.0
     kinetic_zcr = float(np.clip(zcr * 3.2, 0.05, 0.95))
 
-    peak = float(np.max(np.abs(pcm)) + 1e-12)
-    rms = float(np.sqrt(np.mean(np.square(pcm))) + 1e-12)
+    peak = float(np.max(np.abs(pcm)) + 1e-12) if pcm.size else 1e-12
+    rms = float(np.sqrt(np.mean(np.square(pcm))) + 1e-12) if pcm.size else 1e-12
     crest = peak / rms
     crest_n = float(np.clip((np.log10(crest) - 0.25) / 1.15, 0.05, 0.95))
 
@@ -401,6 +408,14 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
             0.97,
         )
     )
+
+    # np.clip does not scrub NaN — never leak non-finite moods.
+    if not np.isfinite(valence):
+        valence = 0.5
+    if not np.isfinite(energy):
+        energy = 0.5
+    valence = float(np.clip(valence, 0.03, 0.97))
+    energy = float(np.clip(energy, 0.03, 0.97))
 
     return AcousticProfile(
         valence=valence,

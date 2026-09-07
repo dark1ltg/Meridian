@@ -4,7 +4,7 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-07)
 
-Richer acoustic mood cues from the existing single PCM decode, placement fixes, desktop integration, and reliability passes for scan, queue, crossfade accounting, quit, and the mood map.
+Richer acoustic mood cues from the existing single PCM decode, placement fixes, desktop integration, and reliability passes for scan, queue, crossfade accounting, quit, mood map, and BPM/signal trust.
 
 ### Acoustic profile
 - Multi-band frequency energy and spectral flux from the current FFT/PCM path
@@ -12,6 +12,14 @@ Richer acoustic mood cues from the existing single PCM decode, placement fixes, 
 - Nonlinear brightness mapping; confidence reflects spectral/rhythm stability
 - Local-window aggregation inside the decode; map remains Shadow↔Glow / Still↔Kinetic
 - Pins, metadata, and decode budget unchanged (still ~one FFmpeg, ~28s mono @ 11025 Hz)
+
+### Acoustic reliability
+- Spurious aubio BPM on silence / near-zero onsets is rejected (needs real onset evidence)
+- Tag BPM `0` / NaN is ignored — no soft-PCM shortcut, false BPM conflict, or confidence “BPM” claim
+- Prefer a real tag BPM; otherwise use detected BPM (never treat `0` as present)
+- Non-finite PCM (Inf/NaN) fails the signal check; mood values are sanitized before write
+- Pinned tracks keep BPM through analyze (same protection as valence/energy)
+- Upsert that resets `analyzed=0` clears the in-process analyze denylist so Rescan can retry
 
 ### Placement fixes
 - Soft genre+BPM: tagged BPM no longer undoes the soft PCM energy envelope

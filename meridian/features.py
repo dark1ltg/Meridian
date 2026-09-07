@@ -615,8 +615,23 @@ def _pcm_signal_ok(pcm: np.ndarray) -> bool:
     trimmed = _trim_silence(np.ascontiguousarray(pcm, dtype=np.float32))
     if trimmed.size < 4096:
         return False
+    if not np.isfinite(trimmed).all():
+        return False
     rms = float(np.sqrt(np.mean(np.square(trimmed))) + 1e-12)
     return rms > 1e-4
+
+
+def _coerce_bpm(bpm: float | None) -> float | None:
+    """Return a usable BPM, or None for missing / non-finite / non-positive tags."""
+    if bpm is None:
+        return None
+    try:
+        value = float(bpm)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(value) or value <= 0.0:
+        return None
+    return value
 
 
 def _decode_pcm_with_fallback(path: str, duration_ms: int = 0) -> tuple[np.ndarray | None, bool]:
@@ -709,7 +724,7 @@ def _aubio_rhythm(pcm: np.ndarray, samplerate: int = 11025) -> tuple[float | Non
 
 
 def _bpm_nudge(energy: float, out_bpm: float | None, *, soft: bool = False) -> float:
-    if not out_bpm or not np.isfinite(out_bpm):
+    if out_bpm is None or not np.isfinite(out_bpm) or out_bpm <= 0.0:
         return energy
     pace = float(np.clip((out_bpm - 70) / 110, 0, 1))
     w = 0.18 if soft else 0.30
@@ -773,7 +788,8 @@ def analyze_audio(
         replaygain_db=replaygain_db,
     )
     valence, energy = seed.valence, seed.energy
-    tag_bpm_ok = bpm is not None and np.isfinite(float(bpm))
+    tag_bpm = _coerce_bpm(bpm)
+    tag_bpm_ok = tag_bpm is not None
     weak_tags = _weak_tag_ext(path)
     # Strong genre (tag or path) + BPM: tiny PCM residual only — includes path genre (#3).
     soft_pcm_only = seed.clamp_match and tag_bpm_ok and not weak_tags
@@ -788,6 +804,7 @@ def analyze_audio(
     if pcm is not None:
         pcm_ok = True
         valence_pcm, energy_pcm, detected_bpm, pcm_unstable, profile = _pcm_mood_cues(pcm)
+        detected_bpm = _coerce_bpm(detected_bpm)
 
         if weak_tags:
             # Dump formats: distrust tags; lean hard on waveform.
@@ -835,13 +852,14 @@ def analyze_audio(
             valence = float(np.clip(0.15 * seed.valence + 0.85 * valence_pcm, 0.03, 0.97))
             energy = float(np.clip(0.12 * seed.energy + 0.88 * energy_pcm, 0.03, 0.97))
 
-    out_bpm = bpm if bpm else detected_bpm
+    # Prefer a real tag BPM; never treat 0/NaN as present (falsy/`if bpm` traps).
+    out_bpm = tag_bpm if tag_bpm is not None else detected_bpm
     # soft_pcm_only already trusts genre+BPM — soft nudge only, then re-clamp so
     # tagged BPM cannot undo the ±SOFT_PCM_MAX_SHIFT energy envelope.
     energy = _bpm_nudge(
         energy,
         out_bpm,
-        soft=soft_pcm_only or (bpm is None and detected_bpm is not None),
+        soft=soft_pcm_only or (tag_bpm is None and detected_bpm is not None),
     )
     if soft_pcm_only and pcm_ok:
         energy = float(
@@ -871,13 +889,21 @@ def analyze_audio(
 
     bpm_conflict = False
     bpm_ok = False
-    if tag_bpm_ok and detected_bpm is not None and np.isfinite(float(detected_bpm)):
-        if abs(float(bpm) - float(detected_bpm)) > 18.0:
+    if tag_bpm is not None and detected_bpm is not None:
+        if abs(float(tag_bpm) - float(detected_bpm)) > 18.0:
             bpm_conflict = True
         else:
             bpm_ok = True
-    elif tag_bpm_ok or (detected_bpm is not None and np.isfinite(float(detected_bpm))):
+    elif tag_bpm is not None or detected_bpm is not None:
+        # Only credit BPM when we have a coerced (finite, positive) value.
         bpm_ok = True
+
+    if not np.isfinite(valence):
+        valence = float(seed.valence)
+    if not np.isfinite(energy):
+        energy = float(seed.energy)
+    valence = float(np.clip(valence, 0.03, 0.97))
+    energy = float(np.clip(energy, 0.03, 0.97))
 
     confidence, note = mood_confidence(
         tag_key=seed.tag_key,

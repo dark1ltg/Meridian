@@ -122,6 +122,7 @@ def check_library_moods(db_path: Path) -> None:
         )
         t1 = lib.get(1)
         assert abs(t1.valence - pin_v) < 1e-9 and t1.pinned and t1.mood_confidence == 1.0
+        assert t1.bpm == 120.0  # pinned BPM must not be overwritten
     finally:
         lib.close()
 
@@ -254,6 +255,32 @@ def check_analyze_failed_marks_done(db_path: Path) -> None:
         lib.conn.execute("UPDATE tracks SET analyzed = 0 WHERE id = ?", (tid,))
         lib.conn.commit()
         assert tid not in lib.unanalyzed_ids()
+
+        # Proper upsert reset (scan re-queue) clears the sticky denylist entry.
+        row = lib.get(tid)
+        lib.upsert_track(
+            {
+                "path": row.path,
+                "title": row.title,
+                "artist": row.artist,
+                "albumartist": row.albumartist,
+                "album": row.album,
+                "genre": row.genre,
+                "duration_ms": row.duration_ms,
+                "year": row.year,
+                "bpm": row.bpm,
+                "valence": row.valence,
+                "energy": row.energy,
+                "mood_confidence": row.mood_confidence,
+                "confidence_note": row.confidence_note or "",
+                "low_trust": int(row.low_trust),
+                "analyzed": 0,
+                "mtime": row.mtime,
+                "added_at": row.added_at,
+            }
+        )
+        assert tid not in lib._analyze_denylist
+        assert tid in lib.unanalyzed_ids()
     finally:
         lib.close()
 

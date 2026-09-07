@@ -157,6 +157,7 @@ class Library:
                     for key in (
                         "valence",
                         "energy",
+                        "bpm",
                         "mood_confidence",
                         "low_trust",
                         "confidence_note",
@@ -169,7 +170,11 @@ class Library:
                     params = [payload[k] for k in fields] + [path]
                     self.conn.execute(f"UPDATE tracks SET {assignments} WHERE path = ?", params)
                 self.conn.commit()
-                return int(existing["id"])
+                tid = int(existing["id"])
+                # Re-queue for analysis must clear sticky denylist from prior poison marks.
+                if "analyzed" in payload and int(payload.get("analyzed") or 0) == 0:
+                    self._analyze_denylist.discard(tid)
+                return tid
             cols = ", ".join(values)
             placeholders = ", ".join("?" for _ in values)
             cur = self.conn.execute(
@@ -177,7 +182,10 @@ class Library:
                 list(values.values()),
             )
             self.conn.commit()
-            return int(cur.lastrowid)
+            tid = int(cur.lastrowid)
+            if int(values.get("analyzed") or 0) == 0:
+                self._analyze_denylist.discard(tid)
+            return tid
 
     def set_mood(self, track_id: int, valence: float, energy: float, pinned: bool = True) -> None:
         with self.lock:
@@ -281,7 +289,7 @@ class Library:
                 UPDATE tracks
                 SET valence = CASE WHEN pinned = 1 THEN valence ELSE ? END,
                     energy = CASE WHEN pinned = 1 THEN energy ELSE ? END,
-                    bpm = ?,
+                    bpm = CASE WHEN pinned = 1 THEN bpm ELSE ? END,
                     mood_confidence = CASE WHEN pinned = 1 THEN mood_confidence ELSE ? END,
                     low_trust = CASE WHEN pinned = 1 THEN low_trust ELSE ? END,
                     confidence_note = CASE WHEN pinned = 1 THEN confidence_note ELSE ? END,
