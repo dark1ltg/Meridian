@@ -73,6 +73,14 @@ bash packaging/build-appimage.sh
 
 Release history: [CHANGELOG.md](CHANGELOG.md) · [GitHub Releases](https://github.com/dark1ltg/Meridian/releases)
 
+## Documentation
+
+How Meridian works under the hood (plain language):
+
+- [How Meridian listens](docs/audio-analysis-pipeline.md) — the short listen of each track  
+- [How stars get placed](docs/placement-pipeline.md) — sticker + listen → mood map  
+- [Docs index](docs/README.md)
+
 ## License
 
 Meridian is free software under the **GNU General Public License v3.0**.  
