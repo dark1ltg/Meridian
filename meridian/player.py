@@ -74,7 +74,11 @@ class Player(QObject):
         if self._crossfading or self._advance_emitted:
             return
         duration = int(self.backend.duration() or 0)
-        if duration < 2500:
+        # Short tracks use EndOfMedia; avoid trusting provisional VBR durations.
+        if duration < 12000:
+            return
+        # Never arm a crossfade in the first 10s — early wrong durations often look "done".
+        if int(value) < 10000:
             return
         fade = self._fade_ms(duration)
         remaining = duration - int(value)
@@ -97,14 +101,30 @@ class Player(QObject):
             return
         if self._crossfading:
             # Short incoming can end while the outgoing fade is still running.
-            self._incoming_ended = True
+            # Ignore spurious EndOfMedia at the very start of a longer incoming track.
+            if self._incoming_end_is_real():
+                self._incoming_ended = True
             return
         if self._advance_emitted:
             return
         self.track_finished.emit()
 
+    def _incoming_end_is_real(self) -> bool:
+        """True when EndOfMedia during a fade means the incoming track actually finished."""
+        pos = int(self.backend.position() or 0)
+        dur = int(self.backend.duration() or 0)
+        # Tiny tracks (≲ fade) legitimately end during the outgoing fade.
+        if dur > 0 and dur <= CROSSFADE_MS + 1000:
+            return True
+        # Heard a meaningful amount — treat as a real end.
+        if pos >= 500:
+            return True
+        return False
+
     def _on_error(self, index: int) -> None:
-        if index != self._active and not self._crossfading:
+        # Only the active (incoming) deck matters. Outgoing errors during a fade must
+        # not be treated as failure of the song that just started.
+        if index != self._active:
             return
         err = self._decks[index].player.errorString() or "Playback failed"
         try:
@@ -205,6 +225,7 @@ class Player(QObject):
             not immediate
             and not incoming_ended
             and self.backend.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia
+            and self._incoming_end_is_real()
         ):
             incoming_ended = True
         self.crossfade_settled.emit(not immediate)

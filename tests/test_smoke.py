@@ -14,6 +14,11 @@ from tests.smoke_checks import (
     check_multi_root_empty_does_not_wipe,
     check_partial_and_symlink_scan,
     check_playback_error_auto_skips,
+    check_player_ignores_outgoing_errors,
+    check_nearly_finished_duration_guards,
+    check_incoming_end_ignores_spurious_eom,
+    check_decode_abort_helpers,
+    check_sparse_mount_does_not_wipe,
     check_version,
 )
 
@@ -43,8 +48,28 @@ def test_multi_root_empty_does_not_wipe(tmp_path: Path) -> None:
     check_multi_root_empty_does_not_wipe(tmp_path / "multi-root")
 
 
+def test_sparse_mount_does_not_wipe(tmp_path: Path) -> None:
+    check_sparse_mount_does_not_wipe(tmp_path / "sparse")
+
+
 def test_playback_error_auto_skips() -> None:
     check_playback_error_auto_skips()
+
+
+def test_player_ignores_outgoing_errors() -> None:
+    check_player_ignores_outgoing_errors()
+
+
+def test_nearly_finished_duration_guards() -> None:
+    check_nearly_finished_duration_guards()
+
+
+def test_incoming_end_ignores_spurious_eom() -> None:
+    check_incoming_end_ignores_spurious_eom()
+
+
+def test_decode_abort_helpers() -> None:
+    check_decode_abort_helpers()
 
 
 def test_partial_and_symlink_scan(tmp_path: Path) -> None:

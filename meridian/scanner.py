@@ -167,8 +167,12 @@ class ScanWorker(QObject):
             # Only prune under roots we fully walked AND actually saw audio.
             # An empty successful walk (unmounted drive, empty mountpoint) must not
             # delete every DB row under that root when another root still has files.
+            # Sparse/wrong mounts (one leftover file on an empty volume) also skip prune
+            # when this walk sees less than half of the tracks the DB already knows.
             if walk_ok and not self._abort and root_found:
-                prune_roots.append(root_resolved)
+                known = self.library.count_tracks_under(root_resolved)
+                if known == 0 or len(root_found) * 2 >= known:
+                    prune_roots.append(root_resolved)
         # Never wipe when nothing was kept, walk aborted, or a root was incomplete.
         if found and prune_roots and not self._abort:
             self.library.delete_missing(found, only_under=prune_roots)
@@ -186,8 +190,14 @@ class AnalyzeWorker(QObject):
 
     def abort(self) -> None:
         self._abort = True
+        from meridian.features import request_decode_abort
+
+        request_decode_abort()
 
     def run(self) -> None:
+        from meridian.features import clear_decode_abort
+
+        clear_decode_abort()
         try:
             ids = self.library.unanalyzed_ids()
             total = len(ids)
@@ -244,5 +254,9 @@ def start_worker(worker: QObject, fn_name: str = "run") -> QThread:
     thread = QThread()
     worker.moveToThread(thread)
     thread.started.connect(getattr(worker, fn_name))
+    # When run() returns via finished, leave the event loop so wait() can complete.
+    # Use a lambda so Signal(int) workers (scan) do not pass args into quit().
+    if hasattr(worker, "finished"):
+        worker.finished.connect(lambda *_a: thread.quit())
     thread.start()
     return thread

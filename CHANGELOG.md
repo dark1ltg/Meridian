@@ -4,7 +4,7 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-08)
 
-Richer acoustic mood cues from the existing PCM decode budget, smarter local recommendations, more honest initial placement (soft-PCM and conflict handling), desktop integration, and reliability passes for scan, matrix/context queue, crossfade accounting, quit, mood map, and BPM/signal trust.
+Richer acoustic mood cues from the existing PCM decode budget, smarter local recommendations, more honest initial placement (soft-PCM and conflict handling), desktop integration, and reliability passes for scan, matrix/context queue, crossfade accounting, quit/analyze teardown, mood map, and BPM/signal trust.
 
 ### Acoustic profile
 - Multi-band frequency energy and spectral flux from the current FFT/PCM path
@@ -49,12 +49,19 @@ Richer acoustic mood cues from the existing PCM decode budget, smarter local rec
 ### Library scan safety
 - Empty or missing folders no longer wipe the library (`delete_missing` only after a successful walk finds audio)
 - Multi-root scans: an empty sibling root (unmounted drive, empty mount) no longer prunes that root’s DB tracks just because another root still has audio
+- Sparse/wrong mounts: a root is not pruned when this walk finds less than half the tracks the DB already knows under it
 - Partial / unreadable trees are not pruned — only fully walked roots are eligible for cleanup
 - File symlinks that resolve outside a library root are ignored; symlink directories are not descended into
 - Failed scans no longer look like success (UI does not start analyze on failure)
 
 ### Queue & playback reliability
 - Playback errors (corrupt/unsupported media) auto-skip and advance like missing files instead of stalling
+- Outgoing-deck errors during a crossfade no longer skip the incoming track
+- Corrupt/unsupported files are denylisted for the session (cleared on rescan) so they do not re-enter the context queue
+- Hard-cut play credit is undone if media errors before ~500ms of progress
+- Crossfade auto-advance ignores provisional short durations and never arms in the first 10s (VBR false ends)
+- Spurious EndOfMedia at the start of a longer incoming track no longer ejects it when the fade settles
+- Quit/rescan disconnects worker UI slots, kills in-flight ffmpeg, and keeps timed-out threads alive until they exit (no UAF)
 - Context queue gap-fill no longer raids SHELF while NOW/DEEP/FILL still have unused tracks (anti-repeat yields first)
 - Lens drag and star pin refresh the map **without** rebuilding the context queue mid-listen
 - Scan / rescan / analyze refresh the matrix and map without replacing the live context queue

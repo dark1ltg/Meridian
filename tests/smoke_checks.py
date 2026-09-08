@@ -199,8 +199,55 @@ def check_multi_root_empty_does_not_wipe(tmp_dir: Path) -> None:
         lib.close()
 
 
+def check_sparse_mount_does_not_wipe(tmp_dir: Path) -> None:
+    """One leftover file on a near-empty mount must not prune the rest of that root."""
+    from meridian.scanner import ScanWorker
+
+    db_path = tmp_dir / "sparse.sqlite"
+    root = tmp_dir / "sparse-root"
+    root.mkdir(parents=True)
+    leftover = root / "leftover.mp3"
+    leftover.write_bytes(b"ID3")
+
+    lib = Library(db_path)
+    try:
+        for i in range(6):
+            lib.upsert_track(
+                {
+                    "path": str(root / f"gone{i}.mp3"),
+                    "title": f"gone{i}",
+                    "artist": "Band",
+                    "albumartist": "Band",
+                    "album": "LP",
+                    "genre": "Metal",
+                    "duration_ms": 1,
+                    "year": None,
+                    "bpm": 120,
+                    "valence": 0.5,
+                    "energy": 0.5,
+                    "mood_confidence": 0.5,
+                    "confidence_note": "seed",
+                    "low_trust": 0,
+                    "added_at": 0,
+                    "mtime": 0,
+                    "analyzed": 1,
+                }
+            )
+        lib.add_folder(str(root))
+        assert lib.count_tracks_under(root) == 6
+        ScanWorker(lib, force=False)._scan()
+        paths = {t.path for t in lib.all_tracks()}
+        for i in range(6):
+            assert str(root / f"gone{i}.mp3") in paths, (
+                "sparse/wrong mount must not mass-prune known tracks"
+            )
+        assert str(leftover) in paths
+    finally:
+        lib.close()
+
+
 def check_playback_error_auto_skips() -> None:
-    """Corrupt/unsupported media must skip and advance, not stall on the bad track."""
+    """Corrupt/unsupported media must skip, denylist, and undo hard-cut play credit."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -212,12 +259,16 @@ def check_playback_error_auto_skips() -> None:
     w._crossfade_outgoing_id = None
     w._outgoing_settle_finish = False
     w._expect_natural_advance = False
+    w._pending_play_credit = None
+    w._last_hard_play_credit = 7
+    w.played_history = [7]
     calls: list[tuple] = []
     w._set_status = lambda m: calls.append(("status", m))  # type: ignore[method-assign]
     w._clear_crossfade_credit = lambda: None  # type: ignore[method-assign]
     w._listen_nudge = lambda *_a, **_k: None  # type: ignore[method-assign]
     w._skip_unplayable = lambda tid: 42  # type: ignore[method-assign]
     w.play_id = lambda tid: calls.append(("play", tid))  # type: ignore[method-assign]
+    w.library = MagicMock()
     w.player = MagicMock()
     w.player.current = SimpleNamespace(id=7)
     w.player.is_crossfading.return_value = False
@@ -225,8 +276,118 @@ def check_playback_error_auto_skips() -> None:
     MainWindow._playback_error(w, "ResourceError: Unsupported media")
     assert ("play", 42) in calls
     assert any(c[0] == "status" and "ResourceError" in c[1] for c in calls)
+    w.library.mark_playback_failed.assert_called_with(7)
+    w.library.unrecord_play.assert_called_with(7)
+    assert w.played_history == []
+    assert w._last_hard_play_credit is None
     w.player.stop.assert_called()
     w.player.release_advance_lock.assert_called()
+
+
+def check_player_ignores_outgoing_errors() -> None:
+    """During crossfade, only the active (incoming) deck may emit error_occurred."""
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+
+    from meridian.player import Player
+
+    p = Player()
+    seen: list[str] = []
+    p.error_occurred.connect(lambda m: seen.append(m))
+    # Simulate crossfade: active is incoming deck 1; deck 0 is outgoing.
+    p._crossfading = True
+    p._active = 1
+    p._on_error(0)
+    assert seen == [], "outgoing deck errors must be ignored during crossfade"
+    with patch.object(p._decks[1].player, "errorString", return_value="Incoming failed"):
+        p._on_error(1)
+    assert seen == ["Incoming failed"]
+
+
+def check_nearly_finished_duration_guards() -> None:
+    """Provisional short durations must not arm crossfade auto-advance."""
+    from PySide6.QtWidgets import QApplication
+    from unittest.mock import MagicMock
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+
+    from meridian.player import CROSSFADE_MS, Player
+
+    p = Player()
+    armed: list[bool] = []
+    p.track_nearly_finished.connect(lambda: armed.append(True))
+    p._active = 0
+    p._crossfading = False
+    p._advance_emitted = False
+
+    backend = MagicMock()
+    p._decks[0].player = backend  # type: ignore[index]
+
+    # Underestimated VBR duration early in the track — must not arm.
+    backend.duration.return_value = 5000
+    p._on_position(0, 4000)
+    assert armed == [] and not p._advance_emitted
+
+    # Long track but still in the first 10s — must not arm.
+    backend.duration.return_value = 180_000
+    p._on_position(0, 8000)
+    assert armed == [] and not p._advance_emitted
+
+    # Past 10s with remaining inside the fade window — arm.
+    fade = p._fade_ms(180_000)
+    assert fade <= CROSSFADE_MS
+    p._on_position(0, 180_000 - fade)
+    assert armed == [True] and p._advance_emitted
+
+
+def check_incoming_end_ignores_spurious_eom() -> None:
+    """Early EndOfMedia on a long incoming track must not count as finished."""
+    from PySide6.QtWidgets import QApplication
+    from unittest.mock import MagicMock
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+
+    from meridian.player import CROSSFADE_MS, Player
+
+    p = Player()
+    backend = MagicMock()
+    p._decks[0].player = backend  # type: ignore[index]
+    p._active = 0
+
+    backend.position.return_value = 0
+    backend.duration.return_value = 180_000
+    assert p._incoming_end_is_real() is False
+
+    backend.position.return_value = 800
+    assert p._incoming_end_is_real() is True
+
+    backend.position.return_value = 0
+    backend.duration.return_value = CROSSFADE_MS
+    assert p._incoming_end_is_real() is True
+
+
+def check_decode_abort_helpers() -> None:
+    from meridian.features import (
+        clear_decode_abort,
+        decode_abort_requested,
+        request_decode_abort,
+    )
+
+    clear_decode_abort()
+    assert decode_abort_requested() is False
+    request_decode_abort()
+    assert decode_abort_requested() is True
+    clear_decode_abort()
+    assert decode_abort_requested() is False
 
 
 def check_partial_and_symlink_scan(tmp_dir: Path) -> None:
@@ -577,7 +738,12 @@ def run_all_smoke_checks(tmp_dir: Path) -> None:
     check_library_moods(tmp_dir / "smoke.sqlite")
     check_empty_scan_does_not_wipe(tmp_dir / "wipe.sqlite")
     check_multi_root_empty_does_not_wipe(tmp_dir / "multi-root")
+    check_sparse_mount_does_not_wipe(tmp_dir / "sparse")
     check_playback_error_auto_skips()
+    check_player_ignores_outgoing_errors()
+    check_nearly_finished_duration_guards()
+    check_incoming_end_ignores_spurious_eom()
+    check_decode_abort_helpers()
     check_partial_and_symlink_scan(tmp_dir / "scan-guards")
     check_analyze_failed_marks_done(tmp_dir / "fail.sqlite")
     check_build_plan_hard_exclude()

@@ -4,6 +4,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -218,6 +219,32 @@ CONFIDENCE_HIGH = 0.75
 
 # Test hook: increments whenever ffmpeg decode is attempted.
 _decode_pcm_calls = 0
+# Cooperative abort for AnalyzeWorker.stop / quit (kills in-flight ffmpeg).
+_decode_abort = False
+_decode_proc: subprocess.Popen | None = None
+_decode_proc_lock = threading.Lock()
+
+
+def request_decode_abort() -> None:
+    """Stop any in-flight ffmpeg decode ASAP (analyze abort / quit)."""
+    global _decode_abort, _decode_proc
+    _decode_abort = True
+    with _decode_proc_lock:
+        proc = _decode_proc
+    if proc is not None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def clear_decode_abort() -> None:
+    global _decode_abort
+    _decode_abort = False
+
+
+def decode_abort_requested() -> bool:
+    return bool(_decode_abort)
 
 
 @dataclass(frozen=True, slots=True)
@@ -633,8 +660,10 @@ def _stable_jitter(path: str) -> tuple[float, float]:
 
 
 def _decode_pcm(path: str, *, start_s: float = 12.0, duration_s: float = 28.0) -> np.ndarray | None:
-    global _decode_pcm_calls
+    global _decode_pcm_calls, _decode_proc
     _decode_pcm_calls += 1
+    if _decode_abort:
+        return None
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None
@@ -658,12 +687,39 @@ def _decode_pcm(path: str, *, start_s: float = 12.0, duration_s: float = 28.0) -
         "pipe:1",
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, check=False, timeout=20)
-    except (subprocess.TimeoutExpired, OSError):
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError:
         return None
-    if proc.returncode != 0 or not proc.stdout:
+    with _decode_proc_lock:
+        _decode_proc = proc
+    try:
+        if _decode_abort:
+            proc.kill()
+            proc.wait(timeout=2)
+            return None
+        stdout, _stderr = proc.communicate(timeout=20)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except OSError:
+            pass
         return None
-    pcm = np.frombuffer(proc.stdout, dtype=np.float32)
+    except OSError:
+        return None
+    finally:
+        with _decode_proc_lock:
+            if _decode_proc is proc:
+                _decode_proc = None
+    if _decode_abort:
+        return None
+    if proc.returncode != 0 or not stdout:
+        return None
+    pcm = np.frombuffer(stdout, dtype=np.float32)
     if pcm.size < 2048:
         return None
     return pcm
@@ -796,7 +852,11 @@ def _decode_pcm_with_fallback(
 
     # Dual-window path: same total seconds (~28) as a single long window.
     if dur_s >= 55.0 and secondary is not None and abs(secondary - 12.0) >= 8.0:
+        if decode_abort_requested():
+            return None, False, None
         pcm_a = _decode_pcm(path, start_s=12.0, duration_s=14.0)
+        if decode_abort_requested():
+            return None, False, None
         pcm_b = _decode_pcm(path, start_s=float(secondary), duration_s=14.0)
         ok_a = pcm_a is not None and _pcm_signal_ok(pcm_a)
         ok_b = pcm_b is not None and _pcm_signal_ok(pcm_b)
@@ -816,6 +876,8 @@ def _decode_pcm_with_fallback(
 
     seen: set[float] = set()
     for index, ss in enumerate(starts):
+        if decode_abort_requested():
+            return None, False, None
         key = round(float(ss), 2)
         if key in seen:
             continue

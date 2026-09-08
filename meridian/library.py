@@ -107,6 +107,8 @@ class Library:
         self.lock = threading.Lock()
         # Process-local: keeps analyze from looping when DB mark_analyze_failed fails.
         self._analyze_denylist: set[int] = set()
+        # Process-local: corrupt/unsupported files that failed playback stay out of plans.
+        self._playback_denylist: set[int] = set()
         self._migrate()
 
     def _migrate(self) -> None:
@@ -186,6 +188,7 @@ class Library:
                 # Re-queue for analysis must clear sticky denylist from prior poison marks.
                 if "analyzed" in payload and int(payload.get("analyzed") or 0) == 0:
                     self._analyze_denylist.discard(tid)
+                    self._playback_denylist.discard(tid)
                 return tid
             cols = ", ".join(values)
             placeholders = ", ".join("?" for _ in values)
@@ -197,6 +200,7 @@ class Library:
             tid = int(cur.lastrowid)
             if int(values.get("analyzed") or 0) == 0:
                 self._analyze_denylist.discard(tid)
+                self._playback_denylist.discard(tid)
             return tid
 
     def set_mood(self, track_id: int, valence: float, energy: float, pinned: bool = True) -> None:
@@ -701,6 +705,43 @@ class Library:
             )
             self.conn.commit()
 
+    def unrecord_play(self, track_id: int) -> None:
+        """Undo a play credit when hard-cut media fails before any real listen."""
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE tracks
+                SET play_count = CASE WHEN play_count > 0 THEN play_count - 1 ELSE 0 END
+                WHERE id = ?
+                """,
+                (track_id,),
+            )
+            self.conn.commit()
+
+    def mark_playback_failed(self, track_id: int) -> None:
+        """Keep a corrupt/unsupported file out of plans until rescan/re-import."""
+        self._playback_denylist.add(int(track_id))
+
+    def is_playback_denied(self, track_id: int) -> bool:
+        return int(track_id) in self._playback_denylist
+
+    def count_tracks_under(self, root: Path | str) -> int:
+        """How many DB tracks resolve under this library root (for sparse-mount guards)."""
+        try:
+            root_r = Path(root).resolve()
+        except OSError:
+            return 0
+        with self.lock:
+            rows = self.conn.execute("SELECT path FROM tracks").fetchall()
+        n = 0
+        for row in rows:
+            try:
+                Path(row["path"]).resolve().relative_to(root_r)
+            except (OSError, ValueError):
+                continue
+            n += 1
+        return n
+
     def record_skip(self, track_id: int) -> None:
         with self.lock:
             self.conn.execute(
@@ -802,6 +843,7 @@ class Library:
     def mark_all_pending_analysis(self) -> int:
         """Mark every track for re-analysis (Rescan). Pinned moods stay protected in set_analyzed_mood."""
         self._analyze_denylist.clear()
+        self._playback_denylist.clear()
         with self.lock:
             cur = self.conn.execute("UPDATE tracks SET analyzed = 0")
             self.conn.commit()

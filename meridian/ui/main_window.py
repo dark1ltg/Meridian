@@ -70,6 +70,9 @@ class MainWindow(QMainWindow):
         self._analyze_thread = None
         self._analyze_worker = None
         self._analyze_gen = 0
+        # Timed-out workers kept alive (signals disconnected) until QThread ends.
+        self._lingering_workers: list[tuple] = []
+        self._close_library_when_idle = False
         self._closing = False
         self._pending_play_credit: int | None = None
         # Outgoing track of the active crossfade (for Next/Prev / settle credit).
@@ -84,6 +87,8 @@ class MainWindow(QMainWindow):
         # Listen-nudge / lens refresh requested while play_id holds the rebuild lock.
         self._pending_plan_refresh = False
         self._handling_playback_error = False
+        # Hard-cut play_id credits immediately; cleared/undone if media errors.
+        self._last_hard_play_credit: int | None = None
         self._lens_timer = QTimer(self)
         self._lens_timer.setSingleShot(True)
         self._lens_timer.setInterval(180)
@@ -281,8 +286,12 @@ class MainWindow(QMainWindow):
         self.map.set_radius_scale(scale)
 
     def _playable_tracks(self):
-        """Library rows whose files still exist (shared by plan refresh and replenish)."""
-        return [t for t in self.library.all_tracks() if Path(t.path).exists()]
+        """Library rows whose files still exist and are not playback-denylisted."""
+        return [
+            t
+            for t in self.library.all_tracks()
+            if Path(t.path).exists() and not self.library.is_playback_denied(t.id)
+        ]
 
     def _flush_pending_plan_refresh(self) -> None:
         if not self._pending_plan_refresh:
@@ -447,7 +456,7 @@ class MainWindow(QMainWindow):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        self._stop_analyze(wait_ms=8000)
+        self._stop_analyze(wait_ms=20000)
         pending = self.library.mark_all_pending_analysis()
         self._set_status(f"Rescanning library ({pending} tracks to re-analyze)…")
         self._start_scan_worker(force=True, on_finished=self._rescan_done)
@@ -477,7 +486,41 @@ class MainWindow(QMainWindow):
         self._scan_worker.failed.connect(lambda m: QMessageBox.warning(self, "Scan failed", m))
         self._scan_worker.finished.connect(on_finished)
 
-    def _cleanup_scan_thread(self, wait_ms: int = 3000) -> bool:
+    def _disconnect_worker(self, worker) -> None:
+        if worker is None:
+            return
+        for name in ("progress", "finished", "failed"):
+            sig = getattr(worker, name, None)
+            if sig is None:
+                continue
+            try:
+                sig.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+
+    def _linger_worker(self, thread, worker) -> None:
+        """Keep a timed-out thread alive with UI signals detached until it exits."""
+        if thread is None:
+            return
+        pair = (thread, worker)
+        self._lingering_workers.append(pair)
+
+        def _reap() -> None:
+            if pair in self._lingering_workers:
+                self._lingering_workers.remove(pair)
+            thread.deleteLater()
+            if worker is not None:
+                worker.deleteLater()
+            if self._close_library_when_idle and not self._lingering_workers:
+                try:
+                    self.library.close()
+                except Exception:
+                    pass
+                self._close_library_when_idle = False
+
+        thread.finished.connect(_reap)
+
+    def _cleanup_scan_thread(self, wait_ms: int = 8000) -> bool:
         """Stop the scan worker. Returns True when the thread is fully stopped."""
         worker = self._scan_worker
         thread = self._scan_thread
@@ -485,10 +528,17 @@ class MainWindow(QMainWindow):
         self._scan_thread = None
         if worker is not None:
             worker.abort()
+            self._disconnect_worker(worker)
+            # Re-attach quit so wait() can finish after run returns.
+            if thread is not None:
+                try:
+                    worker.finished.connect(lambda *_a, t=thread: t.quit())
+                except (RuntimeError, TypeError):
+                    pass
         if thread is not None and thread.isRunning():
             thread.quit()
             if not thread.wait(wait_ms):
-                # Still running — avoid deleteLater on a live QThread.
+                self._linger_worker(thread, worker)
                 return False
         if thread is not None:
             thread.deleteLater()
@@ -496,10 +546,10 @@ class MainWindow(QMainWindow):
             worker.deleteLater()
         return True
 
-    def _stop_analyze(self, wait_ms: int = 25000) -> bool:
+    def _stop_analyze(self, wait_ms: int = 20000) -> bool:
         """Stop analyze. Returns True when the thread is fully stopped."""
         # Bump generation first so a late finished signal cannot restart analyze.
-        # Wait past features.analyze ffmpeg timeout (20s) so quit does not UAF the worker.
+        # Abort kills in-flight ffmpeg so this wait stays bounded.
         self._analyze_gen += 1
         worker = self._analyze_worker
         thread = self._analyze_thread
@@ -507,13 +557,16 @@ class MainWindow(QMainWindow):
         self._analyze_thread = None
         if worker is not None:
             worker.abort()
-            try:
-                worker.finished.disconnect()
-            except (RuntimeError, TypeError):
-                pass
+            self._disconnect_worker(worker)
+            if thread is not None:
+                try:
+                    worker.finished.connect(lambda *_a, t=thread: t.quit())
+                except (RuntimeError, TypeError):
+                    pass
         if thread is not None and thread.isRunning():
             thread.quit()
             if not thread.wait(wait_ms):
+                self._linger_worker(thread, worker)
                 return False
         if thread is not None:
             thread.deleteLater()
@@ -634,8 +687,17 @@ class MainWindow(QMainWindow):
             self._set_status("No playable tracks left in the queue.")
             return
         track = self.library.get(track_id)
-        if track is None or not Path(track.path).exists():
-            msg = "Track removed from library." if track is None else "File missing on disk."
+        if (
+            track is None
+            or not Path(track.path).exists()
+            or self.library.is_playback_denied(track_id)
+        ):
+            if track is None:
+                msg = "Track removed from library."
+            elif self.library.is_playback_denied(track_id):
+                msg = "Skipping unplayable track."
+            else:
+                msg = "File missing on disk."
             self._set_status(msg)
             next_id = self._skip_unplayable(track_id)
             if next_id is not None:
@@ -666,6 +728,7 @@ class MainWindow(QMainWindow):
                 self._commit_play(pending)
 
         self._pending_play_credit = None
+        self._last_hard_play_credit = None
         self.player.play_track(track)
         if self.player.is_crossfading() and outgoing_id is not None and outgoing_id != track_id:
             self._pending_play_credit = track_id
@@ -680,6 +743,7 @@ class MainWindow(QMainWindow):
         else:
             self._clear_crossfade_credit()
             self._commit_play(track_id)
+            self._last_hard_play_credit = track_id
         self.transport.set_track(track.short_title, f"{track.artist}  ·  {track.album or 'Single'}", track.loved)
         self._rebuild_lock = False
         self._flush_pending_plan_refresh()
@@ -734,6 +798,15 @@ class MainWindow(QMainWindow):
         self._handling_playback_error = True
         try:
             tid = current.id
+            self.library.mark_playback_failed(tid)
+            # Drop deferred fade credit, or undo a hard-cut play_count bump.
+            if self._pending_play_credit == tid:
+                self._pending_play_credit = None
+            elif self._last_hard_play_credit == tid:
+                self.library.unrecord_play(tid)
+                if self.played_history and self.played_history[-1] == tid:
+                    self.played_history.pop()
+                self._last_hard_play_credit = None
             # If we were fading into this bad file, finish-nudge the outgoing track.
             if self.player.is_crossfading() and self._crossfade_outgoing_id is not None:
                 if self._outgoing_settle_finish:
@@ -939,6 +1012,14 @@ class MainWindow(QMainWindow):
         self.refresh_plan(rebuild_queue=False)
 
     def _pos(self, pos: int) -> None:
+        # Once hard-cut media actually advances, keep the play credit on later errors.
+        if (
+            self._last_hard_play_credit is not None
+            and pos >= 500
+            and self.player.current is not None
+            and self.player.current.id == self._last_hard_play_credit
+        ):
+            self._last_hard_play_credit = None
         self.transport.set_progress(pos, self._duration)
 
     def _dur(self, dur: int) -> None:
@@ -949,9 +1030,12 @@ class MainWindow(QMainWindow):
         self._closing = True
         self._clear_crossfade_credit()
         self._expect_natural_advance = False
-        analyze_done = self._stop_analyze(wait_ms=25000)
-        scan_done = self._cleanup_scan_thread(wait_ms=8000)
-        # Never close SQLite under a live worker (timed-out abort path).
-        if analyze_done and scan_done:
+        # Abort kills ffmpeg; disconnect UI slots before wait so a timeout cannot UAF.
+        analyze_done = self._stop_analyze(wait_ms=20000)
+        scan_done = self._cleanup_scan_thread(wait_ms=10000)
+        # Never close SQLite under a live worker (timed-out / lingering path).
+        if analyze_done and scan_done and not self._lingering_workers:
             self.library.close()
+        else:
+            self._close_library_when_idle = True
         super().closeEvent(event)
