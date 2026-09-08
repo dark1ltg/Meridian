@@ -345,13 +345,64 @@ def check_build_plan_hard_exclude() -> None:
     assert pressured[1] < calm[1]  # and shrinks NOW
 
     # Finish/skip importance: finished tracks outrank often-skipped peers at same mood.
-    from meridian.queue_engine import classify
+    from meridian.queue_engine import Quadrant, classify
 
     finished = t(1, plays=8, skips=1)
     skipped = t(2, plays=1, skips=8)
     ranked = classify([finished, skipped], ctx, set())
     by_id = {r.track.id: r for r in ranked}
     assert by_id[1].importance > by_id[2].importance
+
+    # Dense same-artist NOW/DEEP/FILL must not gap-fill into a SHELF-heavy queue.
+    def t_mood(
+        i: int,
+        *,
+        artist: str,
+        album: str,
+        valence: float,
+        energy: float,
+    ) -> Track:
+        return Track(
+            id=i,
+            path=f"/m/{i}.mp3",
+            title=f"t{i}",
+            artist=artist,
+            album=album,
+            albumartist=artist,
+            genre="Metal",
+            duration_ms=1000,
+            year=None,
+            bpm=120.0,
+            valence=valence,
+            energy=energy,
+            mood_confidence=0.8,
+            confidence_note="seed",
+            low_trust=False,
+            pinned=False,
+            loved=False,
+            play_count=0,
+            skip_count=0,
+            last_played=None,
+            added_at=0.0,
+            mtime=0.0,
+            analyzed=True,
+        )
+
+    near = [
+        t_mood(i, artist="ClusterA" if i % 2 == 0 else "ClusterB", album=f"Alb{i % 3}", valence=0.5, energy=0.5)
+        for i in range(1, 25)
+    ]
+    far = [
+        t_mood(100 + i, artist=f"Far{i}", album=f"F{i}", valence=0.05, energy=0.95)
+        for i in range(40)
+    ]
+    crowded = build_plan(near + far, ctx, [], length=18)
+    shelf_ids = {r.track.id for r in crowded.by_quadrant.get(Quadrant.SHELF, [])}
+    shelf_in_q = sum(1 for tid in crowded.order if tid in shelf_ids)
+    near_ids = {tr.id for tr in near}
+    near_in_q = sum(1 for tid in crowded.order if tid in near_ids)
+    assert near_in_q >= 12, (near_in_q, crowded.order, shelf_in_q)
+    assert shelf_in_q <= 5, (shelf_in_q, crowded.order)
 
 
 def check_mood_map_helpers() -> None:

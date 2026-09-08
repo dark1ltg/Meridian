@@ -27,6 +27,7 @@ Richer acoustic mood cues from the existing PCM decode budget, smarter local rec
 ### Recommendations (local)
 - Skip pressure (recent skips) widens the lens neighborhood, softens NOW stickiness, and steals queue slots into FILL
 - Context queue soft-caps artist/album repeats (2) while alternatives exist, then relaxes to fill gaps
+- Gap-fill protects the matrix mix: NOW/DEEP/FILL first (diversity on, then off); SHELF only after, with a small cap
 - Mode-aware matrix mix: Focus steadier NOW/DEEP; Charge more NOW; Dim more DEEP; Wander balanced
 - Finish vs skip history weights importance more strongly; listen nudges on unpinned stars are slightly stronger
 - Focus mode lightly prefers tracks with steady persisted onset consistency
@@ -52,6 +53,7 @@ Richer acoustic mood cues from the existing PCM decode budget, smarter local rec
 - Failed scans no longer look like success (UI does not start analyze on failure)
 
 ### Queue & playback reliability
+- Context queue gap-fill no longer raids SHELF while NOW/DEEP/FILL still have unused tracks (anti-repeat yields first)
 - Lens drag and star pin refresh the map **without** rebuilding the context queue mid-listen
 - Scan / rescan / analyze refresh the matrix and map without replacing the live context queue
 - Map star play syncs `queue_index` (or inserts like a matrix pull) so Next/Prev stay aligned

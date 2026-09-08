@@ -231,6 +231,9 @@ def build_plan(
     artist_n: dict[str, int] = {}
     album_n: dict[str, int] = {}
     n_explicit, n_now, n_deep, n_fill, n_shelf = mix_counts(ctx)
+    # Soft ceiling on SHELF during gap-fill so anti-repeat cannot empty NOW/DEEP/FILL
+    # into a SHELF-heavy queue while those matrix lists still have unused tracks.
+    shelf_gap_cap = max(n_shelf, 3)
 
     def take(items: list[RankedTrack], n: int, *, allow_recent: bool, diversity: bool) -> None:
         grabbed = 0
@@ -261,6 +264,24 @@ def build_plan(
                 album_n[album] = album_n.get(album, 0) + 1
             grabbed += 1
 
+    def shelf_count() -> int:
+        shelf_ids = {r.track.id for r in buckets[Quadrant.SHELF]}
+        return sum(1 for tid in order if tid in shelf_ids)
+
+    def take_preferred(*, allow_recent: bool, diversity: bool) -> None:
+        need = length - len(order)
+        if need <= 0:
+            return
+        take(buckets[Quadrant.NOW], need, allow_recent=allow_recent, diversity=diversity)
+        need = length - len(order)
+        if need <= 0:
+            return
+        take(buckets[Quadrant.DEEP], need, allow_recent=allow_recent, diversity=diversity)
+        need = length - len(order)
+        if need <= 0:
+            return
+        take(buckets[Quadrant.FILL], need, allow_recent=allow_recent, diversity=diversity)
+
     # Mix from all four playlists; mode + skip pressure set the ratios.
     take(
         [r for r in ranked if r.track.id in explicit_set],
@@ -272,12 +293,32 @@ def build_plan(
     take(buckets[Quadrant.DEEP], n_deep, allow_recent=False, diversity=True)
     take(buckets[Quadrant.FILL], n_fill, allow_recent=False, diversity=True)
     take(buckets[Quadrant.SHELF], n_shelf, allow_recent=False, diversity=True)
+
+    # Gap-fill: protect the matrix mix. Diversity yields before SHELF does.
     if len(order) < length:
-        # Gap fill: still prefer diversity, then relax.
-        take(buckets[Quadrant.NOW], length - len(order), allow_recent=True, diversity=True)
-        take(buckets[Quadrant.DEEP], length - len(order), allow_recent=True, diversity=True)
-        take(buckets[Quadrant.FILL], length - len(order), allow_recent=True, diversity=True)
-        take(buckets[Quadrant.SHELF], length - len(order), allow_recent=True, diversity=True)
+        # Pass A — preferred buckets, keep anti-repeat.
+        take_preferred(allow_recent=True, diversity=True)
     if len(order) < length:
+        # Pass B — same buckets, relax artist/album caps so a dense cluster can still feed.
+        take_preferred(allow_recent=True, diversity=False)
+    if len(order) < length:
+        # Pass C — limited SHELF only after NOW/DEEP/FILL are exhausted under both rules.
+        room = max(0, shelf_gap_cap - shelf_count())
+        take(
+            buckets[Quadrant.SHELF],
+            min(length - len(order), room),
+            allow_recent=True,
+            diversity=True,
+        )
+    if len(order) < length:
+        room = max(0, shelf_gap_cap - shelf_count())
+        take(
+            buckets[Quadrant.SHELF],
+            min(length - len(order), room),
+            allow_recent=True,
+            diversity=False,
+        )
+    if len(order) < length:
+        # Last resort (tiny / exhausted library): any remaining ranked track.
         take(ranked, length - len(order), allow_recent=True, diversity=False)
     return QueuePlan(ranked=ranked, order=order[:length], by_quadrant=buckets)

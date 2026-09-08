@@ -46,12 +46,11 @@
     <release version="1.3.5" date="2026-09-07">
       <description>
         <p>
-          More honest offline mood placement (evidence-gated soft-PCM, RMS
-          dynamics, gated burstiness, metadata-conflict handling), dual-window
-          acoustic cues, smarter local recommendations, AppImage desktop
-          install, and reliability fixes for BPM/signal trust, library scan,
-          matrix / context queue, crossfade credit, safer quit, and mood-map
-          interaction.
+          More honest offline mood placement, dual-window acoustic cues,
+          smarter local recommendations (matrix-first context queue gap-fill so
+          SHELF no longer crowds out NOW/DEEP/FILL), AppImage desktop install,
+          and reliability fixes for BPM/signal trust, library scan, matrix /
+          context queue, crossfade credit, safer quit, and mood-map interaction.
         </p>
       </description>
     </release>
