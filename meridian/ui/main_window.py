@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
         self._rebuild_lock = False
         # Listen-nudge / lens refresh requested while play_id holds the rebuild lock.
         self._pending_plan_refresh = False
+        self._handling_playback_error = False
         self._lens_timer = QTimer(self)
         self._lens_timer.setSingleShot(True)
         self._lens_timer.setInterval(180)
@@ -256,7 +257,7 @@ class MainWindow(QMainWindow):
         self.player.track_nearly_finished.connect(self._nearly_finished)
         self.player.track_finished.connect(self._track_finished_hard)
         self.player.crossfade_settled.connect(self._crossfade_settled)
-        self.player.error_occurred.connect(self._set_status)
+        self.player.error_occurred.connect(self._playback_error)
 
     def _restore_lens(self) -> None:
         x = float(self.settings.value("lens_x", 0.52))
@@ -721,6 +722,33 @@ class MainWindow(QMainWindow):
         if self.plan:
             self.map.set_tracks(self.plan.ranked, track_id)
         self._fill_queue()
+
+    def _playback_error(self, message: str) -> None:
+        """Corrupt/unsupported media: show status and skip like a missing file."""
+        self._set_status(message)
+        if self._handling_playback_error or self._closing:
+            return
+        current = self.player.current
+        if current is None:
+            return
+        self._handling_playback_error = True
+        try:
+            tid = current.id
+            # If we were fading into this bad file, finish-nudge the outgoing track.
+            if self.player.is_crossfading() and self._crossfade_outgoing_id is not None:
+                if self._outgoing_settle_finish:
+                    self._listen_nudge(self._crossfade_outgoing_id, skipped=False)
+                self._clear_crossfade_credit()
+            self.player.stop()
+            self.player.release_advance_lock()
+            self._expect_natural_advance = False
+            next_id = self._skip_unplayable(tid)
+            if next_id is not None:
+                self.play_id(next_id)
+            else:
+                self._set_status(f"{message} — no playable tracks left.")
+        finally:
+            self._handling_playback_error = False
 
     def _skip_unplayable(self, track_id: int) -> int | None:
         """Drop a missing/deleted id from the queue and return the next candidate."""

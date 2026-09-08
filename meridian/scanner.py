@@ -164,8 +164,10 @@ class ScanWorker(QObject):
                     )
                     added += 1
             found.extend(root_found)
-            # Only prune under roots we fully walked without errors.
-            if walk_ok and not self._abort:
+            # Only prune under roots we fully walked AND actually saw audio.
+            # An empty successful walk (unmounted drive, empty mountpoint) must not
+            # delete every DB row under that root when another root still has files.
+            if walk_ok and not self._abort and root_found:
                 prune_roots.append(root_resolved)
         # Never wipe when nothing was kept, walk aborted, or a root was incomplete.
         if found and prune_roots and not self._abort:

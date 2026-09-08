@@ -2,7 +2,7 @@
 
 All notable Meridian releases are listed here. Download AppImages from [Releases](https://github.com/dark1ltg/Meridian/releases).
 
-## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-07)
+## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-08)
 
 Richer acoustic mood cues from the existing PCM decode budget, smarter local recommendations, more honest initial placement (soft-PCM and conflict handling), desktop integration, and reliability passes for scan, matrix/context queue, crossfade accounting, quit, mood map, and BPM/signal trust.
 
@@ -48,11 +48,13 @@ Richer acoustic mood cues from the existing PCM decode budget, smarter local rec
 
 ### Library scan safety
 - Empty or missing folders no longer wipe the library (`delete_missing` only after a successful walk finds audio)
+- Multi-root scans: an empty sibling root (unmounted drive, empty mount) no longer prunes that root’s DB tracks just because another root still has audio
 - Partial / unreadable trees are not pruned — only fully walked roots are eligible for cleanup
 - File symlinks that resolve outside a library root are ignored; symlink directories are not descended into
 - Failed scans no longer look like success (UI does not start analyze on failure)
 
 ### Queue & playback reliability
+- Playback errors (corrupt/unsupported media) auto-skip and advance like missing files instead of stalling
 - Context queue gap-fill no longer raids SHELF while NOW/DEEP/FILL still have unused tracks (anti-repeat yields first)
 - Lens drag and star pin refresh the map **without** rebuilding the context queue mid-listen
 - Scan / rescan / analyze refresh the matrix and map without replacing the live context queue

@@ -151,6 +151,84 @@ def check_empty_scan_does_not_wipe(db_path: Path) -> None:
         lib.close()
 
 
+def check_multi_root_empty_does_not_wipe(tmp_dir: Path) -> None:
+    """One root with audio + one empty root must not prune tracks under the empty root."""
+    from meridian.scanner import ScanWorker
+
+    db_path = tmp_dir / "multi-root.sqlite"
+    root_a = tmp_dir / "root-a"
+    root_b = tmp_dir / "root-b"
+    root_a.mkdir(parents=True)
+    root_b.mkdir(parents=True)
+    keep = root_a / "keep.mp3"
+    keep.write_bytes(b"ID3")
+    ghost = root_b / "ghost.mp3"
+
+    lib = Library(db_path)
+    try:
+        lib.upsert_track(
+            {
+                "path": str(ghost),
+                "title": "ghost",
+                "artist": "Band",
+                "albumartist": "Band",
+                "album": "LP",
+                "genre": "Metal",
+                "duration_ms": 1,
+                "year": None,
+                "bpm": 120,
+                "valence": 0.5,
+                "energy": 0.5,
+                "mood_confidence": 0.5,
+                "confidence_note": "seed",
+                "low_trust": 0,
+                "added_at": 0,
+                "mtime": 0,
+                "analyzed": 1,
+            }
+        )
+        lib.add_folder(str(root_a))
+        lib.add_folder(str(root_b))
+        ScanWorker(lib, force=False)._scan()
+        paths = {t.path for t in lib.all_tracks()}
+        assert str(keep) in paths, "audio under a live root must still be indexed"
+        assert str(ghost) in paths, (
+            "empty sibling root must not wipe DB tracks under that root"
+        )
+    finally:
+        lib.close()
+
+
+def check_playback_error_auto_skips() -> None:
+    """Corrupt/unsupported media must skip and advance, not stall on the bad track."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from meridian.ui.main_window import MainWindow
+
+    w = MainWindow.__new__(MainWindow)
+    w._closing = False
+    w._handling_playback_error = False
+    w._crossfade_outgoing_id = None
+    w._outgoing_settle_finish = False
+    w._expect_natural_advance = False
+    calls: list[tuple] = []
+    w._set_status = lambda m: calls.append(("status", m))  # type: ignore[method-assign]
+    w._clear_crossfade_credit = lambda: None  # type: ignore[method-assign]
+    w._listen_nudge = lambda *_a, **_k: None  # type: ignore[method-assign]
+    w._skip_unplayable = lambda tid: 42  # type: ignore[method-assign]
+    w.play_id = lambda tid: calls.append(("play", tid))  # type: ignore[method-assign]
+    w.player = MagicMock()
+    w.player.current = SimpleNamespace(id=7)
+    w.player.is_crossfading.return_value = False
+
+    MainWindow._playback_error(w, "ResourceError: Unsupported media")
+    assert ("play", 42) in calls
+    assert any(c[0] == "status" and "ResourceError" in c[1] for c in calls)
+    w.player.stop.assert_called()
+    w.player.release_advance_lock.assert_called()
+
+
 def check_partial_and_symlink_scan(tmp_dir: Path) -> None:
     from meridian.scanner import ScanWorker
 
@@ -498,6 +576,8 @@ def run_all_smoke_checks(tmp_dir: Path) -> None:
     check_confidence()
     check_library_moods(tmp_dir / "smoke.sqlite")
     check_empty_scan_does_not_wipe(tmp_dir / "wipe.sqlite")
+    check_multi_root_empty_does_not_wipe(tmp_dir / "multi-root")
+    check_playback_error_auto_skips()
     check_partial_and_symlink_scan(tmp_dir / "scan-guards")
     check_analyze_failed_marks_done(tmp_dir / "fail.sqlite")
     check_build_plan_hard_exclude()

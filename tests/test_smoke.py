@@ -11,7 +11,9 @@ from tests.smoke_checks import (
     check_empty_scan_does_not_wipe,
     check_library_moods,
     check_mood_map_helpers,
+    check_multi_root_empty_does_not_wipe,
     check_partial_and_symlink_scan,
+    check_playback_error_auto_skips,
     check_version,
 )
 
@@ -35,6 +37,14 @@ def test_smooth_rescale_pin_and_listen_nudge(tmp_db: Path) -> None:
 
 def test_empty_scan_does_not_wipe_library(tmp_path: Path) -> None:
     check_empty_scan_does_not_wipe(tmp_path / "wipe.sqlite")
+
+
+def test_multi_root_empty_does_not_wipe(tmp_path: Path) -> None:
+    check_multi_root_empty_does_not_wipe(tmp_path / "multi-root")
+
+
+def test_playback_error_auto_skips() -> None:
+    check_playback_error_auto_skips()
 
 
 def test_partial_and_symlink_scan(tmp_path: Path) -> None:
