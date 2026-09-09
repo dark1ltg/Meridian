@@ -17,11 +17,22 @@ DOC_FONTS="$DOC_ROOT/ubuntu-font-licence"
 DOC_THIRD="$DOC_ROOT/third-party"
 LICENSE_FALLBACKS="$ROOT/resources/licenses"
 
-PYTHON="${ROOT}/.venv/bin/python"
+# Prefer MERIDIAN_PYTHON / MERIDIAN_VENV so portable (older-glibc) builds can
+# avoid the host system interpreter (e.g. CachyOS glibc 2.44).
+if [[ -n "${MERIDIAN_PYTHON:-}" ]]; then
+  PYTHON="$MERIDIAN_PYTHON"
+elif [[ -n "${MERIDIAN_VENV:-}" ]]; then
+  PYTHON="${MERIDIAN_VENV}/bin/python"
+else
+  PYTHON="${ROOT}/.venv/bin/python"
+fi
 if [[ ! -x "$PYTHON" ]]; then
-  echo "Create .venv first (python3 -m venv --system-site-packages .venv && pip install mutagen numpy aubio pyinstaller)"
+  echo "Create a venv first, e.g.:"
+  echo "  python3 -m venv --system-site-packages .venv && .venv/bin/pip install -r requirements.txt"
+  echo "Or for Ubuntu 24.04-compatible AppImages: packaging/build-appimage-ubuntu2404.sh"
   exit 1
 fi
+echo "Using Python: $PYTHON ($("$PYTHON" -c 'import sys; print(sys.version.split()[0])'))"
 
 run_py() {
   env -i \
@@ -295,17 +306,31 @@ EOF
 chmod +x "$APPDIR/AppRun" "$APPDIR/usr/bin/Meridian" "$APPDIR/usr/bin/meridian-desktop-integrate"
 
 mkdir -p "$TOOLS"
-TOOL="$TOOLS/appimagetool-${ARCH}.AppImage"
-if [[ ! -x "$TOOL" ]]; then
+TOOL_APPIMAGE="$TOOLS/appimagetool-${ARCH}.AppImage"
+TOOL_EXTRACT="$TOOLS/appimagetool-extract/AppRun"
+if [[ ! -x "$TOOL_APPIMAGE" ]]; then
   URL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage"
   echo "Downloading appimagetool…"
-  curl -L --fail -o "$TOOL" "$URL"
-  chmod +x "$TOOL"
+  curl -L --fail -o "$TOOL_APPIMAGE" "$URL"
+  chmod +x "$TOOL_APPIMAGE"
+fi
+# Prefer an extracted appimagetool: nested AppImages break under proot / some hosts.
+if [[ ! -x "$TOOL_EXTRACT" ]]; then
+  echo "Extracting appimagetool…"
+  (
+    cd "$TOOLS"
+    rm -rf appimagetool-extract squashfs-root
+    env -u APPDIR -u APPIMAGE -u ARGV0 -u OWD APPIMAGE_EXTRACT_AND_RUN=1 \
+      "./appimagetool-${ARCH}.AppImage" --appimage-extract
+    mv squashfs-root appimagetool-extract
+  )
 fi
 
 export ARCH
 export APPIMAGE_EXTRACT_AND_RUN=1
-"$TOOL" "$APPDIR" "$DIST/${APP}-${ARCH}.AppImage"
+# Avoid host AppImage/Cursor cwd quirks when packaging.
+env -u APPDIR -u APPIMAGE -u ARGV0 -u OWD HOME="${HOME:-/tmp}" \
+  "$TOOL_EXTRACT" "$APPDIR" "$DIST/${APP}-${ARCH}.AppImage"
 chmod +x "$DIST/${APP}-${ARCH}.AppImage"
 echo "Built $DIST/${APP}-${ARCH}.AppImage"
 echo "Desktop:   ${DIST}/${APP}-${ARCH}.AppImage --install"

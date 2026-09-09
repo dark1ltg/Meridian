@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.u2404-rootfs/
+.venv-ubuntu2404/
 venv/
 dist/
 build/

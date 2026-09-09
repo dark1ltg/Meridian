@@ -25,6 +25,14 @@ Meridian is a local, offline Linux music player. Every track becomes a star on a
 
 ## Get Meridian
 
+### System requirements (AppImage)
+
+**Baseline:** **Ubuntu 24.04 LTS** (or newer) on **x86_64**.
+
+The release AppImage needs **glibc 2.38+** (Ubuntu 24.04 ships **2.39**). Distros with older glibc (for example AlmaLinux 9 / glibc 2.34) will not run it. AlmaLinux 10 (glibc 2.39) matches the baseline.
+
+Also install host **`ffmpeg`** for mood analysis. For H.264 through Qt’s FFmpeg plugin, install system **`x264` / `libx264`** (not bundled). Meridian warns if that library is missing.
+
 ### AppImage (recommended)
 
 Download **`Meridian-x86_64.AppImage`** from the [latest release](https://github.com/dark1ltg/Meridian/releases/latest).
@@ -36,8 +44,6 @@ chmod +x Meridian-x86_64.AppImage
 ```
 
 `--uninstall` removes the menu entry and icons.
-
-Install host **`ffmpeg`** for mood analysis. For H.264 through Qt’s FFmpeg plugin, also install system **`x264` / `libx264`** (not bundled). Meridian warns if that library is missing.
 
 ### Run from source
 
@@ -54,6 +60,17 @@ bash scripts/run.sh
 **Add library folder** imports music. `~/Music` is scanned on first launch if it exists. **Rescan** refreshes tags and re-analyzes every track.
 
 ### Build the AppImage
+
+For the **supported** release-style binary (Ubuntu 24.04 / glibc ≤ 2.39), prefer:
+
+```bash
+bash packaging/build-appimage-ubuntu2404.sh
+# → dist/Meridian-x86_64-ubuntu2404.AppImage  (also Meridian-x86_64.AppImage)
+```
+
+Uses Docker/Podman with `ubuntu:24.04`, or a local Ubuntu 24.04 rootfs via proot when containers are unavailable.
+
+A plain host build may only run on machines as new as your build PC:
 
 ```bash
 bash packaging/build-appimage.sh

@@ -2,7 +2,7 @@
 
 All notable Meridian releases are listed here. Download AppImages from [Releases](https://github.com/dark1ltg/Meridian/releases).
 
-## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-08)
+## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-09)
 
 Richer acoustic mood cues from the existing PCM decode budget, smarter local recommendations, more honest initial placement (soft-PCM and conflict handling), desktop integration, and reliability passes for scan, matrix/context queue, crossfade accounting, quit/analyze teardown, mood map, and BPM/signal trust.
 
@@ -95,6 +95,8 @@ Richer acoustic mood cues from the existing PCM decode budget, smarter local rec
 - Sticky startup / status tip when host `libx264` is missing under the FFmpeg media backend
 - Safer quit: longer waits for scan/analyze; do not `deleteLater` live threads; do not close SQLite under workers that outlive the wait
 - Licence compliance pack: full LGPL-3/GPL texts for Qt, `BUILD_LIBRARIES.txt` inventory, expanded `SOURCE_OFFER` for bundled GPL libs
+- **Baseline support:** release AppImage targets **Ubuntu 24.04 LTS** (x86_64); requires **glibc 2.38+** (24.04 provides 2.39)
+- Portable build helpers: `packaging/build-appimage-ubuntu2404.sh`, `Dockerfile.ubuntu2404`, `audit-appimage-glibc.py`
 
 ## [1.3.4](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.4) — 2026-09-06
 
