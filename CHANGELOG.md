@@ -4,7 +4,7 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-09)
 
-Richer acoustic mood cues from the existing PCM decode budget, smarter local recommendations, more honest initial placement (soft-PCM and conflict handling), desktop integration, and reliability passes for scan, matrix/context queue, crossfade accounting, quit/analyze teardown, mood map, and BPM/signal trust.
+Richer acoustic mood cues from the existing PCM decode budget, smarter local recommendations, more honest initial placement (soft-PCM and conflict handling), desktop integration, and reliability passes for scan, matrix/context queue, crossfade accounting, quit/analyze teardown, mood map, OpenGL/EGL startup, and BPM/signal trust.
 
 ### Acoustic profile
 - Multi-band frequency energy and spectral flux from the current FFT/PCM path
@@ -16,11 +16,14 @@ Richer acoustic mood cues from the existing PCM decode budget, smarter local rec
 - Richer 2D blend from band/mid balance, flux, and energy trend; tonal vs noisy weighting (flatness pulls Glow down)
 - Energy uses RMS consistency and peak; burstiness textures Kinetic only when onset structure is trustworthy
 - Evidence-gated soft-PCM: stable waveform that clearly disagrees with a genre+BPM seed may move farther (Glow freer than Kinetic)
+- Container/catalog labels (OST, soundtrack, game, VGM, …) stay neighborhood priors but do not soft-lock PCM like acoustic genres
+- Kinetic leans on motion/onset/flux over raw loudness; steady loops dampen loudness-as-energy; lighter ZCR weight
+- Dual-window strong disagree keeps the stabler base and injects Kinetic contrast from the active window
 - Tag vs path genre conflict reduces metadata authority; freed weight goes to PCM only in proportion to PCM trust (not maxed)
 - Structure-aware soft/genre clamps: steady rhythm + genre disagreement trusts PCM more; unstable material hugs the seed
 - When tag and detected BPM conflict, energy nudge trusts detected if rhythm is steady, otherwise the tag
 - Persists onset consistency, spectral flux, and brightness for Focus ranking and album spread (no re-decode)
-- After album smooth, within-album acoustic spread unsticks clones using those cues (pins untouched)
+- After album smooth, within-album acoustic spread unsticks clones using those cues (pins untouched; default max shift ~0.07)
 - Expanded local genre seeds (phonk, hyperpop, drill, vaporwave, amapiano, city pop, and related aliases)
 - Pins, metadata, and total decode budget unchanged
 
@@ -63,6 +66,8 @@ Richer acoustic mood cues from the existing PCM decode budget, smarter local rec
 - Spurious EndOfMedia at the start of a longer incoming track no longer ejects it when the fade settles
 - Quit/rescan disconnects worker UI slots, kills in-flight ffmpeg, and keeps timed-out threads alive until they exit (no UAF)
 - Context queue gap-fill no longer raids SHELF while NOW/DEEP/FILL still have unused tracks (anti-repeat yields first)
+- Worker finished/progress slots are queued to the UI thread; QThread.wait() is never called from the worker itself (fixes abort: “Thread tried to wait on itself”)
+- AppImage/startup no longer forces desktop OpenGL by default (broken EGL/DRI hosts); `MERIDIAN_GL=desktop` restores the old preference; `LIBGL_ALWAYS_SOFTWARE=1` / `QT_OPENGL=software` prefer software + non-GL map viewport
 - Lens drag and star pin refresh the map **without** rebuilding the context queue mid-listen
 - Scan / rescan / analyze refresh the matrix and map without replacing the live context queue
 - Map star play syncs `queue_index` (or inserts like a matrix pull) so Next/Prev stay aligned

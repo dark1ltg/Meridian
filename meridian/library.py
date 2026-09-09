@@ -495,10 +495,10 @@ class Library:
             self.conn.commit()
         return len(updates)
 
-    def spread_album_acoustics(self, max_shift: float = 0.035) -> int:
+    def spread_album_acoustics(self, max_shift: float = 0.07) -> int:
         """Unstick same-album clones using persisted brightness/flux (no ffmpeg).
 
-        After album smooth, unpinned tracks get a tiny offset from the album median
+        After album smooth, unpinned tracks get a bounded offset from the album median
         brightness/flux so neighbors stay in the album cloud without stacking.
         """
         import math

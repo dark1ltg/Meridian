@@ -38,6 +38,12 @@ GENRE_MOOD: dict[str, tuple[float, float]] = {
     "lofi": (0.46, 0.22),
     "lo-fi": (0.46, 0.22),
     "soundtrack": (0.50, 0.40),
+    # Container / catalog labels (not acoustic identities) — see CONTAINER_SEED_KEYS.
+    "video game": (0.52, 0.46),
+    "game": (0.52, 0.46),
+    "score": (0.50, 0.40),
+    "ost": (0.50, 0.40),
+    "vgm": (0.52, 0.46),
     # Aliases → same coordinates as a nearby canonical genre (longest match wins).
     "alt rock": (0.50, 0.64),
     "alternative rock": (0.50, 0.64),
@@ -88,10 +94,6 @@ GENRE_MOOD: dict[str, tuple[float, float]] = {
     "kpop": (0.74, 0.68),
     "j-pop": (0.72, 0.60),
     "anime": (0.62, 0.58),
-    "video game": (0.52, 0.46),
-    "game": (0.52, 0.46),
-    "score": (0.50, 0.40),
-    "ost": (0.50, 0.40),
     "acoustic": (0.54, 0.30),
     "singer-songwriter": (0.52, 0.32),
     "americana": (0.56, 0.40),
@@ -213,6 +215,17 @@ DEFAULT_VALENCE = 0.5
 DEFAULT_ENERGY = 0.48
 # Dump / raw formats often have empty or junk tags — favor PCM more.
 WEAK_TAG_EXTS = {".wav", ".aiff", ".aif"}
+# Contextual catalog labels: useful neighborhood priors, not soft-PCM locks.
+CONTAINER_SEED_KEYS = frozenset(
+    {
+        "soundtrack",
+        "ost",
+        "score",
+        "game",
+        "video game",
+        "vgm",
+    }
+)
 # Graduated confidence bands (UI + low_trust compat).
 CONFIDENCE_LOW = 0.45
 CONFIDENCE_HIGH = 0.75
@@ -259,6 +272,12 @@ class MoodSeed:
     def clamp_match(self) -> bool:
         """Tag or path genre hit — used to limit PCM drag."""
         return self.tag_key is not None or self.path_key is not None
+
+    @property
+    def container_only(self) -> bool:
+        """True when every matched key is a catalog/container label (OST/game/…)."""
+        keys = {k for k in (self.tag_key, self.path_key) if k}
+        return bool(keys) and keys <= CONTAINER_SEED_KEYS
 
 
 @dataclass(frozen=True, slots=True)
@@ -781,18 +800,31 @@ def _merge_pcm_profiles(primary, secondary):
         winner, loser = secondary, primary
 
     if disagree > 0.18:
-        # Intro vs drop (etc.): don't average into a false middle.
-        valence = float(winner.valence)
-        energy = float(winner.energy)
-        brightness = float(winner.brightness)
-        flux = float(winner.flux)
-        trend = float(winner.energy_trend)
+        # Intro vs drop (etc.): keep the stabler window as the base, but do not discard
+        # a musically active disagreeing window — inject contrast (Kinetic freer than Glow).
+        loser_more_active = (
+            float(loser.flux) > float(winner.flux) + 0.04
+            or float(loser.onset_rate) > float(winner.onset_rate) + 0.02
+            or float(loser.energy) > float(winner.energy) + 0.06
+        )
+        inj_e = 0.32 if loser_more_active else 0.18
+        inj_v = 0.14 if loser_more_active else 0.08
+        valence = float((1.0 - inj_v) * winner.valence + inj_v * loser.valence)
+        energy = float((1.0 - inj_e) * winner.energy + inj_e * loser.energy)
+        brightness = float((1.0 - inj_v) * winner.brightness + inj_v * loser.brightness)
+        flux = float(max(winner.flux, (1.0 - inj_e) * winner.flux + inj_e * loser.flux))
+        trend = float((1.0 - inj_e) * winner.energy_trend + inj_e * loser.energy_trend)
         bands = dict(winner.band_energy)
         bpm = winner.bpm if winner.bpm is not None else loser.bpm
         onset_consistency = float(winner.onset_consistency)
-        variation = float(winner.variation)
+        variation = float(
+            max(winner.variation, (1.0 - inj_e) * winner.variation + inj_e * loser.variation)
+        )
         unstable = bool(winner.unstable)
         ostats_src = winner
+        if loser_more_active:
+            # Persist the active window's motion cues for Focus / album spread.
+            ostats_src = loser if float(loser.onset_rate) >= float(winner.onset_rate) else winner
     else:
         # Mild disagreement: lean toward the stabler window.
         w = 0.62 if s1 != s2 else 0.5
@@ -1037,8 +1069,11 @@ def analyze_audio(
     tag_bpm = _coerce_bpm(bpm)
     tag_bpm_ok = tag_bpm is not None
     weak_tags = _weak_tag_ext(path)
-    # Strong genre (tag or path) + BPM: tiny PCM residual only — includes path genre (#3).
-    soft_pcm_only = seed.clamp_match and tag_bpm_ok and not weak_tags
+    # Strong acoustic genre (tag or path) + BPM: tiny PCM residual only.
+    # Container labels (OST/game/…) stay clamp neighborhoods but do not soft-lock PCM.
+    soft_pcm_only = (
+        seed.clamp_match and tag_bpm_ok and not weak_tags and not seed.container_only
+    )
 
     detected_bpm: float | None = None
     pcm_ok = False
@@ -1084,6 +1119,12 @@ def analyze_audio(
             soft_shift_e = SOFT_PCM_MAX_SHIFT * 0.55
             pcm_w_v, pcm_w_e = 0.28, 0.32
             clamp_shift = PCM_MAX_SHIFT * 0.70
+
+        # OST/game/score: keep a seed neighborhood but do not hug it like acoustic genres.
+        if seed.container_only:
+            pcm_w_v = max(pcm_w_v, 0.68)
+            pcm_w_e = max(pcm_w_e, 0.75)
+            clamp_shift = max(clamp_shift, 0.20)
 
         # Evidence-gated soft widen: stable PCM that clearly disagrees with the seed.
         # Glow may move farther than Kinetic (genre+BPM usually encode pace better).

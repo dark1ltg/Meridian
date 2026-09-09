@@ -392,12 +392,13 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
     )
 
     # Base Kinetic from rate-like cues — burstiness is texture, not a primary driver.
+    # Keep ZCR light: high-frequency tones cross zero often without being more Kinetic.
     kinetic_base = float(
         np.clip(
-            0.26 * kinetic_zcr
-            + 0.34 * float(ostats["kinetic"])
-            + 0.24 * flux
-            + 0.10 * float(np.clip(ostats["density"], 0.05, 0.95))
+            0.12 * kinetic_zcr
+            + 0.40 * float(ostats["kinetic"])
+            + 0.28 * flux
+            + 0.14 * float(np.clip(ostats["density"], 0.05, 0.95))
             + 0.06 * float(np.clip(est["std"], 0.0, 1.0)),
             0.05,
             0.95,
@@ -416,18 +417,24 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
     burst_mod = 1.0 + 0.12 * burst_gate * (burst - 0.35)
     kinetic = float(np.clip(kinetic_base * burst_mod, 0.05, 0.95))
     # Brightness belongs on Shadow↔Glow only — keep energy Still↔Kinetic.
-    # Consistency: even loudness → Still; uneven → Kinetic. Peak adds punch beyond mean RMS.
+    # Motion/activity dominates Y; loudness is supporting texture (not "loud = Kinetic").
+    # High onset consistency + high RMS consistency = controlled Kinetic: dampen
+    # irregular/dynamic loudness cues without pushing a steady loop toward Still.
     dyn_from_consistency = float(np.clip(1.0 - float(est["consistency"]), 0.0, 1.0))
     peak_n = float(np.clip(est["peak"], 0.05, 0.95))
+    rms_c = float(np.clip(est["consistency"], 0.0, 1.0))
+    control = float(np.clip(onset_c_local * rms_c, 0.0, 1.0))
+    loud_scale = 1.0 - 0.40 * control
+    dyn_scale = 1.0 - 0.55 * control
     energy = float(
         np.clip(
-            0.24 * float(est["mean"])
-            + 0.30 * kinetic
-            + 0.14 * crest_n
-            + 0.10 * float(np.clip(est["range"] / 2.0, 0.0, 1.0))
-            + 0.08 * float(np.clip(0.5 + 0.35 * est["trend"], 0.05, 0.95))
-            + 0.08 * dyn_from_consistency
-            + 0.06 * peak_n,
+            0.60 * kinetic
+            + 0.10 * loud_scale * float(est["mean"])
+            + 0.08 * loud_scale * crest_n
+            + 0.06 * dyn_scale * float(np.clip(est["range"] / 2.0, 0.0, 1.0))
+            + 0.06 * float(np.clip(0.5 + 0.35 * est["trend"], 0.05, 0.95))
+            + 0.06 * dyn_scale * dyn_from_consistency
+            + 0.04 * loud_scale * peak_n,
             0.03,
             0.97,
         )

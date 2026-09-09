@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from time import time
 
-from PySide6.QtCore import QSettings, Qt, QTimer, Slot
+from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Slot
 from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
@@ -482,9 +482,16 @@ class MainWindow(QMainWindow):
         self._cleanup_scan_thread()
         self._scan_worker = ScanWorker(self.library, force=force)
         self._scan_thread = start_worker(self._scan_worker)
-        self._scan_worker.progress.connect(lambda n: self._set_status(f"Found {n}"))
-        self._scan_worker.failed.connect(lambda m: QMessageBox.warning(self, "Scan failed", m))
-        self._scan_worker.finished.connect(on_finished)
+        # Always queue UI slots — Python lambdas default to DirectConnection and
+        # would run on the worker thread (unsafe for widgets / QThread.wait).
+        queued = Qt.ConnectionType.QueuedConnection
+        self._scan_worker.progress.connect(
+            lambda n: self._set_status(f"Found {n}"), queued
+        )
+        self._scan_worker.failed.connect(
+            lambda m: QMessageBox.warning(self, "Scan failed", m), queued
+        )
+        self._scan_worker.finished.connect(on_finished, queued)
 
     def _disconnect_worker(self, worker) -> None:
         if worker is None:
@@ -503,6 +510,8 @@ class MainWindow(QMainWindow):
         if thread is None:
             return
         pair = (thread, worker)
+        if pair in self._lingering_workers:
+            return
         self._lingering_workers.append(pair)
 
         def _reap() -> None:
@@ -520,6 +529,41 @@ class MainWindow(QMainWindow):
 
         thread.finished.connect(_reap)
 
+    def _reap_worker_thread(self, thread, worker, *, wait_ms: int = 8000) -> bool:
+        """Dispose a worker QThread without ever calling wait() on ourselves.
+
+        Calling QThread.wait() from inside that same thread aborts ("Thread tried
+        to wait on itself") — a common footgun when finished handlers use lambdas
+        (DirectConnection on the worker thread).
+        """
+        if worker is not None:
+            self._disconnect_worker(worker)
+            if thread is not None:
+                try:
+                    worker.finished.connect(
+                        lambda *_a, t=thread: t.quit(),
+                        Qt.ConnectionType.DirectConnection,
+                    )
+                except (RuntimeError, TypeError):
+                    pass
+        if thread is None:
+            if worker is not None:
+                worker.deleteLater()
+            return True
+        if thread.isRunning():
+            thread.quit()
+            # Never wait on the thread we are currently executing on.
+            if QThread.currentThread() == thread:
+                self._linger_worker(thread, worker)
+                return False
+            if not thread.wait(wait_ms):
+                self._linger_worker(thread, worker)
+                return False
+        thread.deleteLater()
+        if worker is not None:
+            worker.deleteLater()
+        return True
+
     def _cleanup_scan_thread(self, wait_ms: int = 8000) -> bool:
         """Stop the scan worker. Returns True when the thread is fully stopped."""
         worker = self._scan_worker
@@ -528,23 +572,7 @@ class MainWindow(QMainWindow):
         self._scan_thread = None
         if worker is not None:
             worker.abort()
-            self._disconnect_worker(worker)
-            # Re-attach quit so wait() can finish after run returns.
-            if thread is not None:
-                try:
-                    worker.finished.connect(lambda *_a, t=thread: t.quit())
-                except (RuntimeError, TypeError):
-                    pass
-        if thread is not None and thread.isRunning():
-            thread.quit()
-            if not thread.wait(wait_ms):
-                self._linger_worker(thread, worker)
-                return False
-        if thread is not None:
-            thread.deleteLater()
-        if worker is not None:
-            worker.deleteLater()
-        return True
+        return self._reap_worker_thread(thread, worker, wait_ms=wait_ms)
 
     def _stop_analyze(self, wait_ms: int = 20000) -> bool:
         """Stop analyze. Returns True when the thread is fully stopped."""
@@ -557,25 +585,15 @@ class MainWindow(QMainWindow):
         self._analyze_thread = None
         if worker is not None:
             worker.abort()
-            self._disconnect_worker(worker)
-            if thread is not None:
-                try:
-                    worker.finished.connect(lambda *_a, t=thread: t.quit())
-                except (RuntimeError, TypeError):
-                    pass
-        if thread is not None and thread.isRunning():
-            thread.quit()
-            if not thread.wait(wait_ms):
-                self._linger_worker(thread, worker)
-                return False
-        if thread is not None:
-            thread.deleteLater()
-        if worker is not None:
-            worker.deleteLater()
-        return True
+        return self._reap_worker_thread(thread, worker, wait_ms=wait_ms)
 
     def _scan_done(self, added: int) -> None:
-        self._cleanup_scan_thread()
+        # Finished already ran; reap without abort racing a live walk.
+        worker = self._scan_worker
+        thread = self._scan_thread
+        self._scan_worker = None
+        self._scan_thread = None
+        self._reap_worker_thread(thread, worker, wait_ms=3000)
         if self._closing:
             return
         if added < 0:
@@ -597,25 +615,24 @@ class MainWindow(QMainWindow):
         gen = self._analyze_gen
         self._analyze_worker = AnalyzeWorker(self.library)
         self._analyze_thread = start_worker(self._analyze_worker)
+        queued = Qt.ConnectionType.QueuedConnection
         self._analyze_worker.progress.connect(
-            lambda name, i, n: self._set_status(f"Listening to waveform {i}/{n}: {name}")
+            lambda name, i, n: self._set_status(f"Listening to waveform {i}/{n}: {name}"),
+            queued,
         )
-        self._analyze_worker.finished.connect(lambda g=gen: self._analyze_done(g))
+        self._analyze_worker.finished.connect(
+            lambda g=gen: self._analyze_done(g), queued
+        )
 
     def _analyze_done(self, gen: int) -> None:
         # Ignore stale workers that finished after abort/rescan/quit.
-        if gen != self._analyze_gen or self._closing:
+        if gen != self._analyze_gen:
             return
         thread = self._analyze_thread
         worker = self._analyze_worker
         self._analyze_thread = None
         self._analyze_worker = None
-        if thread:
-            thread.quit()
-            thread.wait(3000)
-            thread.deleteLater()
-        if worker:
-            worker.deleteLater()
+        self._reap_worker_thread(thread, worker, wait_ms=3000)
         if self._closing:
             return
         self.refresh_plan(rebuild_queue=False)

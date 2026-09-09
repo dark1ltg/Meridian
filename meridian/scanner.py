@@ -256,6 +256,8 @@ def start_worker(worker: QObject, fn_name: str = "run") -> QThread:
     thread.started.connect(getattr(worker, fn_name))
     # When run() returns via finished, leave the event loop so wait() can complete.
     # Use a lambda so Signal(int) workers (scan) do not pass args into quit().
+    # UI handlers must connect with QueuedConnection — lambdas default to Direct
+    # and would run on this worker thread (unsafe for widgets / QThread.wait).
     if hasattr(worker, "finished"):
         worker.finished.connect(lambda *_a: thread.quit())
     thread.start()

@@ -246,18 +246,37 @@ def resource_path(*parts: str) -> Path:
 
 
 def run() -> int:
-    # Prefer desktop OpenGL before QApplication so the mood map can use a GPU viewport.
+    import os
+
+    # Do not force desktop OpenGL — broken EGL/DRI hosts (VMs, missing Mesa) then
+    # abort during startup/teardown. Prefer software when asked; otherwise let Qt pick.
+    prefer_soft = os.environ.get("QT_OPENGL", "").strip().lower() == "software" or os.environ.get(
+        "LIBGL_ALWAYS_SOFTWARE", ""
+    ).strip() in {"1", "true", "yes"}
+    no_gl = os.environ.get("MERIDIAN_NO_GL", "").strip().lower() in {"1", "true", "yes"}
+    force_desktop = os.environ.get("MERIDIAN_GL", "").strip().lower() in {
+        "desktop",
+        "force",
+        "1",
+    }
     try:
         from PySide6.QtGui import QSurfaceFormat
 
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
-        fmt = QSurfaceFormat()
-        fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
-        fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
-        fmt.setSwapInterval(1)
-        fmt.setSamples(4)
-        fmt.setDepthBufferSize(24)
-        QSurfaceFormat.setDefaultFormat(fmt)
+        if prefer_soft or no_gl:
+            QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
+            # Mood map skips QOpenGLWidget when MERIDIAN_NO_GL is set.
+            if prefer_soft and not os.environ.get("MERIDIAN_NO_GL"):
+                os.environ.setdefault("MERIDIAN_NO_GL", "1")
+        elif force_desktop:
+            QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
+            fmt = QSurfaceFormat()
+            fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+            fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
+            fmt.setSwapInterval(1)
+            fmt.setSamples(4)
+            fmt.setDepthBufferSize(24)
+            QSurfaceFormat.setDefaultFormat(fmt)
+        # else: Qt default (works on more EGL / Wayland hosts than forced desktop GL)
     except Exception:
         pass
 

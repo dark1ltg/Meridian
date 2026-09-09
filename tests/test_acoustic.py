@@ -223,7 +223,7 @@ def test_merge_dual_window_profiles() -> None:
     assert m.onset_consistency == 0.8
     assert m.window_count == 6
 
-    # Strong disagreement → take stabler window outright (no false middle).
+    # Strong disagreement → stabler base + Kinetic injection from active loser (not a false middle).
     far = AcousticProfile(
         valence=0.85,
         energy=0.9,
@@ -231,14 +231,17 @@ def test_merge_dual_window_profiles() -> None:
         unstable=True,
         brightness=0.8,
         flux=0.7,
+        onset_rate=0.8,
         onset_consistency=0.2,
         variation=0.5,
         window_count=3,
         pcm_samples=1000,
     )
     hard = _merge_pcm_profiles(a, far)
-    assert abs(hard.valence - a.valence) < 1e-9
-    assert abs(hard.energy - a.energy) < 1e-9
+    assert hard.energy > a.energy + 0.05
+    assert hard.energy < far.energy - 0.05
+    assert abs(hard.valence - a.valence) < abs(hard.valence - far.valence)
+    assert hard.onset_consistency == 0.8
 
 
 def test_energy_bpm_arbitration() -> None:
@@ -274,7 +277,7 @@ def test_genre_dictionary_has_contemporary_seeds() -> None:
 
 
 def test_rms_consistency_and_peak_affect_energy() -> None:
-    """Uneven / peaky loudness should read more Kinetic than flat sustained tone."""
+    """Uneven dynamics may raise Kinetic slightly; motion still dominates over loudness."""
     sr = SAMPLERATE
     n = sr * 4
     t = np.arange(n, dtype=np.float32) / sr
@@ -288,7 +291,51 @@ def test_rms_consistency_and_peak_affect_energy() -> None:
     assert energy_stats(dynamic)["range"] > energy_stats(steady)["range"]
     ps = build_profile(steady)
     pd = build_profile(dynamic)
-    assert pd.energy > ps.energy + 0.03
+    # Loudness/dynamics still contribute, but must not dominate Still↔Kinetic.
+    assert pd.energy > ps.energy + 0.015
+
+
+def test_loud_static_not_forced_kinetic() -> None:
+    """High RMS with little onset/flux activity should stay less Kinetic than busy quiet material."""
+    sr = SAMPLERATE
+    n = sr * 4
+    t = np.arange(n, dtype=np.float32) / sr
+    loud_static = (0.75 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    quiet_busy = np.zeros(n, dtype=np.float32)
+    for i in range(0, n, sr // 8):
+        quiet_busy[i : i + 64] = 0.22
+    pl = build_profile(loud_static)
+    pq = build_profile(quiet_busy)
+    assert pq.energy > pl.energy + 0.04
+
+
+def test_container_seed_skips_soft_pcm_lock() -> None:
+    """OST/game catalog labels stay neighborhoods but do not soft-lock PCM like metal+BPM."""
+    from unittest.mock import patch
+
+    from meridian.features import analyze_audio, genre_seed
+
+    sr = SAMPLERATE
+    t = np.arange(sr * 3, dtype=np.float32) / sr
+    # Bright / active-ish tone far from the mid OST seed.
+    pcm = (0.55 * np.sin(2 * np.pi * 1800 * t)).astype(np.float32)
+    seed = genre_seed("soundtrack", "Boss Theme", "Composer", path="/music/OST/game/x.flac")
+    assert seed.container_only
+    assert seed.clamp_match
+    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None)):
+        result = analyze_audio(
+            "/music/OST/game/x.flac", "soundtrack", "Boss Theme", "Composer", 120.0
+        )
+        # Soft-PCM would keep within SOFT_PCM_MAX_SHIFT; container clamp may move farther.
+        from meridian.features import SOFT_PCM_MAX_SHIFT
+
+        assert (
+            abs(result.energy - seed.energy) > SOFT_PCM_MAX_SHIFT + 1e-6
+            or abs(result.valence - seed.valence) > SOFT_PCM_MAX_SHIFT + 1e-6
+        )
+
+    metal = genre_seed("metal", "x", "y", path="/tmp/x.flac")
+    assert not metal.container_only
 
 
 def test_burstiness_modulates_not_drives_kinetic() -> None:
