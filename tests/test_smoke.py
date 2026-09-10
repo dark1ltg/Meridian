@@ -7,6 +7,7 @@ import pytest
 from tests.smoke_checks import (
     check_analyze_failed_marks_done,
     check_build_plan_hard_exclude,
+    check_renewal_queue_scoring,
     check_confidence,
     check_empty_scan_does_not_wipe,
     check_library_moods,
@@ -82,6 +83,10 @@ def test_analyze_failed_marks_done(tmp_path: Path) -> None:
 
 def test_build_plan_hard_exclude() -> None:
     check_build_plan_hard_exclude()
+
+
+def test_renewal_queue_scoring() -> None:
+    check_renewal_queue_scoring()
 
 
 def test_mood_map_sky_drag_helpers() -> None:

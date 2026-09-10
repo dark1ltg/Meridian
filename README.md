@@ -18,7 +18,7 @@ Meridian is a local, offline Linux music player. Every track becomes a star on a
 
 - **Mood map** — browse by atmosphere instead of folders; drag the lens, scroll to resize, pinch to zoom
 - **Listen matrix** — nearby tracks sorted into NOW / DEEP / FILL / SHELF
-- **Context queue** — replenishes from the lens, time of day, and listening mode (Focus, Wander, Charge, Dim)
+- **Context queue** — replenishes from the lens, time of day, and listening mode (Focus, Wander, Charge, Dim); **Renew queue** pulls a fresh queue from the current matrix without counting replaced songs as skips
 - **Local analysis** — tags plus a short mid-track waveform (`ffmpeg`); optional **aubio** for tempo/onset cues
 - **Pins & search** — drag a star to lock its mood; search by title, artist, album, or path
 - **Crossfade** — smooth advances while something is already playing
@@ -95,6 +95,7 @@ bash packaging/build-appimage.sh
 | Resize neighborhood | Scroll on the map |
 | Zoom / pan | Pinch or Ctrl+scroll; drag empty space |
 | Pin a mood | Drag a star |
+| Renew context queue | **Renew queue** on the context-queue panel (new pass from the current matrix) |
 | Play | Double-click a star, matrix row, or queue row; Space plays/pauses |
 | Search | Ctrl+F |
 

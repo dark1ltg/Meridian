@@ -43,6 +43,15 @@
   </keywords>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.3.6" date="2026-09-10">
+      <description>
+        <p>
+          Renew Queue rebuilds the context queue from the current listen matrix
+          with soft novelty (not fake skips), plus the existing mood-map player
+          features from 1.3.5.
+        </p>
+      </description>
+    </release>
     <release version="1.3.5" date="2026-09-07">
       <description>
         <p>

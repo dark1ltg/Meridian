@@ -11,5 +11,5 @@ StartupNotify=true
 StartupWMClass=Meridian
 Categories=AudioVideo;Audio;Player;
 Keywords=music;audio;player;mood;map;queue;library;playlist;
-X-AppImage-Version=1.3.5
+X-AppImage-Version=1.3.6
 X-AppImage-Name=Meridian

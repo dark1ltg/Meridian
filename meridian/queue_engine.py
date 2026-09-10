@@ -33,6 +33,31 @@ QUADRANT_SUB = {
 _MAX_ARTIST_IN_QUEUE = 2
 _MAX_ALBUM_IN_QUEUE = 2
 
+# Renew Queue: soft demotion of the immediately previous context queue (not skips).
+_RENEW_PENALTY_BASE = 0.15
+_RENEW_PENALTY_SMALL_POOL = 0.10
+_RENEW_PENALTY_PER_STREAK = 0.04
+_RENEW_PENALTY_CAP = 0.28
+_RENEW_STREAK_CAP = 3
+_RENEW_POOL_TINY = 12
+_RENEW_POOL_SMALL = 25
+
+
+@dataclass(frozen=True, slots=True)
+class RenewalContext:
+    """Transient queue-selection hint for Renew Queue (not a listening signal).
+
+    prior_queue_ids: context queue being replaced.
+    renew_streak: consecutive renews already applied (0 = first renew).
+    exempt_ids: never demote (e.g. currently playing).
+    heard_ids: session finishes/plays — not "presented but unused."
+    """
+
+    prior_queue_ids: frozenset[int]
+    renew_streak: int = 0
+    exempt_ids: frozenset[int] = frozenset()
+    heard_ids: frozenset[int] = frozenset()
+
 
 @dataclass(slots=True)
 class RankedTrack:
@@ -70,6 +95,42 @@ def _album_key(track: Track) -> str:
         return ""
     artist = _artist_key(track)
     return f"{artist}|{album}" if artist else album
+
+
+def _base_score(item: RankedTrack) -> float:
+    return item.fit * 0.7 + item.importance * 0.3
+
+
+def preferred_pool_size(ranked: list[RankedTrack]) -> int:
+    """NOW + DEEP + FILL count — usable renew alternatives near the lens."""
+    return sum(1 for r in ranked if r.quadrant != Quadrant.SHELF)
+
+
+def renewal_penalty_strength(pool_size: int, renew_streak: int) -> float:
+    """Soft demotion amount; 0 in tiny pools. Streak adds a bounded nudge."""
+    if pool_size < _RENEW_POOL_TINY:
+        return 0.0
+    base = _RENEW_PENALTY_SMALL_POOL if pool_size < _RENEW_POOL_SMALL else _RENEW_PENALTY_BASE
+    streak = max(0, min(_RENEW_STREAK_CAP, int(renew_streak)))
+    return min(_RENEW_PENALTY_CAP, base + _RENEW_PENALTY_PER_STREAK * streak)
+
+
+def renewal_penalty_ids(
+    renewal: RenewalContext,
+    tracks: list[Track],
+    explicit_ids: set[int],
+) -> set[int]:
+    """Prior-queue leftovers to soft-demote — never skips, never hard bans."""
+    loved = {t.id for t in tracks if t.loved}
+    pinned = {t.id for t in tracks if t.pinned}
+    return (
+        set(renewal.prior_queue_ids)
+        - set(renewal.exempt_ids)
+        - set(renewal.heard_ids)
+        - loved
+        - pinned
+        - set(explicit_ids)
+    )
 
 
 def mix_counts(ctx: Context) -> tuple[int, int, int, int, int]:
@@ -209,8 +270,14 @@ def build_plan(
     length: int = 18,
     exclude_ids: set[int] | None = None,
     hard_exclude_ids: set[int] | None = None,
+    renewal: RenewalContext | None = None,
 ) -> QueuePlan:
-    """Build a context queue from lens fit, time-of-day, and the four matrix lists."""
+    """Build a context queue from lens fit, time-of-day, and the four matrix lists.
+
+    When ``renewal`` is set (Renew Queue), the current matrix still drives
+    candidates; prior-queue leftovers get a soft score demotion only — never
+    skip_count / skip_pressure contamination.
+    """
     explicit_set = set(explicit_ids)
     skip = set(exclude_ids or ())
     hard_exclude = set(hard_exclude_ids or ())
@@ -219,13 +286,32 @@ def build_plan(
     buckets: dict[Quadrant, list[RankedTrack]] = {q: [] for q in Quadrant}
     for item in ranked:
         buckets[item.quadrant].append(item)
-    for bucket in buckets.values():
-        bucket.sort(
-            key=lambda r: (
-                -(r.fit * 0.7 + r.importance * 0.3),
-                r.track.last_played or 0.0,
-            )
+
+    penalty_ids: set[int] = set()
+    penalty_strength = 0.0
+    if renewal is not None and renewal.prior_queue_ids:
+        penalty_ids = renewal_penalty_ids(renewal, tracks, explicit_set)
+        penalty_strength = renewal_penalty_strength(
+            preferred_pool_size(ranked), renewal.renew_streak
         )
+
+    def matrix_key(item: RankedTrack) -> tuple[float, float]:
+        return (-_base_score(item), item.track.last_played or 0.0)
+
+    def queue_key(item: RankedTrack) -> tuple[float, float]:
+        score = _base_score(item)
+        if penalty_strength > 0.0 and item.track.id in penalty_ids:
+            score -= penalty_strength
+        return (-score, item.track.last_played or 0.0)
+
+    for bucket in buckets.values():
+        bucket.sort(key=matrix_key)
+
+    def queue_order(items: list[RankedTrack]) -> list[RankedTrack]:
+        if penalty_strength <= 0.0 or not penalty_ids:
+            return items
+        return sorted(items, key=queue_key)
+
     order: list[int] = []
     used: set[int] = set()
     artist_n: dict[str, int] = {}
@@ -237,7 +323,7 @@ def build_plan(
 
     def take(items: list[RankedTrack], n: int, *, allow_recent: bool, diversity: bool) -> None:
         grabbed = 0
-        for item in items:
+        for item in queue_order(items):
             if grabbed >= n:
                 break
             tid = item.track.id

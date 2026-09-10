@@ -644,6 +644,219 @@ def check_build_plan_hard_exclude() -> None:
     assert shelf_in_q <= 5, (shelf_in_q, crowded.order)
 
 
+def check_renewal_queue_scoring() -> None:
+    """Renew Queue soft demotion — not skips; small pools may reuse."""
+    from collections import Counter
+
+    from meridian.context import Mode, make_context
+    from meridian.library import Track
+    from meridian.queue_engine import (
+        RenewalContext,
+        build_plan,
+        classify,
+        preferred_pool_size,
+        renewal_penalty_ids,
+        renewal_penalty_strength,
+    )
+
+    def t(
+        i: int,
+        *,
+        artist: str | None = None,
+        album: str | None = None,
+        valence: float = 0.5,
+        energy: float = 0.5,
+        loved: bool = False,
+        pinned: bool = False,
+        plays: int = 0,
+        skips: int = 0,
+    ) -> Track:
+        return Track(
+            id=i,
+            path=f"/m/{i}.mp3",
+            title=f"t{i}",
+            artist=artist or f"Artist{i}",
+            album=album or f"Album{i}",
+            albumartist=artist or f"Artist{i}",
+            genre="Metal",
+            duration_ms=1000,
+            year=None,
+            bpm=120.0,
+            valence=valence,
+            energy=energy,
+            mood_confidence=0.8,
+            confidence_note="seed",
+            low_trust=False,
+            pinned=pinned,
+            loved=loved,
+            play_count=plays,
+            skip_count=skips,
+            last_played=None,
+            added_at=0.0,
+            mtime=0.0,
+            analyzed=True,
+        )
+
+    ctx = make_context(Mode.WANDER, 0.5, 0.5, 0.28, 0.0)
+
+    # Normal path unchanged: renewal=None matches no-kwargs.
+    base_tracks = [
+        t(i, valence=0.48 + (i % 7) * 0.01, energy=0.47 + (i % 5) * 0.01)
+        for i in range(1, 41)
+    ]
+    normal = build_plan(base_tracks, ctx, [])
+    also_normal = build_plan(base_tracks, ctx, [], renewal=None)
+    assert normal.order == also_normal.order
+
+    # Penalty strength: tiny pool off; small lower; streak bounded.
+    assert renewal_penalty_strength(8, 0) == 0.0
+    assert renewal_penalty_strength(18, 0) == 0.10
+    assert renewal_penalty_strength(40, 0) == 0.15
+    assert renewal_penalty_strength(40, 3) == 0.27
+    assert renewal_penalty_strength(40, 99) == 0.27
+
+    # Penalty ids omit heard / loved / pinned / explicit / exempt.
+    tracks_meta = [
+        t(1),
+        t(2, loved=True),
+        t(3, pinned=True),
+        t(4),
+        t(5),
+    ]
+    renewal = RenewalContext(
+        prior_queue_ids=frozenset({1, 2, 3, 4, 5}),
+        renew_streak=0,
+        exempt_ids=frozenset({5}),
+        heard_ids=frozenset({1}),
+    )
+    penalized = renewal_penalty_ids(renewal, tracks_meta, explicit_ids={4})
+    assert penalized == set()
+
+    # Large pool: renew prefers tracks outside the prior queue when peers are close.
+    cluster = [
+        t(i, artist=f"A{i}", album=f"L{i}", valence=0.50, energy=0.50)
+        for i in range(1, 36)
+    ]
+    first = build_plan(cluster, ctx, [], length=18)
+    assert len(first.order) == 18
+    prior = frozenset(first.order)
+    renewed = build_plan(
+        cluster,
+        ctx,
+        [],
+        length=18,
+        renewal=RenewalContext(prior_queue_ids=prior, renew_streak=0),
+    )
+    assert preferred_pool_size(renewed.ranked) >= 12
+    overlap = len(prior.intersection(renewed.order))
+    assert overlap < len(first.order), (overlap, first.order[:5], renewed.order[:5])
+
+    # Soft, not absolute: a clearly best prior track can still be selected.
+    best = t(1, artist="Best", album="Solo", valence=0.50, energy=0.50, plays=12)
+    weaker = [
+        t(i, artist=f"W{i}", album=f"W{i}", valence=0.62, energy=0.62)
+        for i in range(2, 30)
+    ]
+    soft = build_plan(
+        [best] + weaker,
+        ctx,
+        [],
+        length=12,
+        renewal=RenewalContext(prior_queue_ids=frozenset({1}), renew_streak=0),
+    )
+    assert 1 in soft.order
+
+    # Loved in prior queue is not demoted away when it fits.
+    loved = t(1, artist="Love", album="L", valence=0.50, energy=0.50, loved=True)
+    others = [
+        t(i, artist=f"O{i}", album=f"O{i}", valence=0.51, energy=0.51)
+        for i in range(2, 30)
+    ]
+    love_plan = build_plan(
+        [loved] + others,
+        ctx,
+        [],
+        length=12,
+        renewal=RenewalContext(prior_queue_ids=frozenset({1}), renew_streak=0),
+    )
+    assert 1 in love_plan.order
+
+    # Tiny pool: penalty off — reuse is required / allowed.
+    tiny = [t(i, valence=0.5, energy=0.5) for i in range(1, 9)]
+    tiny_first = build_plan(tiny, ctx, [], length=8)
+    tiny_renew = build_plan(
+        tiny,
+        ctx,
+        [],
+        length=8,
+        renewal=RenewalContext(
+            prior_queue_ids=frozenset(tiny_first.order),
+            renew_streak=2,
+        ),
+    )
+    assert len(tiny_renew.order) == len(tiny_first.order)
+    assert set(tiny_renew.order) == set(tiny_first.order)
+
+    # Multiple renews stay in-context (high fit), not a random walk to far moods.
+    big = [
+        t(i, artist=f"B{i % 9}", album=f"Alb{i}", valence=0.50, energy=0.50)
+        for i in range(1, 50)
+    ]
+    far_away = [
+        t(200 + i, artist=f"Z{i}", album=f"Z{i}", valence=0.05, energy=0.95)
+        for i in range(1, 10)
+    ]
+    library = big + far_away
+    q0 = build_plan(library, ctx, [], length=18)
+    q1 = build_plan(
+        library,
+        ctx,
+        [],
+        length=18,
+        renewal=RenewalContext(prior_queue_ids=frozenset(q0.order), renew_streak=0),
+    )
+    q2 = build_plan(
+        library,
+        ctx,
+        [],
+        length=18,
+        renewal=RenewalContext(prior_queue_ids=frozenset(q1.order), renew_streak=1),
+    )
+    q3 = build_plan(
+        library,
+        ctx,
+        [],
+        length=18,
+        renewal=RenewalContext(prior_queue_ids=frozenset(q2.order), renew_streak=2),
+    )
+    far_ids = {200 + i for i in range(1, 10)}
+    for plan in (q1, q2, q3):
+        assert sum(1 for tid in plan.order if tid in far_ids) <= 2, plan.order
+
+    artists = Counter(
+        next(x.artist for x in library if x.id == tid) for tid in q1.order
+    )
+    assert all(n <= 2 for n in artists.values()), artists
+
+    # Renewal must not mutate listening counters (queue-selection only).
+    before = [(tr.id, tr.skip_count, tr.play_count) for tr in cluster]
+    build_plan(
+        cluster,
+        ctx,
+        [],
+        renewal=RenewalContext(prior_queue_ids=frozenset(range(1, 19)), renew_streak=1),
+    )
+    after = [(tr.id, tr.skip_count, tr.play_count) for tr in cluster]
+    assert before == after
+
+    # Actual skip history still shapes importance when present.
+    finished = t(1, plays=8, skips=1, valence=0.5, energy=0.5)
+    skipped = t(2, plays=1, skips=8, valence=0.5, energy=0.5)
+    ranked = classify([finished, skipped], ctx, set())
+    by_id = {r.track.id: r for r in ranked}
+    assert by_id[1].importance > by_id[2].importance
+
+
 def check_mood_map_helpers() -> None:
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import QPointF
@@ -747,4 +960,5 @@ def run_all_smoke_checks(tmp_dir: Path) -> None:
     check_partial_and_symlink_scan(tmp_dir / "scan-guards")
     check_analyze_failed_marks_done(tmp_dir / "fail.sqlite")
     check_build_plan_hard_exclude()
+    check_renewal_queue_scoring()
     check_mood_map_helpers()

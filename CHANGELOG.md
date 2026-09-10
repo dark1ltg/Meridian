@@ -2,6 +2,24 @@
 
 All notable Meridian releases are listed here. Download AppImages from [Releases](https://github.com/dark1ltg/Meridian/releases).
 
+## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10
+
+Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips.
+
+### Context queue
+- **Renew queue** rebuilds the context queue from the current Queue Matrix (lens neighborhood + mode + clock)
+- Moving the lens still updates the matrix without replacing the live queue until you renew (or the queue replenishes)
+- Renewal is a queue-selection event — it does **not** write skip/finish history or raise skip pressure
+- Soft demotion of the immediately previous queue’s unheard leftovers encourages a genuinely new route through the same context
+- Exempt from that demotion: currently playing, explicit matrix pulls, loved, and pinned tracks; session-heard tracks are not treated as “unused leftovers”
+- Small neighborhoods (&lt; ~12 preferred-matrix candidates) turn the renew penalty off so tiny libraries can reuse tracks
+- Mid-size pools use a lighter penalty; larger pools use the normal soft strength
+- Consecutive renews (streak, reset on lens/mode change) add a bounded extra nudge — not a random walk out of context
+- Artist/album anti-repeat and mode-aware mix stay in the same `build_plan` path as normal queues
+
+### Docs / packaging
+- README and AppStream note Renew queue; AppImage baseline remains Ubuntu 24.04 / glibc 2.38+
+
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-09)
 
 Richer acoustic mood cues from the existing PCM decode budget, smarter local recommendations, more honest initial placement (soft-PCM and conflict handling), desktop integration, and reliability passes for scan, matrix/context queue, crossfade accounting, quit/analyze teardown, mood map, OpenGL/EGL startup, and BPM/signal trust.

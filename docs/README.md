@@ -30,4 +30,6 @@ MERIDIAN_NO_GL=1 ./Meridian-x86_64.AppImage   # skip OpenGL mood-map viewport
 | [How Meridian listens](audio-analysis-pipeline.md) | How it takes a short listen of each song |
 | [How stars get placed](placement-pipeline.md) | How that listen (plus tags) becomes a spot on the map |
 
+**Context queue tip:** moving the lens updates the listen matrix, but the playing context queue stays put until it replenishes or you press **Renew queue**. Renew asks for another selection from the *current* matrix — it is not a skip storm.
+
 Screenshots for the README are in [`screenshots/`](screenshots/).

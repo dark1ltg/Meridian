@@ -38,7 +38,7 @@ from meridian.host_deps import (
 )
 from meridian.library import Library
 from meridian.player import Player
-from meridian.queue_engine import Quadrant, QueuePlan, build_plan
+from meridian.queue_engine import Quadrant, QueuePlan, RenewalContext, build_plan
 from meridian.scanner import AnalyzeWorker, ScanWorker, start_worker
 from meridian.ui.search import TrackSearch
 from meridian.ui.fit_list import FitList
@@ -86,6 +86,8 @@ class MainWindow(QMainWindow):
         self._rebuild_lock = False
         # Listen-nudge / lens refresh requested while play_id holds the rebuild lock.
         self._pending_plan_refresh = False
+        # Consecutive Renew Queue presses since last lens/mode change (capped in engine).
+        self._renew_streak = 0
         self._handling_playback_error = False
         # Hard-cut play_id credits immediately; cleared/undone if media errors.
         self._last_hard_play_credit: int | None = None
@@ -197,12 +199,25 @@ class MainWindow(QMainWindow):
         q_l = QVBoxLayout(queue_wrap)
         q_l.setContentsMargins(10, 10, 10, 10)
         q_l.setSpacing(8)
+        q_head_row = QHBoxLayout()
+        q_head_row.setContentsMargins(0, 0, 0, 0)
+        q_head_row.setSpacing(8)
         q_head = QLabel("CONTEXT QUEUE  ·  replenishes from lens, clock, and matrix when empty")
         q_head.setObjectName("section")
+        renew_btn = QPushButton("Renew queue")
+        renew_btn.setObjectName("ghostBtn")
+        renew_btn.setToolTip(
+            "Renew Queue does the following:\n"
+            "Generates a new context queue from the current queue matrix."
+        )
+        renew_btn.setToolTipDuration(12000)
+        renew_btn.clicked.connect(self._renew_queue)
+        q_head_row.addWidget(q_head, 1)
+        q_head_row.addWidget(renew_btn, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.queue_list = FitList()
         self.queue_list.setObjectName("queueList")
         self.queue_list.setFont(condensed(12))
-        q_l.addWidget(q_head)
+        q_l.addLayout(q_head_row)
         q_l.addWidget(self.queue_list, 1)
         right.addWidget(self.matrix)
         right.addWidget(queue_wrap)
@@ -298,6 +313,44 @@ class MainWindow(QMainWindow):
             return
         self._pending_plan_refresh = False
         self.refresh_plan(rebuild_queue=False)
+
+    def _reset_renew_streak(self) -> None:
+        self._renew_streak = 0
+
+    def _renew_queue(self) -> None:
+        """New recommendation pass from the current matrix — not skips, not shuffle."""
+        if self._rebuild_lock:
+            return
+        prior = list(self.session_queue)
+        ctx = self.current_context()
+        self.band_chip.setText(ctx.band_label)
+        tracks = self._playable_tracks()
+        current_id = self.player.current.id if self.player.current else None
+        exempt = set(self.explicit)
+        if current_id is not None:
+            exempt.add(current_id)
+        renewal = RenewalContext(
+            prior_queue_ids=frozenset(prior),
+            renew_streak=self._renew_streak,
+            exempt_ids=frozenset(exempt),
+            heard_ids=frozenset(self.played_history),
+        )
+        self.plan = build_plan(tracks, ctx, self.explicit, renewal=renewal)
+        self.map.set_tracks(self.plan.ranked, current_id)
+        self.matrix.set_plan(self.plan.by_quadrant)
+        kept_ephemeral = {tid for tid in self.ephemeral if tid in self.plan.order}
+        self.session_queue = list(self.plan.order)
+        self.ephemeral = kept_ephemeral
+        if current_id and current_id in self.session_queue:
+            self.queue_index = self.session_queue.index(current_id)
+        elif current_id:
+            self.queue_index = -1
+        else:
+            self.queue_index = 0
+        self._fill_queue()
+        # Only the last replaced queue feeds the next renew; streak is bounded.
+        self._renew_streak = min(3, self._renew_streak + 1)
+        self._set_status("Context queue renewed from the current matrix.")
 
     def refresh_plan(self, keep_current: bool = True, rebuild_queue: bool = True) -> None:
         if self._rebuild_lock:
@@ -404,12 +457,14 @@ class MainWindow(QMainWindow):
         self.settings.setValue("mode", self.mode.value)
         self.hint.setText(MODE_HINTS[self.mode])
         self._apply_mode_lens_scale()
+        self._reset_renew_streak()
         self.refresh_plan()
 
     def _lens_changed(self, x: float, y: float, r: float) -> None:
         self.settings.setValue("lens_x", x)
         self.settings.setValue("lens_y", y)
         self.settings.setValue("lens_r", r)
+        self._reset_renew_streak()
         self._lens_timer.start()
 
     def _search_picked(self, track_id: int) -> None:
