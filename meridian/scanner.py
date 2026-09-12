@@ -73,6 +73,7 @@ class ScanWorker(QObject):
                 continue
             root_found: list[str] = []
             walk_ok = True
+            skipped_dirs: list[Path] = []
 
             def on_walk_error(_err: OSError) -> None:
                 nonlocal walk_ok
@@ -88,10 +89,9 @@ class ScanWorker(QObject):
                 # Do not descend into hidden or symlink directories.
                 keep_dirs: list[str] = []
                 for name in dirnames:
-                    if name.startswith("."):
-                        continue
                     child = Path(dirpath) / name
-                    if child.is_symlink():
+                    if name.startswith(".") or child.is_symlink():
+                        skipped_dirs.append(child)
                         continue
                     keep_dirs.append(name)
                 dirnames[:] = keep_dirs
@@ -163,6 +163,48 @@ class ScanWorker(QObject):
                         }
                     )
                     added += 1
+            # Keep DB rows under dirs we deliberately skipped (symlink / .hidden)
+            # so prune cannot wipe them when the rest of the root is ≥85% visible.
+            # Missing files under those dirs are dropped here (not via mass prune),
+            # so sparse-mount guards stay intact.
+            # Use lexical path checks: resolve() can escape the root via symlink targets.
+            if skipped_dirs and walk_ok and not self._abort:
+                root_path = Path(root)
+
+                def _under_root(path_str: str) -> bool:
+                    try:
+                        Path(path_str).relative_to(root_path)
+                        return True
+                    except ValueError:
+                        return False
+
+                def _under_skipped(path_str: str) -> bool:
+                    raw = Path(path_str)
+                    for d in skipped_dirs:
+                        try:
+                            raw.relative_to(d)
+                            return True
+                        except ValueError:
+                            continue
+                    return False
+
+                gone_skipped: list[str] = []
+                with self.library.lock:
+                    all_paths = [
+                        str(r["path"])
+                        for r in self.library.conn.execute("SELECT path FROM tracks")
+                    ]
+                for known in all_paths:
+                    if known in root_found or not _under_root(known):
+                        continue
+                    if not _under_skipped(known):
+                        continue
+                    if not Path(known).exists():
+                        gone_skipped.append(known)
+                        continue
+                    root_found.append(known)
+                if gone_skipped:
+                    self.library.delete_paths(gone_skipped)
             found.extend(root_found)
             # Only prune under roots we fully walked AND actually saw audio.
             # An empty successful walk (unmounted drive, empty mountpoint) must not
@@ -171,7 +213,9 @@ class ScanWorker(QObject):
             # when this walk sees less than half of the tracks the DB already knows.
             if walk_ok and not self._abort and root_found:
                 known = self.library.count_tracks_under(root_resolved)
-                if known == 0 or len(root_found) * 2 >= known:
+                # Require ~85% of known tracks before pruning — half-visible mounts
+                # must not delete the unseen half.
+                if known == 0 or len(root_found) * 20 >= known * 17:
                     prune_roots.append(root_resolved)
         # Never wipe when nothing was kept, walk aborted, or a root was incomplete.
         if found and prune_roots and not self._abort:
@@ -225,6 +269,10 @@ class AnalyzeWorker(QObject):
                     )
                     if self._abort:
                         break
+                    if not result.pcm_ok:
+                        # Keep seed/prior coords; retry next session (session denylist).
+                        self.library.defer_analyze(track.id)
+                        continue
                     self.library.set_analyzed_mood(
                         track.id,
                         result.valence,

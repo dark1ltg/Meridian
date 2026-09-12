@@ -292,6 +292,7 @@ class MoodResult:
     onset_consistency: float | None = None
     acoustic_flux: float | None = None
     brightness: float | None = None
+    pcm_ok: bool = False
 
 def _text(tag) -> str:
     if tag is None:
@@ -564,24 +565,58 @@ def _blend_genre_pairs(keys: list[str]) -> tuple[float, float] | None:
 
 
 def _best_genre_keys_from_parts(parts: list[str]) -> list[str]:
-    best: list[str] = []
-    best_len = -1
-    for part in parts:
+    """Prefer the deepest path segment that is a genre folder, not the longest key."""
+    for part in reversed(parts):
         part_l = (part or "").lower().strip()
         if not part_l or part_l in {".", "/"}:
             continue
         stem = Path(part_l).stem if "." in part_l else part_l
-        stem = stem.replace("_", " ")
-        for candidate in (part_l.replace("_", " "), stem):
-            keys = _match_genre_keys(candidate)
-            if keys and len(keys[0]) > best_len:
-                best = keys
-                best_len = len(keys[0])
-    return best
+        for candidate in (part_l, stem):
+            keys = _path_segment_genre_keys(candidate)
+            if keys:
+                return keys
+    return []
+
+
+def _path_segment_genre_keys(segment: str) -> list[str]:
+    """Genre keys for one folder/file stem — avoid 'rock' in 'rock-drive'."""
+    raw = (segment or "").lower().strip()
+    if not raw:
+        return []
+    normalized = re.sub(
+        r"[\s_\-]+",
+        " ",
+        raw.replace(".", " ").replace("&", " and "),
+    ).strip()
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return []
+    # Whole segment is a known genre (e.g. "indie rock", "drum and bass").
+    if normalized in GENRE_MOOD:
+        return [normalized]
+    keys = _match_genre_keys(normalized)
+    if not keys:
+        return []
+    # Residual after removing matched keys must be empty (or harmless stopwords).
+    # Reject compound device/volume names like "rock drive" / "jazz usb".
+    residual = normalized
+    for key in sorted(keys, key=len, reverse=True):
+        residual = re.sub(
+            rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])",
+            " ",
+            residual,
+            flags=re.IGNORECASE,
+        )
+    residual = re.sub(r"\s+", " ", residual).strip()
+    noise = {"the", "a", "an", "and", "n", "music", "songs", "genre", "mix", "vol", "volume"}
+    leftover = [w for w in residual.split() if w and w not in noise]
+    if leftover:
+        return []
+    return keys
 
 
 def _path_genre_keys(path: str | None) -> list[str]:
-    """Genre from path — prefer folder taxonomy over the filename stem (#2 / #6)."""
+    """Genre from path — deepest matching folder, then filename stem."""
     if not path:
         return []
     p = Path(path)
@@ -589,11 +624,11 @@ def _path_genre_keys(path: str | None) -> list[str]:
     if not parts:
         return []
     dir_parts = parts[:-1]
-    file_stem = p.stem.replace("_", " ").replace(".", " ")
+    file_stem = p.stem
     dir_keys = _best_genre_keys_from_parts(dir_parts)
     if dir_keys:
         return dir_keys
-    return _match_genre_keys(file_stem)
+    return _path_segment_genre_keys(file_stem)
 
 
 def _path_genre_key(path: str | None) -> str | None:
@@ -769,13 +804,22 @@ def _coerce_bpm(bpm: float | None) -> float | None:
 
 
 def _secondary_seek_s(duration_ms: int) -> float | None:
-    """Mid-track seek for dual-window / fallback decode, or None when too short."""
+    """Mid-track seek for dual-window / fallback decode, or None when too short / unknown."""
     dur_s = max(0.0, float(duration_ms) / 1000.0) if duration_ms else 0.0
     if dur_s <= 0:
-        return 45.0
+        # Unknown duration: do not seek far — caller starts at 0.
+        return None
     if dur_s < 40.0:
-        return max(1.0, dur_s * 0.15)
+        return max(0.0, dur_s * 0.15)
     return float(np.clip(dur_s * 0.35, 20.0, max(20.0, dur_s - 30.0)))
+
+
+def _primary_seek_s(duration_ms: int) -> float:
+    """Primary window start — 0 for short/unknown so we actually hear the file."""
+    dur_s = max(0.0, float(duration_ms) / 1000.0) if duration_ms else 0.0
+    if dur_s <= 0 or dur_s < 40.0:
+        return 0.0
+    return 12.0
 
 
 def _merge_pcm_profiles(primary, secondary):
@@ -880,13 +924,14 @@ def _decode_pcm_with_fallback(
     from meridian.acoustic import build_profile
 
     dur_s = max(0.0, float(duration_ms) / 1000.0) if duration_ms else 0.0
+    primary = _primary_seek_s(duration_ms)
     secondary = _secondary_seek_s(duration_ms)
 
     # Dual-window path: same total seconds (~28) as a single long window.
-    if dur_s >= 55.0 and secondary is not None and abs(secondary - 12.0) >= 8.0:
+    if dur_s >= 55.0 and secondary is not None and abs(secondary - primary) >= 8.0:
         if decode_abort_requested():
             return None, False, None
-        pcm_a = _decode_pcm(path, start_s=12.0, duration_s=14.0)
+        pcm_a = _decode_pcm(path, start_s=primary, duration_s=14.0)
         if decode_abort_requested():
             return None, False, None
         pcm_b = _decode_pcm(path, start_s=float(secondary), duration_s=14.0)
@@ -902,9 +947,11 @@ def _decode_pcm_with_fallback(
             return pcm_b, True, None
 
     # Single 28s window with silence fallback (short tracks / dual failed).
-    starts = [12.0]
+    starts = [primary]
     if secondary is not None:
         starts.append(float(secondary))
+    if primary > 0.0:
+        starts.append(0.0)
 
     seen: set[float] = set()
     for index, ss in enumerate(starts):
@@ -1295,4 +1342,5 @@ def analyze_audio(
         ),
         acoustic_flux=float(getattr(profile, "flux", 0.0)) if profile else None,
         brightness=float(getattr(profile, "brightness", 0.5)) if profile else None,
+        pcm_ok=bool(pcm_ok),
     )

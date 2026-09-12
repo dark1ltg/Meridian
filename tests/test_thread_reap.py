@@ -27,6 +27,9 @@ def test_reap_from_worker_thread_does_not_wait_on_self(qapp) -> None:
     win = MainWindow.__new__(MainWindow)
     win._lingering_workers = []
     win._close_library_when_idle = False
+    win._pending_analyze_after_linger = False
+    win._quit_when_idle = False
+    win._closing = False
 
     thread = QThread()
     # Keep the thread's event loop alive until we quit it.
@@ -64,6 +67,9 @@ def test_reap_from_gui_thread_waits_normally(qapp) -> None:
     win = MainWindow.__new__(MainWindow)
     win._lingering_workers = []
     win._close_library_when_idle = False
+    win._pending_analyze_after_linger = False
+    win._quit_when_idle = False
+    win._closing = False
 
     thread = QThread()
     thread.start()
@@ -72,4 +78,29 @@ def test_reap_from_gui_thread_waits_normally(qapp) -> None:
     assert win._reap_worker_thread(thread, None, wait_ms=3000) is True
     assert not thread.isRunning()
     assert win._lingering_workers == []
+    qapp.processEvents()
+
+
+def test_linger_reaps_already_finished_thread(qapp) -> None:
+    """If the thread exits before finished is connected, linger must still reap."""
+    from meridian.ui.main_window import MainWindow
+
+    win = MainWindow.__new__(MainWindow)
+    win._lingering_workers = []
+    win._close_library_when_idle = False
+    win._pending_analyze_after_linger = False
+    win._quit_when_idle = False
+    win._closing = False
+
+    thread = QThread()
+    thread.start()
+    thread.quit()
+    assert thread.wait(3000)
+    assert not thread.isRunning()
+
+    win._linger_worker(thread, None)
+    assert any(t is thread for t, _w in win._lingering_workers)
+    qapp.processEvents()
+    assert win._lingering_workers == []
+    thread.deleteLater()
     qapp.processEvents()

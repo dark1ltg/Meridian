@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     analyzed INTEGER NOT NULL DEFAULT 0,
     acoustic_flux REAL,
     onset_consistency REAL,
-    brightness REAL
+    brightness REAL,
+    playback_denied INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_tracks_mood ON tracks(valence, energy);
@@ -105,6 +106,7 @@ class Library:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.lock = threading.Lock()
+        self._closed = False
         # Process-local: keeps analyze from looping when DB mark_analyze_failed fails.
         self._analyze_denylist: set[int] = set()
         # Process-local: corrupt/unsupported files that failed playback stay out of plans.
@@ -136,13 +138,36 @@ class Library:
                 self.conn.execute("ALTER TABLE tracks ADD COLUMN onset_consistency REAL")
             if "brightness" not in cols:
                 self.conn.execute("ALTER TABLE tracks ADD COLUMN brightness REAL")
+            if "playback_denied" not in cols:
+                self.conn.execute(
+                    "ALTER TABLE tracks ADD COLUMN playback_denied INTEGER NOT NULL DEFAULT 0"
+                )
             self.conn.commit()
+        # Reload durable playback denylist into the process-local set.
+        with self.lock:
+            denied = self.conn.execute(
+                "SELECT id FROM tracks WHERE playback_denied = 1"
+            ).fetchall()
+        self._playback_denylist = {int(r["id"]) for r in denied}
 
     def close(self) -> None:
-        self.conn.close()
+        with self.lock:
+            if getattr(self, "_closed", False):
+                return
+            self._closed = True
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+
+    @property
+    def closed(self) -> bool:
+        return bool(getattr(self, "_closed", False))
 
     def folders(self) -> list[str]:
         with self.lock:
+            if self._closed:
+                return []
             rows = self.conn.execute("SELECT path FROM folders ORDER BY path").fetchall()
         return [r["path"] for r in rows]
 
@@ -160,14 +185,18 @@ class Library:
         path = values["path"]
         with self.lock:
             existing = self.conn.execute(
-                "SELECT id, pinned FROM tracks WHERE path = ?", (path,)
+                "SELECT id, pinned, analyzed, valence, energy, mood_confidence, "
+                "low_trust, confidence_note FROM tracks WHERE path = ?",
+                (path,),
             ).fetchone()
             if existing:
                 payload = dict(values)
                 # Preserve original import time on updates.
                 payload.pop("added_at", None)
                 if int(existing["pinned"] or 0):
-                    # Pins keep mood + trust metadata; analyze still protects coords.
+                    # Pins keep mood + trust metadata; still allow analyzed=0 so
+                    # acoustics/BPM refresh on mtime/tag scan (set_analyzed_mood
+                    # protects pinned coords).
                     for key in (
                         "valence",
                         "energy",
@@ -175,7 +204,21 @@ class Library:
                         "mood_confidence",
                         "low_trust",
                         "confidence_note",
-                        "analyzed",
+                    ):
+                        payload.pop(key, None)
+                elif (
+                    int(existing["analyzed"] or 0) == 1
+                    and "analyzed" in payload
+                    and int(payload.get("analyzed") or 0) == 0
+                ):
+                    # Mtime/tag refresh: re-queue analyze but keep PCM placement
+                    # until a successful decode lands (avoids seed flash / sticky seed).
+                    for key in (
+                        "valence",
+                        "energy",
+                        "mood_confidence",
+                        "low_trust",
+                        "confidence_note",
                     ):
                         payload.pop(key, None)
                 fields = [k for k in payload if k != "path"]
@@ -183,12 +226,17 @@ class Library:
                     assignments = ", ".join(f"{k} = ?" for k in fields)
                     params = [payload[k] for k in fields] + [path]
                     self.conn.execute(f"UPDATE tracks SET {assignments} WHERE path = ?", params)
-                self.conn.commit()
                 tid = int(existing["id"])
-                # Re-queue for analysis must clear sticky denylist from prior poison marks.
+                # Any scan refresh of an existing file clears sticky playback denial
+                # (fixed/replaced media should get another chance without full Rescan).
+                self._playback_denylist.discard(tid)
+                self.conn.execute(
+                    "UPDATE tracks SET playback_denied = 0 WHERE id = ?", (tid,)
+                )
+                # Re-queue for analysis must clear sticky analyze denylist.
                 if "analyzed" in payload and int(payload.get("analyzed") or 0) == 0:
                     self._analyze_denylist.discard(tid)
-                    self._playback_denylist.discard(tid)
+                self.conn.commit()
                 return tid
             cols = ", ".join(values)
             placeholders = ", ".join("?" for _ in values)
@@ -312,9 +360,9 @@ class Library:
                     mood_confidence = CASE WHEN pinned = 1 THEN mood_confidence ELSE ? END,
                     low_trust = CASE WHEN pinned = 1 THEN low_trust ELSE ? END,
                     confidence_note = CASE WHEN pinned = 1 THEN confidence_note ELSE ? END,
-                    onset_consistency = CASE WHEN pinned = 1 THEN onset_consistency ELSE ? END,
-                    acoustic_flux = CASE WHEN pinned = 1 THEN acoustic_flux ELSE ? END,
-                    brightness = CASE WHEN pinned = 1 THEN brightness ELSE ? END,
+                    onset_consistency = ?,
+                    acoustic_flux = ?,
+                    brightness = ?,
                     analyzed = 1
                 WHERE id = ?
                 """,
@@ -390,7 +438,8 @@ class Library:
                 SELECT id, artist, albumartist, album, valence, energy, pinned,
                        low_trust, mood_confidence, confidence_note
                 FROM tracks
-                WHERE album IS NOT NULL AND TRIM(album) != ''
+                WHERE analyzed = 1
+                  AND album IS NOT NULL AND TRIM(album) != ''
                   AND (
                     (albumartist IS NOT NULL AND TRIM(albumartist) != '')
                     OR (artist IS NOT NULL AND TRIM(artist) != '')
@@ -418,7 +467,8 @@ class Library:
                 SELECT id, artist, valence, energy, pinned,
                        low_trust, mood_confidence, confidence_note
                 FROM tracks
-                WHERE artist IS NOT NULL AND TRIM(artist) != ''
+                WHERE analyzed = 1
+                  AND artist IS NOT NULL AND TRIM(artist) != ''
                 """,
             key_fn=lambda row: str(row["artist"]).lower(),
             min_group=6,
@@ -498,18 +548,23 @@ class Library:
     def spread_album_acoustics(self, max_shift: float = 0.07) -> int:
         """Unstick same-album clones using persisted brightness/flux (no ffmpeg).
 
-        After album smooth, unpinned tracks get a bounded offset from the album median
-        brightness/flux so neighbors stay in the album cloud without stacking.
+        After album smooth, low/medium-confidence unpinned tracks get a bounded
+        offset from the album *median* brightness/flux. High-confidence stars
+        stay put so trusted placements are not nudged into clones.
         """
         import math
+        from statistics import median
+
+        from meridian.features import CONFIDENCE_HIGH
 
         with self.lock:
             rows = self.conn.execute(
                 """
                 SELECT id, artist, albumartist, album, valence, energy, pinned,
-                       brightness, acoustic_flux, confidence_note
+                       brightness, acoustic_flux, confidence_note, mood_confidence
                 FROM tracks
-                WHERE album IS NOT NULL AND TRIM(album) != ''
+                WHERE analyzed = 1
+                  AND album IS NOT NULL AND TRIM(album) != ''
                   AND (
                     (albumartist IS NOT NULL AND TRIM(albumartist) != '')
                     OR (artist IS NOT NULL AND TRIM(artist) != '')
@@ -549,10 +604,20 @@ class Library:
             ]
             if len(bright_vals) < 2 and len(flux_vals) < 2:
                 continue
-            med_b = float(sum(bright_vals) / len(bright_vals)) if bright_vals else 0.5
-            med_f = float(sum(flux_vals) / len(flux_vals)) if flux_vals else 0.5
+            med_b = float(median(bright_vals)) if bright_vals else 0.5
+            med_f = float(median(flux_vals)) if flux_vals else 0.5
             for item in items:
                 if int(item["pinned"]):
+                    continue
+                try:
+                    conf = float(item["mood_confidence"] or 0.0)
+                except (TypeError, ValueError):
+                    conf = 0.0
+                if conf >= CONFIDENCE_HIGH:
+                    continue
+                note_raw = item["confidence_note"] if "confidence_note" in item.keys() else ""
+                # Idempotent: do not re-apply additive offsets on later analyze passes.
+                if "album spread" in (note_raw or ""):
                     continue
                 b = float(item["brightness"]) if item["brightness"] is not None and _finite(item["brightness"]) else med_b
                 f = (
@@ -568,10 +633,7 @@ class Library:
                 e0 = float(item["energy"])
                 v = max(0.03, min(0.97, v0 + dv))
                 e = max(0.03, min(0.97, e0 + de))
-                note = self._append_note(
-                    item["confidence_note"] if "confidence_note" in item.keys() else "",
-                    "album spread",
-                )
+                note = self._append_note(note_raw, "album spread")
                 updates.append((v, e, note, int(item["id"])))
 
         if not updates:
@@ -605,6 +667,7 @@ class Library:
                 """
                 SELECT id, genre, valence, energy, pinned, mood_confidence, confidence_note
                 FROM tracks
+                WHERE analyzed = 1
                 """
             ).fetchall()
 
@@ -663,10 +726,11 @@ class Library:
                 e = max(0.03, min(0.97, e))
                 if abs(v - v0) < 1e-9 and abs(e - e0) < 1e-9:
                     continue
-                note = self._append_note(
-                    item["confidence_note"] if "confidence_note" in item.keys() else "",
-                    "relative rescale",
-                )
+                note_raw = item["confidence_note"] if "confidence_note" in item.keys() else ""
+                # Idempotent: one relative rescale until a fresh analyze replaces the note.
+                if "relative rescale" in (note_raw or ""):
+                    continue
+                note = self._append_note(note_raw, "relative rescale")
                 updates.append((v, e, note, int(item["id"])))
 
         if not updates:
@@ -711,7 +775,8 @@ class Library:
             self.conn.execute(
                 """
                 UPDATE tracks
-                SET play_count = CASE WHEN play_count > 0 THEN play_count - 1 ELSE 0 END
+                SET play_count = CASE WHEN play_count > 0 THEN play_count - 1 ELSE 0 END,
+                    last_played = CASE WHEN play_count <= 1 THEN NULL ELSE last_played END
                 WHERE id = ?
                 """,
                 (track_id,),
@@ -719,28 +784,55 @@ class Library:
             self.conn.commit()
 
     def mark_playback_failed(self, track_id: int) -> None:
-        """Keep a corrupt/unsupported file out of plans until rescan/re-import."""
-        self._playback_denylist.add(int(track_id))
+        """Keep a corrupt/unsupported file out of plans (persists across relaunch)."""
+        tid = int(track_id)
+        self._playback_denylist.add(tid)
+        with self.lock:
+            self.conn.execute(
+                "UPDATE tracks SET playback_denied = 1 WHERE id = ?", (tid,)
+            )
+            self.conn.commit()
 
     def is_playback_denied(self, track_id: int) -> bool:
         return int(track_id) in self._playback_denylist
 
+    def defer_analyze(self, track_id: int, *, note: str = "pcm pending") -> None:
+        """Leave analyzed=0 but denylist this session so silent PCM miss can retry later."""
+        tid = int(track_id)
+        self._analyze_denylist.add(tid)
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT pinned, confidence_note FROM tracks WHERE id = ?", (tid,)
+            ).fetchone()
+            if not row or int(row["pinned"] or 0):
+                return
+            merged = self._append_note(row["confidence_note"], note)
+            self.conn.execute(
+                "UPDATE tracks SET confidence_note = ?, analyzed = 0 WHERE id = ? AND pinned = 0",
+                (merged, tid),
+            )
+            self.conn.commit()
+
     def count_tracks_under(self, root: Path | str) -> int:
         """How many DB tracks resolve under this library root (for sparse-mount guards)."""
+        return len(self.paths_under(root))
+
+    def paths_under(self, root: Path | str) -> list[str]:
+        """DB track paths whose resolved location sits under this library root."""
         try:
             root_r = Path(root).resolve()
         except OSError:
-            return 0
+            return []
         with self.lock:
             rows = self.conn.execute("SELECT path FROM tracks").fetchall()
-        n = 0
+        out: list[str] = []
         for row in rows:
             try:
                 Path(row["path"]).resolve().relative_to(root_r)
             except (OSError, ValueError):
                 continue
-            n += 1
-        return n
+            out.append(str(row["path"]))
+        return out
 
     def record_skip(self, track_id: int) -> None:
         with self.lock:
@@ -795,6 +887,19 @@ class Library:
                 self.conn.executemany("DELETE FROM tracks WHERE id = ?", [(i,) for i in dead])
                 self.conn.commit()
 
+    def delete_paths(self, paths: Iterable[str]) -> int:
+        """Remove specific DB rows by path (e.g. deleted files under skipped dirs)."""
+        victims = {str(p) for p in paths if p}
+        if not victims:
+            return 0
+        with self.lock:
+            rows = self.conn.execute("SELECT id, path FROM tracks").fetchall()
+            dead = [int(r["id"]) for r in rows if str(r["path"]) in victims]
+            if dead:
+                self.conn.executemany("DELETE FROM tracks WHERE id = ?", [(i,) for i in dead])
+                self.conn.commit()
+            return len(dead)
+
     def all_tracks(self) -> list[Track]:
         with self.lock:
             rows = self.conn.execute("SELECT * FROM tracks ORDER BY artist, album, title").fetchall()
@@ -845,7 +950,9 @@ class Library:
         self._analyze_denylist.clear()
         self._playback_denylist.clear()
         with self.lock:
-            cur = self.conn.execute("UPDATE tracks SET analyzed = 0")
+            cur = self.conn.execute(
+                "UPDATE tracks SET analyzed = 0, playback_denied = 0"
+            )
             self.conn.commit()
             return int(cur.rowcount)
 

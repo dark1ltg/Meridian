@@ -89,7 +89,7 @@ def check_library_moods(db_path: Path) -> None:
         assert abs(pinned.valence - pin_v) < 1e-9
         assert pinned.mood_confidence == 1.0
         assert pinned.confidence_note == "pinned"
-        assert pinned.analyzed
+        assert not pinned.analyzed, "pin mtime refresh re-queues acoustics"
 
         n_smooth = lib.smooth_album_moods()
         assert n_smooth >= 0
@@ -125,6 +125,9 @@ def check_library_moods(db_path: Path) -> None:
         assert t1.bpm == 120.0  # pinned BPM must not be overwritten
     finally:
         lib.close()
+        assert lib.closed
+        lib.close()  # idempotent under lock
+        assert lib.folders() == []
 
 
 def check_empty_scan_does_not_wipe(db_path: Path) -> None:
@@ -877,11 +880,16 @@ def check_mood_map_helpers() -> None:
 
     m = MoodMap()
     assert hasattr(m, "_ensure_interactive_star")
+    assert hasattr(m, "release_gpu_viewport")
     assert hasattr(m, "_sky_hold_id")
     assert hasattr(m, "_drag_locked_ids")
     assert hasattr(m, "set_radius_scale")
     assert hasattr(m, "_field_signature")
     assert hasattr(m, "_track_star_from_item")
+    # Default / test env: no OpenGL viewport (avoids EGL abort + teardown crashes).
+    assert m._gpu_enabled is False
+    m.release_gpu_viewport()
+    assert m._gpu_enabled is False
     assert LIVE_STARS_ZOOM == 2.4
     assert HIT_RADIUS_SKY >= 10
     assert HIT_RADIUS_SKY_GRAB < HIT_RADIUS_SKY
@@ -944,6 +952,462 @@ def check_mood_map_helpers() -> None:
     assert len(m._sky_chrome) == n0
 
 
+def check_severity_6_8_guards(db_path: Path) -> None:
+    """Guards for sev 6–8: path genre, PCM seek, empty lens, album spread."""
+    from meridian.context import Mode, make_context
+    from meridian.features import (
+        CONFIDENCE_HIGH,
+        _path_genre_keys,
+        _primary_seek_s,
+        _secondary_seek_s,
+    )
+    from meridian.library import Track
+    from meridian.queue_engine import Quadrant, classify
+
+    # Path genre: no false positive on device names; deepest folder wins.
+    assert _path_genre_keys("/media/rock-drive/song.mp3") == []
+    assert _path_genre_keys("/media/jazz usb/song.mp3") == []
+    assert _path_genre_keys("/Music/Jazz/Rock/cut.mp3") == ["rock"]
+    assert _path_genre_keys("/Music/Indie Rock/cut.mp3") == ["indie rock"]
+    assert _path_genre_keys("/Music/Drum & Bass/cut.mp3") == ["drum and bass"]
+
+    # Short / unknown duration: do not seek to 12s / 45s past EOF.
+    assert _primary_seek_s(0) == 0.0
+    assert _primary_seek_s(20_000) == 0.0
+    assert _secondary_seek_s(0) is None
+    assert _secondary_seek_s(20_000) is not None
+    assert float(_secondary_seek_s(20_000)) < 5.0
+    assert _primary_seek_s(180_000) == 12.0
+
+    # Empty lens: far tracks stay SHELF (not promoted into NOW via nearest-N).
+    def far_track(i: int) -> Track:
+        return Track(
+            id=i,
+            path=f"/f/{i}.mp3",
+            title=f"f{i}",
+            artist=f"A{i}",
+            album="Far",
+            albumartist=f"A{i}",
+            genre="Metal",
+            duration_ms=1000,
+            year=None,
+            bpm=120.0,
+            valence=0.05,
+            energy=0.95,
+            mood_confidence=0.5,
+            confidence_note="seed",
+            low_trust=False,
+            pinned=False,
+            loved=False,
+            play_count=0,
+            skip_count=0,
+            last_played=None,
+            added_at=0.0,
+            mtime=0.0,
+            analyzed=True,
+        )
+
+    ctx = make_context(Mode.WANDER, 0.9, 0.1, 0.08, 0.0)
+    ranked = classify([far_track(i) for i in range(1, 20)], ctx, set())
+    assert all(r.quadrant == Quadrant.SHELF for r in ranked), [
+        (r.track.id, r.quadrant) for r in ranked
+    ]
+
+    # Album spread: high-confidence stars stay put; low-confidence may move.
+    lib = Library(db_path)
+    try:
+        for i in range(6):
+            lib.upsert_track(
+                {
+                    "path": f"/spread/{i}.mp3",
+                    "title": f"s{i}",
+                    "artist": "SpreadBand",
+                    "albumartist": "SpreadBand",
+                    "album": "SpreadLP",
+                    "genre": "Rock",
+                    "duration_ms": 1,
+                    "year": None,
+                    "bpm": 120,
+                    "valence": 0.50,
+                    "energy": 0.50,
+                    "mood_confidence": CONFIDENCE_HIGH if i == 0 else 0.30,
+                    "confidence_note": "seed",
+                    "low_trust": 0 if i == 0 else 1,
+                    "added_at": 0,
+                    "mtime": 0,
+                    "analyzed": 1,
+                }
+            )
+        with lib.lock:
+            lib.conn.execute(
+                "UPDATE tracks SET brightness = ?, acoustic_flux = ? WHERE path LIKE ?",
+                (0.90, 0.90, "/spread/0.mp3"),
+            )
+            for i in range(1, 6):
+                lib.conn.execute(
+                    "UPDATE tracks SET brightness = ?, acoustic_flux = ? WHERE path LIKE ?",
+                    (0.10 + i * 0.05, 0.10 + i * 0.05, f"/spread/{i}.mp3"),
+                )
+            lib.conn.commit()
+        high_before = lib.get(1)
+        assert high_before is not None
+        hv, he = high_before.valence, high_before.energy
+        n = lib.spread_album_acoustics()
+        assert n >= 1
+        high_after = lib.get(1)
+        assert high_after is not None
+        assert abs(high_after.valence - hv) < 1e-9
+        assert abs(high_after.energy - he) < 1e-9
+        moved = [
+            t
+            for t in lib.all_tracks()
+            if t.path.startswith("/spread/")
+            and t.id != 1
+            and "album spread" in (t.confidence_note or "")
+        ]
+        assert moved, "low-confidence album mates should receive spread notes"
+        # Idempotent: second pass must not walk stars further.
+        n2 = lib.spread_album_acoustics()
+        assert n2 == 0
+        for t in moved:
+            after = lib.get(t.id)
+            assert after is not None
+            assert abs(after.valence - t.valence) < 1e-9
+    finally:
+        lib.close()
+
+
+def check_severity_5_10_guards(db_path: Path) -> None:
+    """Guards for sev 5–10: upsert preserve, denylist persist, VA key, unrecord, rescale."""
+    from meridian.library import Library, Track
+    from meridian.queue_engine import _artist_key
+
+    lib = Library(db_path)
+    try:
+        lib.upsert_track(
+            {
+                "path": "/u/a.mp3",
+                "title": "a",
+                "artist": "Band",
+                "albumartist": "Band",
+                "album": "LP",
+                "genre": "Rock",
+                "duration_ms": 1,
+                "year": None,
+                "bpm": 120,
+                "valence": 0.11,
+                "energy": 0.22,
+                "mood_confidence": 0.8,
+                "confidence_note": "pcm",
+                "low_trust": 0,
+                "added_at": 0,
+                "mtime": 1,
+                "analyzed": 1,
+            }
+        )
+        # Mtime refresh must re-queue without clobbering PCM coords.
+        lib.upsert_track(
+            {
+                "path": "/u/a.mp3",
+                "title": "a2",
+                "artist": "Band",
+                "albumartist": "Band",
+                "album": "LP",
+                "genre": "Rock",
+                "duration_ms": 1,
+                "year": None,
+                "bpm": 120,
+                "valence": 0.90,
+                "energy": 0.90,
+                "mood_confidence": 0.2,
+                "confidence_note": "seed",
+                "low_trust": 1,
+                "added_at": 9,
+                "mtime": 2,
+                "analyzed": 0,
+            }
+        )
+        t = lib.get(1)
+        assert t is not None
+        assert abs(t.valence - 0.11) < 1e-9 and abs(t.energy - 0.22) < 1e-9
+        assert not t.analyzed
+        assert t.title == "a2"
+
+        lib.mark_playback_failed(1)
+        assert lib.is_playback_denied(1)
+        lib.close()
+        lib2 = Library(db_path)
+        try:
+            assert lib2.is_playback_denied(1), "playback denylist must persist"
+        finally:
+            lib2.close()
+
+        lib = Library(db_path)
+        lib.record_play(1, 100.0)
+        lib.unrecord_play(1)
+        t = lib.get(1)
+        assert t is not None
+        assert t.play_count == 0
+        assert t.last_played is None
+
+        # Pin still stores acoustic features.
+        lib.set_mood(1, 0.5, 0.5, pinned=True)
+        lib.set_analyzed_mood(
+            1, 0.1, 0.1, 90.0, confidence=0.2, brightness=0.77, acoustic_flux=0.66
+        )
+        t = lib.get(1)
+        assert t is not None
+        assert abs(t.valence - 0.5) < 1e-9
+        assert t.brightness is not None and abs(t.brightness - 0.77) < 1e-9
+
+        # Relative rescale is once-only while the note remains.
+        for i in range(16):
+            lib.upsert_track(
+                {
+                    "path": f"/r/{i}.mp3",
+                    "title": f"r{i}",
+                    "artist": "R",
+                    "albumartist": "R",
+                    "album": "RA",
+                    "genre": "Metal",
+                    "duration_ms": 1,
+                    "year": None,
+                    "bpm": 120,
+                    "valence": 0.2 + i * 0.03,
+                    "energy": 0.25 + (i % 4) * 0.1,
+                    "mood_confidence": 0.4,
+                    "confidence_note": "seed",
+                    "low_trust": 0,
+                    "added_at": 0,
+                    "mtime": 0,
+                    "analyzed": 1,
+                }
+            )
+        n1 = lib.rescale_moods_by_percentile(min_group=8)
+        assert n1 > 0
+        sample = next(x for x in lib.all_tracks() if x.path.startswith("/r/"))
+        v1 = sample.valence
+        n2 = lib.rescale_moods_by_percentile(min_group=8)
+        assert n2 == 0
+        assert abs(lib.get(sample.id).valence - v1) < 1e-9
+    finally:
+        if not lib.closed:
+            lib.close()
+
+    va = Track(
+        id=1,
+        path="/v.mp3",
+        title="t",
+        artist="Real Act",
+        album="Comp",
+        albumartist="Various Artists",
+        genre="Pop",
+        duration_ms=1,
+        year=None,
+        bpm=None,
+        valence=0.5,
+        energy=0.5,
+        mood_confidence=0.5,
+        confidence_note="",
+        low_trust=False,
+        pinned=False,
+        loved=False,
+        play_count=0,
+        skip_count=0,
+        last_played=None,
+        added_at=0.0,
+        mtime=0.0,
+        analyzed=True,
+    )
+    assert _artist_key(va) == "real act"
+
+
+def check_symlink_dir_does_not_prune(tmp_dir: Path) -> None:
+    """Visible files + symlink subtree: prune must keep DB rows under the symlink."""
+    from meridian.scanner import ScanWorker
+
+    db_path = tmp_dir / "sym.sqlite"
+    root = tmp_dir / "lib"
+    real = tmp_dir / "real-album"
+    root.mkdir(parents=True)
+    real.mkdir(parents=True)
+    (root / "keep.mp3").write_bytes(b"ID3")
+    (real / "linked.mp3").write_bytes(b"ID3")
+    link = root / "linked-album"
+    link.symlink_to(real)
+
+    lib = Library(db_path)
+    try:
+        for name, path in (("keep", root / "keep.mp3"), ("linked", real / "linked.mp3")):
+            # Seed as if previously indexed under the symlink path users expect.
+            use = str(link / "linked.mp3") if name == "linked" else str(path)
+            lib.upsert_track(
+                {
+                    "path": use,
+                    "title": name,
+                    "artist": "Band",
+                    "albumartist": "Band",
+                    "album": "LP",
+                    "genre": "Metal",
+                    "duration_ms": 1,
+                    "year": None,
+                    "bpm": 120,
+                    "valence": 0.5,
+                    "energy": 0.5,
+                    "mood_confidence": 0.5,
+                    "confidence_note": "seed",
+                    "low_trust": 0,
+                    "added_at": 0,
+                    "mtime": 0,
+                    "analyzed": 1,
+                }
+            )
+        lib.add_folder(str(root))
+        ScanWorker(lib, force=False)._scan()
+        paths = {t.path for t in lib.all_tracks()}
+        assert str(root / "keep.mp3") in paths
+        assert str(link / "linked.mp3") in paths, "symlink subtree must not be pruned"
+
+        # Deleted file under the symlink must still be pruned (exists check).
+        (real / "linked.mp3").unlink()
+        ScanWorker(lib, force=False)._scan()
+        paths2 = {t.path for t in lib.all_tracks()}
+        assert str(link / "linked.mp3") not in paths2, "deleted symlink target must prune"
+        assert str(root / "keep.mp3") in paths2
+    finally:
+        lib.close()
+
+
+def check_severity_5_9_guards(db_path: Path) -> None:
+    """Guards for post-fix sev 5–9: settle credit, pin denylist, abandon flag."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from meridian.ui.main_window import MainWindow
+
+    # Pause mid-fade must play-count the kept incoming track (not skip it).
+    w = MainWindow.__new__(MainWindow)
+    w._closing = False
+    w._outgoing_settle_finish = True
+    w._crossfade_outgoing_id = 1
+    w._pending_play_credit = 2
+    w.played_history = []
+    w.skips_window = []
+    w.library = MagicMock()
+    w.player = MagicMock()
+    w.player.current = SimpleNamespace(id=2)
+    w.player.backend.position.return_value = 500
+    nudged: list[tuple] = []
+    w._listen_nudge = lambda tid, *, skipped: nudged.append((tid, skipped))  # type: ignore[method-assign]
+    commits: list[int] = []
+    w._commit_play = lambda tid: commits.append(tid)  # type: ignore[method-assign]
+    credits: list[tuple] = []
+    w._credit_listen = lambda tid, *, position_ms: credits.append((tid, position_ms))  # type: ignore[method-assign]
+    MainWindow._crossfade_settled(w, False)
+    assert commits == [2], "pause mid-fade must still play-count the kept track"
+    assert credits == [], "must not skip-credit the track the user kept"
+    assert (1, False) in nudged
+
+    # play_id must not double-credit when play_next already did.
+    w2 = MainWindow.__new__(MainWindow)
+    w2._closing = False
+    w2._expect_natural_advance = False
+    w2._crossfade_outgoing_id = None
+    w2._outgoing_settle_finish = False
+    w2._pending_play_credit = None
+    w2._last_hard_play_credit = None
+    w2._abandon_credited_id = 10
+    w2._rebuild_lock = False
+    w2._pending_plan_refresh = False
+    w2.plan = None
+    w2.played_history = []
+    w2.skips_window = []
+    w2.library = MagicMock()
+    track = SimpleNamespace(
+        id=11,
+        path="/tmp/does-not-need-exist-for-mock.mp3",
+        short_title="t",
+        artist="A",
+        album="B",
+        loved=False,
+    )
+    w2.library.get.return_value = track
+    w2.library.is_playback_denied.return_value = False
+    w2.player = MagicMock()
+    w2.player.current = SimpleNamespace(id=10)
+    w2.player.backend.position.return_value = 1000
+    w2.player.is_crossfading.return_value = False
+    w2.transport = MagicMock()
+    credited: list[int] = []
+    w2._credit_listen = lambda tid, *, position_ms: credited.append(tid)  # type: ignore[method-assign]
+    w2._commit_play = lambda tid: None  # type: ignore[method-assign]
+    w2._clear_crossfade_credit = lambda: None  # type: ignore[method-assign]
+    w2._flush_pending_plan_refresh = lambda: None  # type: ignore[method-assign]
+    w2._fill_queue = lambda: None  # type: ignore[method-assign]
+    from pathlib import Path as P
+    from unittest.mock import patch
+
+    with patch.object(P, "exists", return_value=True):
+        MainWindow.play_id(w2, 11)
+    assert credited == [], "play_id must not re-credit abandon already handled by Next"
+
+    # Pin + mtime refresh clears playback denial and re-queues analyze.
+    lib = Library(db_path)
+    try:
+        lib.upsert_track(
+            {
+                "path": "/p/pin.mp3",
+                "title": "p",
+                "artist": "Band",
+                "albumartist": "Band",
+                "album": "LP",
+                "genre": "Rock",
+                "duration_ms": 1,
+                "year": None,
+                "bpm": 120,
+                "valence": 0.4,
+                "energy": 0.4,
+                "mood_confidence": 1.0,
+                "confidence_note": "pinned",
+                "low_trust": 0,
+                "added_at": 0,
+                "mtime": 1,
+                "analyzed": 1,
+            }
+        )
+        lib.set_mood(1, 0.4, 0.4, pinned=True)
+        lib.mark_playback_failed(1)
+        assert lib.is_playback_denied(1)
+        lib.upsert_track(
+            {
+                "path": "/p/pin.mp3",
+                "title": "p2",
+                "artist": "Band",
+                "albumartist": "Band",
+                "album": "LP",
+                "genre": "Rock",
+                "duration_ms": 1,
+                "year": None,
+                "bpm": 120,
+                "valence": 0.9,
+                "energy": 0.9,
+                "mood_confidence": 0.2,
+                "confidence_note": "seed",
+                "low_trust": 1,
+                "added_at": 9,
+                "mtime": 2,
+                "analyzed": 0,
+            }
+        )
+        t = lib.get(1)
+        assert t is not None
+        assert not lib.is_playback_denied(1)
+        assert not t.analyzed, "pin mtime refresh should re-queue acoustics"
+        assert abs(t.valence - 0.4) < 1e-9, "pin mood must stay"
+    finally:
+        lib.close()
+
+
 def run_all_smoke_checks(tmp_dir: Path) -> None:
     """Run every smoke check (used by scripts/smoke_test.py)."""
     check_version()
@@ -958,7 +1422,11 @@ def run_all_smoke_checks(tmp_dir: Path) -> None:
     check_incoming_end_ignores_spurious_eom()
     check_decode_abort_helpers()
     check_partial_and_symlink_scan(tmp_dir / "scan-guards")
+    check_symlink_dir_does_not_prune(tmp_dir / "sym-prune")
     check_analyze_failed_marks_done(tmp_dir / "fail.sqlite")
     check_build_plan_hard_exclude()
     check_renewal_queue_scoring()
     check_mood_map_helpers()
+    check_severity_6_8_guards(tmp_dir / "sev68.sqlite")
+    check_severity_5_10_guards(tmp_dir / "sev510.sqlite")
+    check_severity_5_9_guards(tmp_dir / "sev59.sqlite")

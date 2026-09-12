@@ -2,9 +2,9 @@
 
 All notable Meridian releases are listed here. Download AppImages from [Releases](https://github.com/dark1ltg/Meridian/releases).
 
-## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10
+## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-09-11)
 
-Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips.
+Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds optimization and bugfix hardening from full codebase reviews.
 
 ### Context queue
 - **Renew queue** rebuilds the context queue from the current Queue Matrix (lens neighborhood + mode + clock)
@@ -17,8 +17,34 @@ Renew Queue: an explicit new recommendation pass from the current listen matrix,
 - Consecutive renews (streak, reset on lens/mode change) add a bounded extra nudge — not a random walk out of context
 - Artist/album anti-repeat and mode-aware mix stay in the same `build_plan` path as normal queues
 
+### Optimization
+- Album acoustic spread and relative percentile rescale run once per analyze note (no compounding drift on every pass)
+- Smooth / spread / rescale only touch `analyzed=1` tracks so deferred PCM misses stay put until a real decode
+- Empty lens keeps far tracks on SHELF instead of promoting nearest-N into NOW
+- Short / unknown-duration files seek PCM from 0 (no 12s / 45s past EOF)
+- Path genre prefers the deepest matching folder; residual matching rejects device names like `rock-drive`
+- `Drum & Bass`-style folders normalize `&` → `and`; Various Artists diversity uses the real track artist
+- Album spread anchors on median brightness/flux and leaves high-confidence stars alone
+- Scan prune requires ~85% of known tracks visible before deleting missing rows
+- Pins still receive brightness / flux acoustics on analyze (mood coords stay protected)
+
+### Bugfixes
+- Corrupt QSettings mode / lens values no longer crash launch (safe parse + clamp)
+- Denylisted last track: Play / Space clears and advances instead of retrying the dead file
+- Seek into the fade window no longer auto-advances; hard-cut restarts same-URL audio reliably
+- Same-track restart does not bump `play_count`; pause mid-fade still counts the kept track as a play
+- Next no longer double skip-credits; crossfade leave uses skip/finish only (no play+skip double)
+- Abandon while paused credits once; Prev from a one-shot matrix pull no longer overshoots
+- Natural-advance flag clears when the unplayable chain empties; mid-fade same-track restart still finish-nudges the outgoing song
+- Mtime / tag refresh keeps PCM placement while re-queuing analyze; silent PCM miss defers instead of sticky “analyzed”
+- Symlink / `.hidden` subtrees stay indexed; deleted files under those dirs are dropped without weakening sparse-mount guards
+- Playback denylist persists across relaunch and clears on scan refresh (including pins)
+- `unrecord_play` clears `last_played` when count hits zero; linger scan shows a status instead of silent no-op
+- Scrub remain-time follows the slider while dragging
+
 ### Docs / packaging
 - README and AppStream note Renew queue; AppImage baseline remains Ubuntu 24.04 / glibc 2.38+
+- Release AppImage refreshed 2026-09-11 with the optimization and bugfix pass above
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-09)
 

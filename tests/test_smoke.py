@@ -19,7 +19,11 @@ from tests.smoke_checks import (
     check_nearly_finished_duration_guards,
     check_incoming_end_ignores_spurious_eom,
     check_decode_abort_helpers,
+    check_severity_5_10_guards,
+    check_severity_5_9_guards,
+    check_severity_6_8_guards,
     check_sparse_mount_does_not_wipe,
+    check_symlink_dir_does_not_prune,
     check_version,
 )
 
@@ -91,3 +95,19 @@ def test_renewal_queue_scoring() -> None:
 
 def test_mood_map_sky_drag_helpers() -> None:
     check_mood_map_helpers()
+
+
+def test_severity_6_8_guards(tmp_path: Path) -> None:
+    check_severity_6_8_guards(tmp_path / "sev68.sqlite")
+
+
+def test_severity_5_10_guards(tmp_path: Path) -> None:
+    check_severity_5_10_guards(tmp_path / "sev510.sqlite")
+
+
+def test_severity_5_9_guards(tmp_path: Path) -> None:
+    check_severity_5_9_guards(tmp_path / "sev59.sqlite")
+
+
+def test_symlink_dir_does_not_prune(tmp_path: Path) -> None:
+    check_symlink_dir_does_not_prune(tmp_path / "sym-prune")

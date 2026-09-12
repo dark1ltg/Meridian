@@ -213,7 +213,11 @@ class TransportBar(QWidget):
             self.seek.setValue(max(0, min(position, duration)))
             self.seek.blockSignals(False)
             self.elapsed.setText(fmt_ms(position))
-        self.remain.setText(fmt_ms(max(0, duration - position)))
+            self.remain.setText(fmt_ms(max(0, duration - position)))
+        else:
+            # While scrubbing, remain follows the slider — not the live playhead.
+            scrub = int(self.seek.value())
+            self.remain.setText(fmt_ms(max(0, duration - scrub)))
 
     def set_playing(self, playing: bool) -> None:
         self.play_btn.setText("❚❚" if playing else "▶")

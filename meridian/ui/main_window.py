@@ -6,6 +6,7 @@ from time import time
 from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Slot
 from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -25,6 +26,8 @@ from meridian import __version__
 from meridian.features import CONFIDENCE_HIGH, CONFIDENCE_LOW
 from meridian.context import (
     LENS_RADIUS_DEFAULT,
+    LENS_RADIUS_MAX,
+    LENS_RADIUS_MIN,
     MODE_HINTS,
     MODE_LABELS,
     Mode,
@@ -57,7 +60,12 @@ class MainWindow(QMainWindow):
         self.settings = QSettings()
         self.library = Library()
         self.player = Player(self)
-        self.mode = Mode(self.settings.value("mode", Mode.WANDER.value))
+        raw_mode = self.settings.value("mode", Mode.WANDER.value)
+        try:
+            self.mode = Mode(raw_mode)
+        except (ValueError, TypeError):
+            self.mode = Mode.WANDER
+            self.settings.setValue("mode", self.mode.value)
         self.explicit: list[int] = []
         self.plan: QueuePlan | None = None
         self.session_queue: list[int] = []
@@ -88,9 +96,15 @@ class MainWindow(QMainWindow):
         self._pending_plan_refresh = False
         # Consecutive Renew Queue presses since last lens/mode change (capped in engine).
         self._renew_streak = 0
+        # Restart analyze once lingering timed-out workers fully exit.
+        self._pending_analyze_after_linger = False
+        # Keep process alive after window close until lingering workers finish.
+        self._quit_when_idle = False
         self._handling_playback_error = False
         # Hard-cut play_id credits immediately; cleared/undone if media errors.
         self._last_hard_play_credit: int | None = None
+        # play_next already credited this id — play_id must not credit it again.
+        self._abandon_credited_id: int | None = None
         self._lens_timer = QTimer(self)
         self._lens_timer.setSingleShot(True)
         self._lens_timer.setInterval(180)
@@ -280,9 +294,15 @@ class MainWindow(QMainWindow):
         self.player.error_occurred.connect(self._playback_error)
 
     def _restore_lens(self) -> None:
-        x = float(self.settings.value("lens_x", 0.52))
-        y = float(self.settings.value("lens_y", 0.48))
-        r = float(self.settings.value("lens_r", LENS_RADIUS_DEFAULT))
+        try:
+            x = float(self.settings.value("lens_x", 0.52))
+            y = float(self.settings.value("lens_y", 0.48))
+            r = float(self.settings.value("lens_r", LENS_RADIUS_DEFAULT))
+        except (TypeError, ValueError):
+            x, y, r = 0.52, 0.48, LENS_RADIUS_DEFAULT
+        x = max(0.0, min(1.0, x))
+        y = max(0.0, min(1.0, y))
+        r = max(LENS_RADIUS_MIN, min(LENS_RADIUS_MAX, r))
         self._apply_mode_lens_scale()
         self.map.set_lens(x, y, r)
 
@@ -309,6 +329,9 @@ class MainWindow(QMainWindow):
         ]
 
     def _flush_pending_plan_refresh(self) -> None:
+        if self._closing:
+            self._pending_plan_refresh = False
+            return
         if not self._pending_plan_refresh:
             return
         self._pending_plan_refresh = False
@@ -319,7 +342,7 @@ class MainWindow(QMainWindow):
 
     def _renew_queue(self) -> None:
         """New recommendation pass from the current matrix — not skips, not shuffle."""
-        if self._rebuild_lock:
+        if self._closing or self._rebuild_lock:
             return
         prior = list(self.session_queue)
         ctx = self.current_context()
@@ -353,6 +376,8 @@ class MainWindow(QMainWindow):
         self._set_status("Context queue renewed from the current matrix.")
 
     def refresh_plan(self, keep_current: bool = True, rebuild_queue: bool = True) -> None:
+        if self._closing:
+            return
         if self._rebuild_lock:
             # Never drop a non-rebuild refresh (listen nudge / lens) permanently.
             if not rebuild_queue:
@@ -493,6 +518,11 @@ class MainWindow(QMainWindow):
 
     def start_rescan(self) -> None:
         """Force re-read tags and re-analyze every track under library folders."""
+        if self._closing:
+            return
+        if self._lingering_workers:
+            self._set_status("Still finishing previous scan/analyze…")
+            return
         if self._scan_thread and self._scan_thread.isRunning():
             return
         n = len(self.library.all_tracks())
@@ -511,7 +541,10 @@ class MainWindow(QMainWindow):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        self._stop_analyze(wait_ms=20000)
+        # Must fully stop analyze before dirtying the DB / starting a new scan.
+        if not self._stop_analyze(wait_ms=20000) or self._lingering_workers:
+            self._set_status("Still finishing previous analyze — try Rescan again in a moment.")
+            return
         pending = self.library.mark_all_pending_analysis()
         self._set_status(f"Rescanning library ({pending} tracks to re-analyze)…")
         self._start_scan_worker(force=True, on_finished=self._rescan_done)
@@ -528,6 +561,12 @@ class MainWindow(QMainWindow):
         self.start_analyze()
 
     def start_scan(self) -> None:
+        if self._closing:
+            return
+        if self._lingering_workers:
+            # Do not start a second scan while a timed-out worker still holds the DB.
+            self._set_status("Waiting for previous scan/analyze to finish…")
+            return
         if self._scan_thread and self._scan_thread.isRunning():
             return
         self._set_status("Scanning local files…")
@@ -570,19 +609,34 @@ class MainWindow(QMainWindow):
         self._lingering_workers.append(pair)
 
         def _reap() -> None:
-            if pair in self._lingering_workers:
-                self._lingering_workers.remove(pair)
+            # Idempotent: finished may race with the isRunning() check below.
+            if pair not in self._lingering_workers:
+                return
+            self._lingering_workers.remove(pair)
             thread.deleteLater()
             if worker is not None:
                 worker.deleteLater()
-            if self._close_library_when_idle and not self._lingering_workers:
+            idle = not self._lingering_workers
+            if idle and self._close_library_when_idle:
                 try:
                     self.library.close()
                 except Exception:
                     pass
                 self._close_library_when_idle = False
+            if idle and self._pending_analyze_after_linger and not self._closing:
+                self._pending_analyze_after_linger = False
+                self.start_analyze()
+            if idle and self._quit_when_idle:
+                self._quit_when_idle = False
+                app = QApplication.instance()
+                if app is not None:
+                    app.quit()
 
         thread.finished.connect(_reap)
+        # TOCTOU: thread may have exited after wait() timed out but before connect.
+        # finished would never fire — reaping now (or on next event loop tick) avoids a zombie.
+        if not thread.isRunning():
+            QTimer.singleShot(0, _reap)
 
     def _reap_worker_thread(self, thread, worker, *, wait_ms: int = 8000) -> bool:
         """Dispose a worker QThread without ever calling wait() on ourselves.
@@ -661,11 +715,19 @@ class MainWindow(QMainWindow):
     def start_analyze(self) -> None:
         if self._closing:
             return
+        if self._lingering_workers:
+            # Avoid overlapping ffmpeg / abort state with a timed-out analyze.
+            self._pending_analyze_after_linger = True
+            self._set_status("Waiting for previous analyze to finish…")
+            return
         if self._analyze_thread and self._analyze_thread.isRunning():
+            return
+        if self.library.closed:
             return
         if not self.library.unanalyzed_ids():
             self._set_status("Mood map updated from local audio.")
             return
+        self._pending_analyze_after_linger = False
         self._analyze_gen += 1
         gen = self._analyze_gen
         self._analyze_worker = AnalyzeWorker(self.library)
@@ -742,9 +804,14 @@ class MainWindow(QMainWindow):
             self.player.toggle()
             return
         if self.player.current is not None:
-            # Paused (or stopped mid-track) — resume.
-            self.player.toggle()
-            return
+            tid = self.player.current.id
+            # Denylisted / dead last track: do not retry on Space — advance or idle.
+            if self.library.is_playback_denied(tid):
+                self.player.clear()
+            else:
+                # Paused (or stopped mid-track) — resume.
+                self.player.toggle()
+                return
         if not self.session_queue:
             self._replenish_queue()
         if not self.session_queue:
@@ -774,6 +841,8 @@ class MainWindow(QMainWindow):
             next_id = self._skip_unplayable(track_id)
             if next_id is not None:
                 self.play_id(next_id, _depth=_depth + 1)
+            else:
+                self._expect_natural_advance = False
             return
         self._rebuild_lock = True
         outgoing = self.player.current
@@ -781,6 +850,28 @@ class MainWindow(QMainWindow):
         outgoing_pos = int(self.player.backend.position() or 0) if outgoing is not None else 0
         natural_advance = self._expect_natural_advance
         self._expect_natural_advance = False
+
+        # Same track: restart audio without bumping play_count.
+        if outgoing_id is not None and outgoing_id == track_id:
+            # Mid natural fade: still finish-nudge the song that was ending.
+            if (
+                self.player.is_crossfading()
+                and self._outgoing_settle_finish
+                and self._crossfade_outgoing_id is not None
+            ):
+                self._listen_nudge(self._crossfade_outgoing_id, skipped=False)
+            self._clear_crossfade_credit()
+            self.player.stop()
+            self.player.play_track(track)
+            self.transport.set_track(
+                track.short_title, f"{track.artist}  ·  {track.album or 'Single'}", track.loved
+            )
+            self._rebuild_lock = False
+            self._flush_pending_plan_refresh()
+            if self.plan:
+                self.map.set_tracks(self.plan.ranked, track_id)
+            self._fill_queue()
+            return
 
         # Interrupting an in-flight fade: settle credit for prior outgoing + pending.
         if self.player.is_crossfading() and self._crossfade_outgoing_id is not None:
@@ -790,17 +881,20 @@ class MainWindow(QMainWindow):
             self._clear_crossfade_credit()
             if prior != track_id and settle_finish:
                 self._listen_nudge(prior, skipped=False)
-            # Armed incoming that we are abandoning still counts as a play.
+            # Armed incoming abandoned early: skip/finish by position — not a play.
             if (
                 pending is not None
                 and pending != track_id
                 and self.player.current is not None
                 and pending == self.player.current.id
             ):
-                self._commit_play(pending)
+                pos = int(self.player.backend.position() or 0)
+                self._credit_listen(pending, position_ms=pos)
 
         self._pending_play_credit = None
         self._last_hard_play_credit = None
+        already_credited = self._abandon_credited_id
+        self._abandon_credited_id = None
         self.player.play_track(track)
         if self.player.is_crossfading() and outgoing_id is not None and outgoing_id != track_id:
             self._pending_play_credit = track_id
@@ -811,9 +905,17 @@ class MainWindow(QMainWindow):
             else:
                 # Map / matrix / search jump: credit abandon now (same 8s rule as Next).
                 self._outgoing_settle_finish = False
-                self._credit_listen(outgoing_id, position_ms=outgoing_pos)
+                if already_credited != outgoing_id:
+                    self._credit_listen(outgoing_id, position_ms=outgoing_pos)
         else:
             self._clear_crossfade_credit()
+            # Hard-cut jump (paused/stopped): credit the abandoned track once.
+            if (
+                outgoing_id is not None
+                and outgoing_id != track_id
+                and already_credited != outgoing_id
+            ):
+                self._credit_listen(outgoing_id, position_ms=outgoing_pos)
             self._commit_play(track_id)
             self._last_hard_play_credit = track_id
         self.transport.set_track(track.short_title, f"{track.artist}  ·  {track.album or 'Single'}", track.loved)
@@ -891,6 +993,7 @@ class MainWindow(QMainWindow):
             if next_id is not None:
                 self.play_id(next_id)
             else:
+                self.player.clear()
                 self._set_status(f"{message} — no playable tracks left.")
         finally:
             self._handling_playback_error = False
@@ -921,27 +1024,22 @@ class MainWindow(QMainWindow):
         if self.player.is_crossfading() and self._crossfade_outgoing_id is not None:
             outgoing = self._crossfade_outgoing_id
             settle_finish = self._outgoing_settle_finish
-            pending = self._pending_play_credit
             self._clear_crossfade_credit()
             if settle_finish:
                 # Natural A→B: A essentially finished — never skip-credit it.
                 self._listen_nudge(outgoing, skipped=False)
-            # Jump fades already credited outgoing in play_id; do not credit again.
-            if (
-                pending is not None
-                and self.player.current is not None
-                and pending == self.player.current.id
-            ):
-                self._commit_play(pending)
-            # Next means leave the incoming (current) track under the 8s rule.
+            # Leaving the incoming early: skip/finish only — never also play-count.
             skipped = bool(self.player.current and self.player.backend.position() < 8000)
             if self.player.current:
                 if skipped:
                     self.library.record_skip(self.player.current.id)
                     self.skips_window.append(time())
                 self._listen_nudge(self.player.current.id, skipped=skipped)
+                # play_id must not credit this abandoned incoming again.
+                self._abandon_credited_id = self.player.current.id
             self._advance_queue(skipped=skipped)
             return
+        # Credit once here, then tell play_id not to double-credit on the hard-cut/fade.
         self._clear_crossfade_credit()
         skipped = bool(self.player.current and self.player.backend.position() < 8000)
         if self.player.current:
@@ -949,6 +1047,7 @@ class MainWindow(QMainWindow):
                 self.library.record_skip(self.player.current.id)
                 self.skips_window.append(time())
             self._listen_nudge(self.player.current.id, skipped=skipped)
+            self._abandon_credited_id = self.player.current.id
         self._advance_queue(skipped=skipped)
 
     def play_prev(self) -> None:
@@ -970,17 +1069,39 @@ class MainWindow(QMainWindow):
             self._replenish_queue()
         if not self.session_queue:
             return
+        # Drop one-shot matrix pulls when leaving via Prev (same as Next/advance).
+        current_id = self.player.current.id if self.player.current else None
+        if current_id is not None and current_id in self.ephemeral:
+            self.ephemeral.discard(current_id)
+            if current_id in self.session_queue:
+                idx = self.session_queue.index(current_id)
+                self.session_queue.pop(idx)
+                if not self.session_queue:
+                    self._replenish_queue(avoid_id=current_id)
+                    if not self.session_queue:
+                        return
+                    self.queue_index = 0
+                    self.play_id(self.session_queue[0])
+                    return
+                # Land on the previous track — do not subtract again below.
+                self.queue_index = max(0, idx - 1)
+                self.play_id(self.session_queue[self.queue_index])
+                return
         self.queue_index = max(0, self.queue_index - 1)
         self.play_id(self.session_queue[self.queue_index])
 
     def _nearly_finished(self) -> None:
+        if self._closing:
+            return
         # Arm crossfade / advance now; finish-credit the outgoing when the fade settles.
         self._expect_natural_advance = True
         self._advance_queue(skipped=False)
 
     def _crossfade_settled(self, natural: bool) -> None:
-        # Finish-nudge on natural settle *and* pause/seek abort of an end-of-track fade.
-        # `natural` is False when pause/seek/stop forced an immediate settle.
+        if self._closing:
+            return
+        # Natural fade: finish-nudge outgoing when armed.
+        # Pause/seek abort keeps the incoming track — still a play, not a skip.
         _ = natural
         if self._outgoing_settle_finish and self._crossfade_outgoing_id is not None:
             self._listen_nudge(self._crossfade_outgoing_id, skipped=False)
@@ -996,6 +1117,8 @@ class MainWindow(QMainWindow):
             self._commit_play(credit)
 
     def _track_finished_hard(self) -> None:
+        if self._closing:
+            return
         # Short tracks (no nearly-finished arm): nudge + advance together.
         self._clear_crossfade_credit()
         self._expect_natural_advance = False
@@ -1005,6 +1128,8 @@ class MainWindow(QMainWindow):
 
     def _listen_nudge(self, track_id: int, *, skipped: bool) -> None:
         """Local-only: gently move unpinned stars from skip/finish under the lens."""
+        if self._closing:
+            return
         lx, ly, _ = self.map.lens_mood()
         moved = self.library.nudge_mood_from_listen(
             track_id, lens_x=lx, lens_y=ly, skipped=skipped
@@ -1084,6 +1209,8 @@ class MainWindow(QMainWindow):
         self.refresh_plan(rebuild_queue=False)
 
     def _pos(self, pos: int) -> None:
+        if self._closing:
+            return
         # Once hard-cut media actually advances, keep the play credit on later errors.
         if (
             self._last_hard_play_credit is not None
@@ -1095,13 +1222,50 @@ class MainWindow(QMainWindow):
         self.transport.set_progress(pos, self._duration)
 
     def _dur(self, dur: int) -> None:
+        if self._closing:
+            return
         self._duration = dur
         self.transport.set_progress(self.player.backend.position(), dur)
 
+    def _shutdown_player(self) -> None:
+        """Stop playback and disconnect player→UI so quit cannot touch a closed DB."""
+        for signal, slot in (
+            (self.player.position_changed, self._pos),
+            (self.player.duration_changed, self._dur),
+            (self.player.state_changed, self.transport.set_playing),
+            (self.player.track_nearly_finished, self._nearly_finished),
+            (self.player.track_finished, self._track_finished_hard),
+            (self.player.crossfade_settled, self._crossfade_settled),
+            (self.player.error_occurred, self._playback_error),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        try:
+            self.player.stop()
+        except Exception:
+            pass
+
     def closeEvent(self, event) -> None:
         self._closing = True
+        self._pending_analyze_after_linger = False
+        self._pending_plan_refresh = False
         self._clear_crossfade_credit()
         self._expect_natural_advance = False
+        self._pending_play_credit = None
+        self._lens_timer.stop()
+        try:
+            self.map._snap_timer.stop()
+            self.map._lod_timer.stop()
+        except Exception:
+            pass
+        self._shutdown_player()
+        # Drop GL viewport before widget teardown (driver abort on some hosts).
+        try:
+            self.map.release_gpu_viewport()
+        except Exception:
+            pass
         # Abort kills ffmpeg; disconnect UI slots before wait so a timeout cannot UAF.
         analyze_done = self._stop_analyze(wait_ms=20000)
         scan_done = self._cleanup_scan_thread(wait_ms=10000)
@@ -1110,4 +1274,9 @@ class MainWindow(QMainWindow):
             self.library.close()
         else:
             self._close_library_when_idle = True
+            # Keep the process alive until linger reaps finish, then quit.
+            self._quit_when_idle = True
+            app = QApplication.instance()
+            if app is not None:
+                app.setQuitOnLastWindowClosed(False)
         super().closeEvent(event)

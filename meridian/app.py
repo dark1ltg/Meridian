@@ -248,24 +248,23 @@ def resource_path(*parts: str) -> Path:
 def run() -> int:
     import os
 
-    # Do not force desktop OpenGL — broken EGL/DRI hosts (VMs, missing Mesa) then
-    # abort during startup/teardown. Prefer software when asked; otherwise let Qt pick.
+    # OpenGL mood-map viewport is opt-in (MERIDIAN_GL). Creating QOpenGLWidget on
+    # broken EGL/DRI hosts can native-abort — try/except cannot catch that.
     prefer_soft = os.environ.get("QT_OPENGL", "").strip().lower() == "software" or os.environ.get(
         "LIBGL_ALWAYS_SOFTWARE", ""
     ).strip() in {"1", "true", "yes"}
     no_gl = os.environ.get("MERIDIAN_NO_GL", "").strip().lower() in {"1", "true", "yes"}
-    force_desktop = os.environ.get("MERIDIAN_GL", "").strip().lower() in {
-        "desktop",
-        "force",
-        "1",
-    }
+    gl_mode = os.environ.get("MERIDIAN_GL", "").strip().lower()
+    force_desktop = gl_mode in {"desktop", "force"}
+    want_gl = gl_mode in {"1", "true", "yes", "on", "gpu", "desktop", "force"}
     try:
         from PySide6.QtGui import QSurfaceFormat
 
-        if prefer_soft or no_gl:
-            QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
-            # Mood map skips QOpenGLWidget when MERIDIAN_NO_GL is set.
-            if prefer_soft and not os.environ.get("MERIDIAN_NO_GL"):
+        if prefer_soft or no_gl or not want_gl:
+            if prefer_soft:
+                QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
+            # Skip QOpenGLWidget unless the user explicitly opted into MERIDIAN_GL.
+            if not want_gl or prefer_soft or no_gl:
                 os.environ.setdefault("MERIDIAN_NO_GL", "1")
         elif force_desktop:
             QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
@@ -276,7 +275,7 @@ def run() -> int:
             fmt.setSamples(4)
             fmt.setDepthBufferSize(24)
             QSurfaceFormat.setDefaultFormat(fmt)
-        # else: Qt default (works on more EGL / Wayland hosts than forced desktop GL)
+        # want_gl without desktop: Qt default GL for the opt-in map viewport
     except Exception:
         pass
 

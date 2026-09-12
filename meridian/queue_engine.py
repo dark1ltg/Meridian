@@ -85,8 +85,12 @@ def _clip01(value: float) -> float:
 
 
 def _artist_key(track: Track) -> str:
-    raw = (track.albumartist or track.artist or "").strip().lower()
-    return raw
+    """Prefer real artist over Various Artists so VA catalogs keep diversity caps."""
+    aa = (track.albumartist or "").strip().lower()
+    ar = (track.artist or "").strip().lower()
+    if aa and aa not in {"various artists", "various", "va"}:
+        return aa
+    return ar or aa
 
 
 def _album_key(track: Track) -> str:
@@ -221,13 +225,19 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
         distances.append(dist)
 
     nearby_scale = 2.4 + 0.7 * pressure
-    nearby_idx = [i for i, dist in enumerate(distances) if dist <= radius * nearby_scale]
+    in_range = [i for i, dist in enumerate(distances) if dist <= radius * nearby_scale]
+    nearby_idx = list(in_range)
     if len(nearby_idx) < 6:
+        # Still surface nearest neighbors for ranking, but do not promote far tracks
+        # into NOW/DEEP/FILL — they stay SHELF unless loved/importance lifts them.
         nearby_idx = sorted(range(len(distances)), key=distances.__getitem__)[: min(16, len(distances))]
     nearby_idx.sort(key=lambda i: distances[i])
+    in_range_set = set(in_range)
 
-    n = len(nearby_idx)
-    if n == 1:
+    n = len([i for i in nearby_idx if i in in_range_set])
+    if n == 0:
+        n_now, n_deep = 0, 0
+    elif n == 1:
         n_now, n_deep = 1, 0
     elif n == 2:
         n_now, n_deep = 1, 1
@@ -240,17 +250,21 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
         if n_now + n_deep >= n:
             n_deep = max(1, n - n_now - 1) if n >= 3 else n - n_now
 
-    for order, i in enumerate(nearby_idx):
+    range_order = 0
+    for i in nearby_idx:
         item = ranked[i]
         if item.track.id in explicit_ids:
             item.quadrant = Quadrant.NOW
             continue
-        if order < n_now:
+        if i not in in_range_set:
+            continue
+        if range_order < n_now:
             item.quadrant = Quadrant.NOW
-        elif order < n_now + n_deep:
+        elif range_order < n_now + n_deep:
             item.quadrant = Quadrant.DEEP
         else:
             item.quadrant = Quadrant.FILL
+        range_order += 1
 
     # Loved / often-played tracks just outside NOW still belong in DEEP, not SHELF.
     for i, item in enumerate(ranked):

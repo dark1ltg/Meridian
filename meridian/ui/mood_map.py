@@ -361,8 +361,12 @@ class MoodMap(QGraphicsView):
     def _enable_opengl_viewport(self) -> bool:
         import os
 
-        # Tests / headless smoke set MERIDIAN_NO_GL=1 to avoid GL teardown crashes.
-        if os.environ.get("MERIDIAN_NO_GL", "").strip() in {"1", "true", "yes"}:
+        # Opt-in only: QOpenGLWidget construction can native-abort on broken EGL.
+        # MERIDIAN_NO_GL=1 (default unless MERIDIAN_GL is set) keeps a plain viewport.
+        if os.environ.get("MERIDIAN_NO_GL", "").strip().lower() in {"1", "true", "yes"}:
+            return False
+        gl_mode = os.environ.get("MERIDIAN_GL", "").strip().lower()
+        if gl_mode not in {"1", "true", "yes", "on", "gpu", "desktop", "force"}:
             return False
         try:
             from PySide6.QtGui import QSurfaceFormat
@@ -386,6 +390,20 @@ class MoodMap(QGraphicsView):
             return True
         except Exception:
             return False
+
+    def release_gpu_viewport(self) -> None:
+        """Swap out QOpenGLWidget before window teardown to avoid driver abort on quit."""
+        if not getattr(self, "_gpu_enabled", False):
+            return
+        from PySide6.QtWidgets import QWidget
+
+        try:
+            plain = QWidget()
+            self.setViewport(plain)
+            self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.MinimalViewportUpdate)
+        except Exception:
+            pass
+        self._gpu_enabled = False
 
     def _draw_backdrop(self) -> None:
         for item in self._sky_chrome:

@@ -37,6 +37,7 @@ class Player(QObject):
         self.current: Track | None = None
         self._crossfading = False
         self._advance_emitted = False
+        self._seek_hold_advance = False
         self._incoming_ended = False
         self._outgoing: _Deck | None = None
         self._xfade = QVariantAnimation(self)
@@ -82,6 +83,12 @@ class Player(QObject):
             return
         fade = self._fade_ms(duration)
         remaining = duration - int(value)
+        if self._seek_hold_advance:
+            # User scrubbed into the fade window — wait until they leave it.
+            if remaining > fade:
+                self._seek_hold_advance = False
+            else:
+                return
         if 0 <= remaining <= fade:
             self._advance_emitted = True
             self.track_nearly_finished.emit()
@@ -155,6 +162,7 @@ class Player(QObject):
         )
         self.current = track
         self._advance_emitted = False
+        self._seek_hold_advance = False
         self._incoming_ended = False
         if can_fade:
             self._start_crossfade(track)
@@ -167,6 +175,8 @@ class Player(QObject):
         other.output.setVolume(0.0)
         active = self._decks[self._active]
         active.output.setVolume(self._master)
+        # Stop first so same-URL setSource+play actually restarts (Qt Multimedia).
+        active.player.stop()
         active.player.setSource(QUrl.fromLocalFile(track.path))
         active.player.play()
 
@@ -255,6 +265,14 @@ class Player(QObject):
             deck.output.setVolume(0.0)
         self._decks[self._active].output.setVolume(self._master)
 
+    def clear(self) -> None:
+        """Stop and drop current so Play cannot retry a dead track."""
+        self.stop()
+        self.current = None
+        self._advance_emitted = False
+        self._seek_hold_advance = False
+        self._incoming_ended = False
+
     def seek(self, ms: int) -> None:
         if self._crossfading:
             self._finish_crossfade(immediate=True)
@@ -264,6 +282,13 @@ class Player(QObject):
             position = min(position, duration)
         self.backend.setPosition(position)
         self._advance_emitted = False
+        # Scrubbing into the fade window must not immediately arm auto-advance.
+        if duration >= 12000:
+            fade = self._fade_ms(duration)
+            remaining = duration - position
+            self._seek_hold_advance = 0 <= remaining <= fade
+        else:
+            self._seek_hold_advance = False
 
     def set_volume(self, value: float) -> None:
         self._master = max(0.0, min(1.0, value))
