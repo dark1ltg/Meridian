@@ -22,6 +22,8 @@ from tests.smoke_checks import (
     check_severity_5_10_guards,
     check_severity_5_9_guards,
     check_severity_6_8_guards,
+    check_severity_7_8_guards,
+    check_renew_explainer,
     check_sparse_mount_does_not_wipe,
     check_symlink_dir_does_not_prune,
     check_version,
@@ -107,6 +109,14 @@ def test_severity_5_10_guards(tmp_path: Path) -> None:
 
 def test_severity_5_9_guards(tmp_path: Path) -> None:
     check_severity_5_9_guards(tmp_path / "sev59.sqlite")
+
+
+def test_severity_7_8_guards() -> None:
+    check_severity_7_8_guards()
+
+
+def test_renew_explainer() -> None:
+    check_renew_explainer()
 
 
 def test_symlink_dir_does_not_prune(tmp_path: Path) -> None:

@@ -2,9 +2,16 @@
 
 All notable Meridian releases are listed here. Download AppImages from [Releases](https://github.com/dark1ltg/Meridian/releases).
 
-## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-09-11)
+## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-09-23)
 
-Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds optimization and bugfix hardening from full codebase reviews.
+Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds playback-credit, queue, and map-pin hardening.
+
+### 2026-09-23 refresh
+- Mid-fade map jumps credit an abandoned song once; clicking the outgoing star restarts it without an extra play count; re-clicking the incoming star still counts that start
+- Various Artists comps share one album anti-repeat bucket via album artist
+- Scan confidence ignores tagged BPM 0
+- Renew queue explains itself on first use (hover tooltip stays); later clicks skip the dialog
+- Pinned stars show a lock ring on the live map and the baked night sky
 
 ### Context queue
 - **Renew queue** rebuilds the context queue from the current Queue Matrix (lens neighborhood + mode + clock)

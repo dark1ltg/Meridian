@@ -221,8 +221,11 @@ class MainWindow(QMainWindow):
         renew_btn = QPushButton("Renew queue")
         renew_btn.setObjectName("ghostBtn")
         renew_btn.setToolTip(
-            "Renew Queue does the following:\n"
-            "Generates a new context queue from the current queue matrix."
+            "Pick a fresh set of songs from the mood neighborhood you’re looking at "
+            "(the listen matrix).\n\n"
+            "Not shuffle. Not skips. What’s already playing stays.\n"
+            "Wandering the map alone doesn’t change this list — Renew is how you "
+            "commit a new one."
         )
         renew_btn.setToolTipDuration(12000)
         renew_btn.clicked.connect(self._renew_queue)
@@ -340,9 +343,35 @@ class MainWindow(QMainWindow):
     def _reset_renew_streak(self) -> None:
         self._renew_streak = 0
 
+    def _confirm_renew_once(self) -> bool:
+        """First click: explain Renew like Rescan explains itself; then remember."""
+        if self.settings.value("ui/renew_explained", False, type=bool):
+            return True
+        reply = QMessageBox.information(
+            self,
+            "Renew the context queue?",
+            (
+                "Renew picks a fresh set of songs from the neighborhood you’re looking "
+                "at on the mood map (the listen matrix).\n\n"
+                "This is not shuffle, and it does not count replaced songs as skips. "
+                "What’s already playing stays put.\n\n"
+                "Moving the lens updates suggestions in the matrix; the queue itself "
+                "holds until it runs low or you Renew.\n\n"
+                "Continue?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+        self.settings.setValue("ui/renew_explained", True)
+        return True
+
     def _renew_queue(self) -> None:
         """New recommendation pass from the current matrix — not skips, not shuffle."""
         if self._closing or self._rebuild_lock:
+            return
+        if not self._confirm_renew_once():
             return
         prior = list(self.session_queue)
         ctx = self.current_context()
@@ -851,6 +880,22 @@ class MainWindow(QMainWindow):
         natural_advance = self._expect_natural_advance
         self._expect_natural_advance = False
 
+        # Mid-fade: re-activate the outgoing song like Prev (no double play_count).
+        if (
+            self.player.is_crossfading()
+            and self._crossfade_outgoing_id is not None
+            and track_id == self._crossfade_outgoing_id
+        ):
+            settle_finish = self._outgoing_settle_finish
+            self._clear_crossfade_credit()
+            if settle_finish:
+                self._listen_nudge(track_id, skipped=False)
+            if track_id in self.session_queue:
+                self.queue_index = self.session_queue.index(track_id)
+            self._rebuild_lock = False
+            self._play_restart(track_id)
+            return
+
         # Same track: restart audio without bumping play_count.
         if outgoing_id is not None and outgoing_id == track_id:
             # Mid natural fade: still finish-nudge the song that was ending.
@@ -860,6 +905,13 @@ class MainWindow(QMainWindow):
                 and self._crossfade_outgoing_id is not None
             ):
                 self._listen_nudge(self._crossfade_outgoing_id, skipped=False)
+            # Deferred fade-in play must land before we clear credit and restart.
+            if (
+                self.player.is_crossfading()
+                and self._pending_play_credit is not None
+                and self._pending_play_credit == track_id
+            ):
+                self._commit_play(track_id)
             self._clear_crossfade_credit()
             self.player.stop()
             self.player.play_track(track)
@@ -890,6 +942,8 @@ class MainWindow(QMainWindow):
             ):
                 pos = int(self.player.backend.position() or 0)
                 self._credit_listen(pending, position_ms=pos)
+                # play_id's later abandon path must not credit this id again.
+                self._abandon_credited_id = pending
 
         self._pending_play_credit = None
         self._last_hard_play_credit = None

@@ -25,6 +25,12 @@ MID_CONFIDENCE_ALPHA = 200
 MID_CONFIDENCE_OPACITY = 0.78
 LOW_CONFIDENCE_OPACITY = 0.55
 
+# Pinned stars: bright lock ring so “you placed this” reads at a glance.
+PIN_RING_HEX = "#F4F7FF"
+PIN_RING_QCOLOR = QColor(PIN_RING_HEX)
+PIN_RING_WIDTH = 1.8
+PIN_HEAD_RADIUS = 1.6
+
 STAR_RADIUS = {
     Quadrant.NOW: 6.8,
     Quadrant.DEEP: 6.4,

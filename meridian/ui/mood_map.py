@@ -38,6 +38,9 @@ from meridian.ui.palette import (
     LOW_TRUST_QCOLOR,
     MID_CONFIDENCE_ALPHA,
     MID_CONFIDENCE_OPACITY,
+    PIN_HEAD_RADIUS,
+    PIN_RING_QCOLOR,
+    PIN_RING_WIDTH,
     PLAYLIST_QCOLOR,
     STAR_RADIUS,
     STAR_Z,
@@ -87,6 +90,18 @@ class TrackStar(QGraphicsEllipseItem):
         self._glow.setZValue(-1)
         self._glow.hide()
 
+        # Lock ring + tack head — visible only when the track is pinned.
+        self._pin_ring = QGraphicsEllipseItem(self)
+        self._pin_ring.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+        self._pin_ring.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self._pin_ring.setZValue(2)
+        self._pin_ring.hide()
+        self._pin_head = QGraphicsEllipseItem(self)
+        self._pin_head.setPen(QPen(Qt.PenStyle.NoPen))
+        self._pin_head.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self._pin_head.setZValue(3)
+        self._pin_head.hide()
+
         self._label = QGraphicsSimpleTextItem(self)
         self._label.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         # Accept clicks so double-click on the title still reaches the star.
@@ -112,8 +127,11 @@ class TrackStar(QGraphicsEllipseItem):
         r = STAR_RADIUS[ranked.quadrant]
         if ranked.track.loved:
             r += 0.8
+        if ranked.track.pinned:
+            r += 0.7
         self.setRect(-r, -r, r * 2, r * 2)
         conf = float(getattr(ranked.track, "mood_confidence", 0.5) or 0.5)
+        # Pins are locked truth — always draw as high-trust body color.
         if ranked.track.pinned or current:
             band = "high"
         elif conf >= CONFIDENCE_HIGH:
@@ -135,11 +153,19 @@ class TrackStar(QGraphicsEllipseItem):
             color = QColor(PLAYLIST_QCOLOR[ranked.quadrant])
             self.setOpacity(1.0)
         self.setBrush(QBrush(color))
+
+        pinned = bool(ranked.track.pinned)
         if current:
             pen = QPen(QColor("#ffffff"), 2.0)
             pen.setCosmetic(True)
             self.setPen(pen)
             self.setZValue(14)
+        elif pinned:
+            # Body uses a quiet edge; the lock ring carries the pin signal.
+            pen = QPen(QColor(8, 12, 22, 160), 1.0)
+            pen.setCosmetic(True)
+            self.setPen(pen)
+            self.setZValue(STAR_Z[ranked.quadrant] + 3)
         elif ranked.track.loved:
             pen = QPen(QColor("#fff4c2"), 1.4)
             pen.setCosmetic(True)
@@ -155,9 +181,27 @@ class TrackStar(QGraphicsEllipseItem):
             pen.setCosmetic(True)
             self.setPen(pen)
             self.setZValue(STAR_Z[ranked.quadrant])
+
+        if pinned:
+            ring_pad = 3.2 if current else 2.6
+            self._pin_ring.setRect(-r - ring_pad, -r - ring_pad, (r + ring_pad) * 2, (r + ring_pad) * 2)
+            ring_pen = QPen(PIN_RING_QCOLOR, PIN_RING_WIDTH)
+            ring_pen.setCosmetic(True)
+            self._pin_ring.setPen(ring_pen)
+            self._pin_ring.show()
+            hr = PIN_HEAD_RADIUS
+            self._pin_head.setRect(-hr, -r - ring_pad - hr * 2.2, hr * 2, hr * 2)
+            self._pin_head.setBrush(QBrush(PIN_RING_QCOLOR))
+            self._pin_head.show()
+        else:
+            self._pin_ring.hide()
+            self._pin_head.hide()
+
         tip = f"{ranked.track.label}\n{ranked.quadrant.value.upper()}"
         tip += f"\nconfidence {conf:.2f}"
-        if band == "low":
+        if pinned:
+            tip += " — pinned (locked by you)"
+        elif band == "low":
             tip += " — weak guess"
         elif band == "mid":
             tip += " — partial evidence"
@@ -166,10 +210,13 @@ class TrackStar(QGraphicsEllipseItem):
             tip += f"\n{note}"
         self.setToolTip(tip)
 
-        glow_r = r * 3.4
+        glow_r = r * (3.8 if pinned else 3.4)
         self._glow.setRect(-glow_r, -glow_r, glow_r * 2, glow_r * 2)
         glow_c = QColor(color)
-        glow_c.setAlpha(40 if band == "low" else (65 if band == "mid" else 90))
+        if pinned:
+            glow_c.setAlpha(110)
+        else:
+            glow_c.setAlpha(40 if band == "low" else (65 if band == "mid" else 90))
         self._glow.setBrush(QBrush(glow_c))
 
         title = ranked.track.label
@@ -179,13 +226,13 @@ class TrackStar(QGraphicsEllipseItem):
             title = title[:27] + "…"
         self._label.setText(title)
         br = self._label.boundingRect()
-        self._label.setPos(-br.width() / 2, r + 4)
+        self._label.setPos(-br.width() / 2, r + (8 if pinned else 4))
         if band == "low":
             self._label.setBrush(QBrush(QColor("#9AA8C0")))
         elif band == "mid":
             self._label.setBrush(QBrush(QColor("#c5cde0")))
         else:
-            self._label.setBrush(QBrush(QColor("#ffffff" if current else "#dce3f4")))
+            self._label.setBrush(QBrush(QColor("#ffffff" if current or pinned else "#dce3f4")))
 
     def set_lod(self, glow_a: float, label_on: bool) -> None:
         show_glow = glow_a > 0.02
@@ -575,6 +622,8 @@ class MoodMap(QGraphicsView):
             r = STAR_RADIUS[item.quadrant] * (0.55 if len(self._ranked) > 2500 else 0.85)
             if item.track.loved:
                 r += 0.5
+            if item.track.pinned:
+                r += 0.45
             band = _conf_band(item)
             if item.track.id == self._current_id:
                 color = QColor("#ffffff")
@@ -589,8 +638,22 @@ class MoodMap(QGraphicsView):
                 r *= 0.92
             else:
                 color = QColor(PLAYLIST_QCOLOR[item.quadrant])
+            painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(color))
             painter.drawEllipse(pos, r, r)
+            # Lock ring + tack so pins read on the baked sky (not only live LOD).
+            if item.track.pinned:
+                ring = QPen(PIN_RING_QCOLOR, 1.35)
+                painter.setPen(ring)
+                painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                painter.drawEllipse(pos, r + 2.4, r + 2.4)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(PIN_RING_QCOLOR))
+                painter.drawEllipse(
+                    QPointF(pos.x(), pos.y() - r - 3.2),
+                    PIN_HEAD_RADIUS * 0.85,
+                    PIN_HEAD_RADIUS * 0.85,
+                )
         painter.end()
         pix = QPixmap.fromImage(img)
         self._field.setPixmap(pix)

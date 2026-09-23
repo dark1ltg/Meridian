@@ -951,6 +951,46 @@ def check_mood_map_helpers() -> None:
     m._draw_backdrop()
     assert len(m._sky_chrome) == n0
 
+    # Pinned stars get a lock ring; low-confidence stay soft pewter.
+    from meridian.ui.mood_map import TrackStar
+
+    pinned_track = SimpleNamespace(
+        id=2,
+        valence=0.4,
+        energy=0.4,
+        label="Pinned Song — Artist",
+        loved=False,
+        pinned=True,
+        mood_confidence=0.2,
+        confidence_note="pinned",
+    )
+    pinned_ranked = SimpleNamespace(
+        track=pinned_track, quadrant=Quadrant.DEEP, fit=1.0, importance=1.0
+    )
+    pin_star = TrackStar(pinned_ranked)
+    assert pin_star._pin_ring.isVisible()
+    assert pin_star._pin_head.isVisible()
+    assert "pinned" in (pin_star.toolTip() or "").lower()
+    assert pin_star.opacity() == 1.0, "pins stay full-bright even if stored conf is low"
+
+    weak_track = SimpleNamespace(
+        id=3,
+        valence=0.5,
+        energy=0.5,
+        label="Guess",
+        loved=False,
+        pinned=False,
+        mood_confidence=0.2,
+        confidence_note="seed",
+    )
+    weak_ranked = SimpleNamespace(
+        track=weak_track, quadrant=Quadrant.SHELF, fit=0.5, importance=0.5
+    )
+    weak_star = TrackStar(weak_ranked)
+    assert not weak_star._pin_ring.isVisible()
+    assert weak_star.opacity() < 1.0
+    assert "weak guess" in (weak_star.toolTip() or "").lower()
+
 
 def check_severity_6_8_guards(db_path: Path) -> None:
     """Guards for sev 6–8: path genre, PCM seek, empty lens, album spread."""
@@ -1220,6 +1260,9 @@ def check_severity_5_10_guards(db_path: Path) -> None:
         analyzed=True,
     )
     assert _artist_key(va) == "real act"
+    from meridian.queue_engine import _album_key
+
+    assert _album_key(va) == "various artists|comp"
 
 
 def check_symlink_dir_does_not_prune(tmp_dir: Path) -> None:
@@ -1408,6 +1451,200 @@ def check_severity_5_9_guards(db_path: Path) -> None:
         lib.close()
 
 
+def check_severity_7_8_guards() -> None:
+    """Guards for sev 7–8: mid-fade map credit, VA album key, BPM 0 coerce."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from meridian.features import _coerce_bpm, mood_confidence
+    from meridian.library import Track
+    from meridian.queue_engine import _album_key, _artist_key
+    from meridian.ui.main_window import MainWindow
+
+    # BPM 0 must not count as evidence (scan uses the same coerce).
+    assert _coerce_bpm(0) is None and _coerce_bpm(0.0) is None
+    c_no, _ = mood_confidence(tag_key="metal", pcm_ok=False, bpm_ok=False)
+    c_yes, _ = mood_confidence(tag_key="metal", pcm_ok=False, bpm_ok=True)
+    assert c_no < c_yes, "bogus BPM 0 must not inflate scan confidence"
+
+    va_a = Track(
+        id=1,
+        path="/v1.mp3",
+        title="t1",
+        artist="Act One",
+        album="Comp",
+        albumartist="Various Artists",
+        genre="Pop",
+        duration_ms=1,
+        year=None,
+        bpm=None,
+        valence=0.5,
+        energy=0.5,
+        mood_confidence=0.5,
+        confidence_note="",
+        low_trust=False,
+        pinned=False,
+        loved=False,
+        play_count=0,
+        skip_count=0,
+        last_played=None,
+        added_at=0.0,
+        mtime=0.0,
+        analyzed=True,
+    )
+    va_b = Track(
+        id=2,
+        path="/v2.mp3",
+        title="t2",
+        artist="Act Two",
+        album="Comp",
+        albumartist="Various Artists",
+        genre="Pop",
+        duration_ms=1,
+        year=None,
+        bpm=None,
+        valence=0.5,
+        energy=0.5,
+        mood_confidence=0.5,
+        confidence_note="",
+        low_trust=False,
+        pinned=False,
+        loved=False,
+        play_count=0,
+        skip_count=0,
+        last_played=None,
+        added_at=0.0,
+        mtime=0.0,
+        analyzed=True,
+    )
+    assert _artist_key(va_a) == "act one" and _artist_key(va_b) == "act two"
+    assert _album_key(va_a) == _album_key(va_b) == "various artists|comp"
+
+    def _base_window() -> MainWindow:
+        w = MainWindow.__new__(MainWindow)
+        w._closing = False
+        w._expect_natural_advance = False
+        w._last_hard_play_credit = None
+        w._abandon_credited_id = None
+        w._rebuild_lock = False
+        w._pending_plan_refresh = False
+        w.plan = None
+        w.played_history = []
+        w.skips_window = []
+        w.session_queue = [1, 2, 3]
+        w.queue_index = 1
+        w.library = MagicMock()
+        w.player = MagicMock()
+        w.transport = MagicMock()
+        w._flush_pending_plan_refresh = lambda: None  # type: ignore[method-assign]
+        w._fill_queue = lambda: None  # type: ignore[method-assign]
+        return w
+
+    # Mid-fade map jump to a third track: abandon incoming once (no double skip).
+    w = _base_window()
+    w._crossfade_outgoing_id = 1
+    w._outgoing_settle_finish = False
+    w._pending_play_credit = 2
+    track3 = SimpleNamespace(
+        id=3, path="/t3.mp3", short_title="c", artist="A", album="B", loved=False
+    )
+    w.library.get.return_value = track3
+    w.library.is_playback_denied.return_value = False
+    w.player.current = SimpleNamespace(id=2)
+    w.player.backend.position.return_value = 500
+    w.player.is_crossfading.return_value = True
+    credited: list[int] = []
+    w._credit_listen = lambda tid, *, position_ms: credited.append(tid)  # type: ignore[method-assign]
+    w._commit_play = lambda tid: None  # type: ignore[method-assign]
+    w._listen_nudge = lambda tid, *, skipped: None  # type: ignore[method-assign]
+    from pathlib import Path as P
+
+    with patch.object(P, "exists", return_value=True):
+        MainWindow.play_id(w, 3)
+    assert credited.count(2) == 1, "abandoned mid-fade incoming must credit once"
+
+    # Mid-fade click outgoing: restart without play_count bump.
+    w2 = _base_window()
+    w2._crossfade_outgoing_id = 1
+    w2._outgoing_settle_finish = True
+    w2._pending_play_credit = 2
+    track1 = SimpleNamespace(
+        id=1, path="/t1.mp3", short_title="a", artist="A", album="B", loved=False
+    )
+    w2.library.get.return_value = track1
+    w2.library.is_playback_denied.return_value = False
+    w2.player.current = SimpleNamespace(id=2)
+    w2.player.backend.position.return_value = 500
+    w2.player.is_crossfading.return_value = True
+    commits: list[int] = []
+    restarts: list[int] = []
+    nudges: list[tuple] = []
+    w2._commit_play = lambda tid: commits.append(tid)  # type: ignore[method-assign]
+    w2._play_restart = lambda tid: restarts.append(tid)  # type: ignore[method-assign]
+    w2._listen_nudge = lambda tid, *, skipped: nudges.append((tid, skipped))  # type: ignore[method-assign]
+    w2._credit_listen = lambda tid, *, position_ms: None  # type: ignore[method-assign]
+    w2._clear_crossfade_credit = lambda: None  # type: ignore[method-assign]
+    with patch.object(P, "exists", return_value=True):
+        MainWindow.play_id(w2, 1)
+    assert restarts == [1] and commits == [], "map→outgoing mid-fade must restart, not play-count"
+    assert (1, False) in nudges
+
+    # Mid-fade re-click incoming: deferred play must still land.
+    w3 = _base_window()
+    w3._crossfade_outgoing_id = 1
+    w3._outgoing_settle_finish = True
+    w3._pending_play_credit = 2
+    track2 = SimpleNamespace(
+        id=2, path="/t2.mp3", short_title="b", artist="A", album="B", loved=False
+    )
+    w3.library.get.return_value = track2
+    w3.library.is_playback_denied.return_value = False
+    w3.player.current = SimpleNamespace(id=2)
+    w3.player.backend.position.return_value = 500
+    w3.player.is_crossfading.return_value = True
+    commits3: list[int] = []
+    nudges3: list[tuple] = []
+    w3._commit_play = lambda tid: commits3.append(tid)  # type: ignore[method-assign]
+    w3._listen_nudge = lambda tid, *, skipped: nudges3.append((tid, skipped))  # type: ignore[method-assign]
+    w3._clear_crossfade_credit = MagicMock()
+    with patch.object(P, "exists", return_value=True):
+        MainWindow.play_id(w3, 2)
+    assert commits3 == [2], "re-click incoming mid-fade must commit pending play"
+    assert (1, False) in nudges3
+
+
+def check_renew_explainer() -> None:
+    """First Renew click explains; later clicks skip the dialog."""
+    from unittest.mock import MagicMock, patch
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from meridian.ui.main_window import MainWindow
+
+    w = MainWindow.__new__(MainWindow)
+    w.settings = MagicMock()
+
+    w.settings.value.return_value = False
+    with patch.object(QMessageBox, "information", return_value=QMessageBox.StandardButton.Yes) as info:
+        assert MainWindow._confirm_renew_once(w) is True
+    info.assert_called_once()
+    w.settings.setValue.assert_called_with("ui/renew_explained", True)
+
+    w.settings.value.return_value = True
+    w.settings.setValue.reset_mock()
+    with patch.object(QMessageBox, "information") as info2:
+        assert MainWindow._confirm_renew_once(w) is True
+    info2.assert_not_called()
+    w.settings.setValue.assert_not_called()
+
+    w.settings.value.return_value = False
+    w.settings.setValue.reset_mock()
+    with patch.object(QMessageBox, "information", return_value=QMessageBox.StandardButton.No) as info3:
+        assert MainWindow._confirm_renew_once(w) is False
+    info3.assert_called_once()
+    w.settings.setValue.assert_not_called()
+
+
 def run_all_smoke_checks(tmp_dir: Path) -> None:
     """Run every smoke check (used by scripts/smoke_test.py)."""
     check_version()
@@ -1430,3 +1667,5 @@ def run_all_smoke_checks(tmp_dir: Path) -> None:
     check_severity_6_8_guards(tmp_dir / "sev68.sqlite")
     check_severity_5_10_guards(tmp_dir / "sev510.sqlite")
     check_severity_5_9_guards(tmp_dir / "sev59.sqlite")
+    check_severity_7_8_guards()
+    check_renew_explainer()

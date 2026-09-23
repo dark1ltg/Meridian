@@ -94,11 +94,15 @@ def _artist_key(track: Track) -> str:
 
 
 def _album_key(track: Track) -> str:
+    """Album anti-repeat key — prefer albumartist so VA comps share one album bucket."""
     album = (track.album or "").strip().lower()
     if not album:
         return ""
-    artist = _artist_key(track)
-    return f"{artist}|{album}" if artist else album
+    aa = (track.albumartist or "").strip().lower()
+    if aa:
+        return f"{aa}|{album}"
+    ar = (track.artist or "").strip().lower()
+    return f"{ar}|{album}" if ar else album
 
 
 def _base_score(item: RankedTrack) -> float:

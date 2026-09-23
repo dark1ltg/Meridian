@@ -13,6 +13,7 @@ from meridian.features import (
     genre_seed,
     mood_confidence,
     read_tags,
+    _coerce_bpm,
 )
 from meridian.library import Library
 
@@ -131,7 +132,8 @@ class ScanWorker(QObject):
                         replaygain_db=tags.get("replaygain_db"),
                     )
                     # Provisional score (no PCM yet) — same weights as analyze, pcm_ok=False.
-                    bpm = tags.get("bpm")
+                    # Coerce BPM so tag "0" / empty does not falsely credit confidence.
+                    bpm = _coerce_bpm(tags.get("bpm"))
                     conf, note = mood_confidence(
                         tag_key=seed.tag_key,
                         path_key=seed.path_key,
