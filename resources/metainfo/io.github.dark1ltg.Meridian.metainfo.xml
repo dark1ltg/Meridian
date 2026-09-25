@@ -43,13 +43,13 @@
   </keywords>
   <content_rating type="oars-1.1" />
   <releases>
-    <release version="1.3.6" date="2026-09-23">
+    <release version="1.3.6" date="2026-09-25">
       <description>
         <p>
-          Renew Queue plus an AppImage refresh: mid-fade play/skip credit,
-          VA album anti-repeat, BPM 0 scan confidence, a first-run Renew
-          explanation, and lock rings on pinned stars. Keeps 1.3.5 mood-map
-          playback.
+          AppImage refresh: mood-map import UX (seed scatter, density bake,
+          sticky scan status), plus prior Renew Queue hardening — mid-fade
+          play/skip credit, VA album anti-repeat, BPM 0 scan confidence,
+          first-run Renew tip, and lock rings on pinned stars.
         </p>
       </description>
     </release>
