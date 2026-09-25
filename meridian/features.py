@@ -636,6 +636,25 @@ def _path_genre_key(path: str | None) -> str | None:
     return keys[0] if keys else None
 
 
+# Full range for seed-local scatter (± half of this around the genre neighborhood).
+# ±0.07 keeps OC Remix / OST / game cohorts readable as clouds without leaving the pocket.
+SEED_JITTER_SPREAD = 0.14
+
+
+def _path_hash_units(path: str) -> tuple[float, float]:
+    """Stable [0, 1) pair from path via blake2b (process/rescan stable)."""
+    digest = hashlib.blake2b(path.encode("utf-8", errors="replace"), digest_size=8).digest()
+    h_v = int.from_bytes(digest[:4], "little")
+    h_e = int.from_bytes(digest[4:], "little")
+    return (h_v % 1000) / 1000.0, (h_e % 1000) / 1000.0
+
+
+def _path_jitter_deltas(path: str, *, spread: float = SEED_JITTER_SPREAD) -> tuple[float, float]:
+    """Return (d_valence, d_energy) in roughly ±spread/2 from a stable path hash."""
+    u_v, u_e = _path_hash_units(path)
+    return (u_v - 0.5) * spread, (u_e - 0.5) * spread
+
+
 def genre_seed(
     genre: str,
     title: str,
@@ -685,9 +704,18 @@ def genre_seed(
     if fn and fn.lower() not in blob.lower():
         blob = f"{blob} {fn}"
     dv, de = _keyword_shift(blob, skip_words=skip_words)
+    valence = float(np.clip(valence + dv, 0.03, 0.97))
+    energy = float(np.clip(energy + de, 0.03, 0.97))
+    # Stable per-path scatter so same-genre cohorts form clouds, not single pixels.
+    # Applied at seed time (scan + analyze base) so large imports read as a night sky
+    # before PCM tidy finishes.
+    if path:
+        jv, je = _path_jitter_deltas(path, spread=SEED_JITTER_SPREAD)
+        valence = float(np.clip(valence + jv, 0.03, 0.97))
+        energy = float(np.clip(energy + je, 0.03, 0.97))
     return MoodSeed(
-        valence=float(np.clip(valence + dv, 0.03, 0.97)),
-        energy=float(np.clip(energy + de, 0.03, 0.97)),
+        valence=valence,
+        energy=energy,
         tag_key=tag_key,
         path_key=path_key,
         keyword_hit=bool(abs(dv) > 1e-9 or abs(de) > 1e-9),
@@ -702,11 +730,9 @@ def _stable_jitter(path: str) -> tuple[float, float]:
 
     Uses blake2b (not Python hash) so positions stay fixed across rescans/processes.
     """
-    digest = hashlib.blake2b(path.encode("utf-8", errors="replace"), digest_size=8).digest()
-    h_v = int.from_bytes(digest[:4], "little")
-    h_e = int.from_bytes(digest[4:], "little")
-    valence = DEFAULT_VALENCE + ((h_v % 1000) / 1000.0 - 0.5) * 0.06
-    energy = DEFAULT_ENERGY + ((h_e % 1000) / 1000.0 - 0.5) * 0.06
+    dv, de = _path_jitter_deltas(path, spread=0.06)
+    valence = DEFAULT_VALENCE + dv
+    energy = DEFAULT_ENERGY + de
     return (
         float(np.clip(valence, 0.03, 0.97)),
         float(np.clip(energy, 0.03, 0.97)),

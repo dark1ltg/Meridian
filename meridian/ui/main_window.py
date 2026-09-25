@@ -90,6 +90,9 @@ class MainWindow(QMainWindow):
         self._outgoing_settle_finish: bool = False
         self._expect_natural_advance: bool = False
         self._host_codec_sticky = False
+        self._job_status: str | None = None
+        self._analyze_map_tick = 0
+        self._last_analyze_map_refresh = 0.0
         self._duration = 0
         self._rebuild_lock = False
         # Listen-nudge / lens refresh requested while play_id holds the rebuild lock.
@@ -121,8 +124,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(400, self.start_scan)
         QTimer.singleShot(900, self._maybe_warn_libx264)
 
-    def _set_status(self, message: str) -> None:
-        """Set the status bar, keeping a sticky libx264 tip when the host lacks it."""
+    def _paint_status(self, message: str) -> None:
+        """Write the status strip, keeping a sticky libx264 tip when the host lacks it."""
         text = message or ""
         if self._host_codec_sticky and should_warn_missing_libx264():
             tip = libx264_missing_status()
@@ -131,6 +134,25 @@ class MainWindow(QMainWindow):
         else:
             self._host_codec_sticky = False
         self.status_label.setText(text)
+        if self._job_status:
+            self.status_label.setStyleSheet("color: #c5cde0; font-weight: 500;")
+        else:
+            self.status_label.setStyleSheet("")
+
+    def _set_job_status(self, message: str) -> None:
+        """Sticky scan/analyze line — owns the strip until cleared."""
+        self._job_status = message or ""
+        self._paint_status(self._job_status)
+
+    def _clear_job_status(self) -> None:
+        self._job_status = None
+        self.status_label.setStyleSheet("")
+
+    def _set_status(self, message: str) -> None:
+        """Ephemeral tips (hover, lens, queue). Does not overwrite an active job line."""
+        if self._job_status:
+            return
+        self._paint_status(message)
 
     def _maybe_warn_libx264(self) -> None:
         """AppImage keeps libx264 on the host — tell the user if playback may be broken."""
@@ -550,7 +572,7 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         if self._lingering_workers:
-            self._set_status("Still finishing previous scan/analyze…")
+            self._set_job_status("Still finishing previous scan/analyze…")
             return
         if self._scan_thread and self._scan_thread.isRunning():
             return
@@ -572,10 +594,10 @@ class MainWindow(QMainWindow):
             return
         # Must fully stop analyze before dirtying the DB / starting a new scan.
         if not self._stop_analyze(wait_ms=20000) or self._lingering_workers:
-            self._set_status("Still finishing previous analyze — try Rescan again in a moment.")
+            self._set_job_status("Still finishing previous analyze — try Rescan again in a moment.")
             return
         pending = self.library.mark_all_pending_analysis()
-        self._set_status(f"Rescanning library ({pending} tracks to re-analyze)…")
+        self._set_job_status(f"Rescanning library ({pending} tracks to re-analyze)…")
         self._start_scan_worker(force=True, on_finished=self._rescan_done)
 
     def _rescan_done(self, count: int) -> None:
@@ -583,9 +605,10 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         if count < 0:
+            self._clear_job_status()
             self._set_status("Rescan failed.")
             return
-        self._set_status(f"Rescanned {count} files. Re-analyzing waveforms…")
+        self._set_job_status(f"Rescanned {count} files. Re-analyzing waveforms…")
         self.refresh_plan(rebuild_queue=False)
         self.start_analyze()
 
@@ -594,11 +617,11 @@ class MainWindow(QMainWindow):
             return
         if self._lingering_workers:
             # Do not start a second scan while a timed-out worker still holds the DB.
-            self._set_status("Waiting for previous scan/analyze to finish…")
+            self._set_job_status("Waiting for previous scan/analyze to finish…")
             return
         if self._scan_thread and self._scan_thread.isRunning():
             return
-        self._set_status("Scanning local files…")
+        self._set_job_status("Scanning local files…")
         self._start_scan_worker(force=False, on_finished=self._scan_done)
 
     def _start_scan_worker(self, *, force: bool, on_finished) -> None:
@@ -608,9 +631,7 @@ class MainWindow(QMainWindow):
         # Always queue UI slots — Python lambdas default to DirectConnection and
         # would run on the worker thread (unsafe for widgets / QThread.wait).
         queued = Qt.ConnectionType.QueuedConnection
-        self._scan_worker.progress.connect(
-            lambda n: self._set_status(f"Found {n}"), queued
-        )
+        self._scan_worker.progress.connect(self._set_job_status, queued)
         self._scan_worker.failed.connect(
             lambda m: QMessageBox.warning(self, "Scan failed", m), queued
         )
@@ -735,9 +756,10 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         if added < 0:
+            self._clear_job_status()
             self._set_status("Scan failed.")
             return
-        self._set_status(f"Indexed {added} new files. Mapping mood…")
+        self._set_job_status(f"Indexed {added} new files. Mapping mood…")
         self.refresh_plan(rebuild_queue=False)
         self.start_analyze()
 
@@ -747,28 +769,40 @@ class MainWindow(QMainWindow):
         if self._lingering_workers:
             # Avoid overlapping ffmpeg / abort state with a timed-out analyze.
             self._pending_analyze_after_linger = True
-            self._set_status("Waiting for previous analyze to finish…")
+            self._set_job_status("Waiting for previous analyze to finish…")
             return
         if self._analyze_thread and self._analyze_thread.isRunning():
             return
         if self.library.closed:
             return
         if not self.library.unanalyzed_ids():
+            self._clear_job_status()
             self._set_status("Mood map updated from local audio.")
             return
         self._pending_analyze_after_linger = False
+        self._analyze_map_tick = 0
+        self._last_analyze_map_refresh = 0.0
         self._analyze_gen += 1
         gen = self._analyze_gen
         self._analyze_worker = AnalyzeWorker(self.library)
         self._analyze_thread = start_worker(self._analyze_worker)
         queued = Qt.ConnectionType.QueuedConnection
-        self._analyze_worker.progress.connect(
-            lambda name, i, n: self._set_status(f"Listening to waveform {i}/{n}: {name}"),
-            queued,
-        )
+        self._analyze_worker.progress.connect(self._on_analyze_progress, queued)
         self._analyze_worker.finished.connect(
             lambda g=gen: self._analyze_done(g), queued
         )
+
+    def _on_analyze_progress(self, name: str, i: int, n: int) -> None:
+        self._set_job_status(f"Listening to waveform {i}/{n}: {name}")
+        # Throttle map refresh so the sky opens during long analyzes without
+        # rebaking on every track (and without waiting for the full tidy pass).
+        self._analyze_map_tick += 1
+        now = time()
+        due = self._analyze_map_tick >= 40 and (now - self._last_analyze_map_refresh) >= 1.5
+        if due or (i == 1 and self._last_analyze_map_refresh <= 0.0):
+            self._analyze_map_tick = 0
+            self._last_analyze_map_refresh = now
+            self.refresh_plan(rebuild_queue=False)
 
     def _analyze_done(self, gen: int) -> None:
         # Ignore stale workers that finished after abort/rescan/quit.
@@ -781,12 +815,14 @@ class MainWindow(QMainWindow):
         self._reap_worker_thread(thread, worker, wait_ms=3000)
         if self._closing:
             return
-        self.refresh_plan(rebuild_queue=False)
         # If scan added more tracks while we were analyzing, finish them.
         if self.library.unanalyzed_ids():
-            self._set_status("More tracks to map…")
+            self._set_job_status("More tracks to map…")
+            self.refresh_plan(rebuild_queue=False)
             self.start_analyze()
             return
+        self._clear_job_status()
+        self.refresh_plan(rebuild_queue=False)
         self._set_status("Mood map updated from local audio.")
 
     def _map_activated(self, track_id: int) -> None:
