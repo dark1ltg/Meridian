@@ -2,9 +2,15 @@
 
 All notable Meridian releases are listed here. Download AppImages from [Releases](https://github.com/dark1ltg/Meridian/releases).
 
-## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-09-23)
+## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-09-25)
 
-Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds playback-credit, queue, and map-pin hardening.
+Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds playback-credit, queue, map-pin hardening, and mood-map import UX fixes.
+
+### 2026-09-25 refresh
+- Sparse mood-map after large import: stable path-hash jitter at genre seed time so same-genre cohorts form clouds after scan (Rescan needed for existing DBs)
+- Density-aware starfield bake for large libraries; throttled map refresh during analyze
+- Sticky job status vs hover tips; richer scan progress (folder + indexed counts)
+- Tests lock 1-song=1-star mood-map cardinality
 
 ### 2026-09-23 refresh
 - Mid-fade map jumps credit an abandoned song once; clicking the outgoing star restarts it without an extra play count; re-clicking the incoming star still counts that start
@@ -51,7 +57,7 @@ Renew Queue: an explicit new recommendation pass from the current listen matrix,
 
 ### Docs / packaging
 - README and AppStream note Renew queue; AppImage baseline remains Ubuntu 24.04 / glibc 2.38+
-- Release AppImage refreshed 2026-09-11 with the optimization and bugfix pass above
+- Release AppImage refreshed 2026-09-25 with mood-map import UX (seed jitter, density bake, sticky status)
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-09)
 
