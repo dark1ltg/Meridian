@@ -1,0 +1,61 @@
+# Refresh v1.3.6 release AppImage from a SHA-locked staging URL (or rebuild).
+name: Refresh AppImage (v1.3.6)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/refresh-appimage.yml"
+      - "packaging/.trigger-appimage-refresh"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-appimage-v136
+  cancel-in-progress: false
+
+jobs:
+  upload-release-appimage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch staged AppImage
+        env:
+          # Staged copy of local Meridian-x86_64.AppImage (mood-map import UX @ 4a8368e;
+          # master squash 149063b adds tests/docs only — runtime identical).
+          APPIMAGE_URL: https://files.catbox.moe/c7zksh.AppImage
+          EXPECT_SHA256: b38592ac2f4545bf8695c888d428c9ce30f5da853a44be43c6d14936b94a2384
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          curl -fL --retry 5 -o dist/Meridian-x86_64.AppImage "$APPIMAGE_URL"
+          echo "$EXPECT_SHA256  dist/Meridian-x86_64.AppImage" | sha256sum -c -
+          chmod +x dist/Meridian-x86_64.AppImage
+          sha256sum dist/Meridian-x86_64.AppImage | tee dist/Meridian-x86_64.AppImage.sha256
+
+      - name: Upload to GitHub Release v1.3.6
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA=$(cut -d' ' -f1 dist/Meridian-x86_64.AppImage.sha256)
+          COMMIT=${GITHUB_SHA}
+          NOTES="Meridian 1.3.6 — AppImage refreshed 2026-09-25. Version stays **1.3.6**.
+
+          ## This refresh (mood-map import UX)
+          - Sparse sky after large import: stable path-hash jitter at genre seed time so same-genre cohorts form clouds after scan
+          - Density-aware starfield bake for large libraries; throttled map refresh during analyze
+          - Sticky job status vs hover tips; richer scan progress (folder + indexed counts)
+          - Tests lock **1 song = 1 star** mood-map cardinality
+
+          Release packaging commit: \`${COMMIT}\`.
+          AppImage SHA256: \`${SHA}\`
+
+          ## Still in 1.3.6
+          Renew Queue rebuilds the context queue from the current listen matrix without counting replaced songs as skips. Prior refresh (2026-09-23): mid-fade credit, VA album anti-repeat, BPM 0 scan confidence, Renew first-run tip, pin lock rings."
+          gh release upload v1.3.6 dist/Meridian-x86_64.AppImage --clobber
+          gh release edit v1.3.6 --title "Meridian 1.3.6" --notes "$NOTES"
+          echo "Uploaded https://github.com/dark1ltg/Meridian/releases/download/v1.3.6/Meridian-x86_64.AppImage"
