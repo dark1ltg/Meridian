@@ -34,6 +34,7 @@ def _is_under(path: Path, root: Path) -> bool:
 
 
 class ScanWorker(QObject):
+    # Display-ready progress line (folder + file/counts). UI treats as sticky job text.
     progress = Signal(str)
     finished = Signal(int)
     failed = Signal(str)
@@ -72,9 +73,13 @@ class ScanWorker(QObject):
             root_resolved = _resolve(root)
             if root_resolved is None:
                 continue
+            root_name = root.name or str(root)
+            self.progress.emit(f"Scanning {root_name}…")
             root_found: list[str] = []
             walk_ok = True
             skipped_dirs: list[Path] = []
+            seen_in_root = 0
+            skipped_mtime = 0
 
             def on_walk_error(_err: OSError) -> None:
                 nonlocal walk_ok
@@ -107,6 +112,7 @@ class ScanWorker(QObject):
                             continue
                     path_str = str(path)
                     root_found.append(path_str)
+                    seen_in_root += 1
                     try:
                         st = os.stat(path_str)
                     except OSError:
@@ -117,8 +123,20 @@ class ScanWorker(QObject):
                         and mtime is not None
                         and abs(mtime - st.st_mtime) < 0.5
                     ):
+                        skipped_mtime += 1
+                        # Heartbeat on mtime-skip walks so Rescan/Add never looks stuck.
+                        if skipped_mtime == 1 or skipped_mtime % 75 == 0:
+                            self.progress.emit(
+                                f"Scanning {root_name}… ({seen_in_root} files seen)"
+                            )
                         continue
-                    self.progress.emit(name)
+                    try:
+                        rel = str(Path(path_str).relative_to(root))
+                    except ValueError:
+                        rel = name
+                    self.progress.emit(
+                        f"Scanning {root_name}: {rel} · indexed {added + 1}"
+                    )
                     tags = read_tags(path_str)
                     seed = genre_seed(
                         tags["genre"],

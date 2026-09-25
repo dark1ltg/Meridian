@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import hypot
+from math import hypot, log2
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -599,6 +599,20 @@ class MoodMap(QGraphicsView):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.scale(FIELD_SCALE, FIELD_SCALE)
         painter.setPen(Qt.PenStyle.NoPen)
+        n_ranked = len(self._ranked)
+        # Large libraries: keep a readable minimum radius and brighten stacked cores
+        # instead of shrinking stars into invisibility (was 0.55 above 2500).
+        if n_ranked > 2500:
+            base_scale = 0.72
+            density_mode = True
+        elif n_ranked > 1200:
+            base_scale = 0.80
+            density_mode = True
+        else:
+            base_scale = 0.85
+            density_mode = False
+        low_alpha = min(210, LOW_TRUST_ALPHA + 45) if density_mode else LOW_TRUST_ALPHA
+
         # Draw lower-confidence stars first so bright / high-trust read on top.
         def _conf_band(r: RankedTrack) -> int:
             if r.track.pinned:
@@ -617,9 +631,30 @@ class MoodMap(QGraphicsView):
                 STAR_Z[r.quadrant] + (2 if r.track.loved else 0),
             ),
         )
+        # Cheap density underlay so stacked cohorts read as bright regions, not emptiness.
+        if density_mode and n_ranked:
+            cell = 10.0
+            counts: dict[tuple[int, int], int] = {}
+            for item in order:
+                pos = self._positions[item.track.id]
+                key = (int(pos.x() // cell), int(pos.y() // cell))
+                counts[key] = counts.get(key, 0) + 1
+            for (cx, cy), count in counts.items():
+                if count < 3:
+                    continue
+                # log2 so a 500-stack glows without blowing out the whole map.
+                alpha = min(100, 18 + int(22 * log2(count)))
+                glow = QColor(160, 178, 220, alpha)
+                painter.setBrush(QBrush(glow))
+                radius = 5.0 + min(12.0, count * 0.08)
+                painter.drawEllipse(
+                    QPointF(cx * cell + cell * 0.5, cy * cell + cell * 0.5),
+                    radius,
+                    radius,
+                )
         for item in order:
             pos = self._positions[item.track.id]
-            r = STAR_RADIUS[item.quadrant] * (0.55 if len(self._ranked) > 2500 else 0.85)
+            r = STAR_RADIUS[item.quadrant] * base_scale
             if item.track.loved:
                 r += 0.5
             if item.track.pinned:
@@ -630,7 +665,7 @@ class MoodMap(QGraphicsView):
                 r += 0.6
             elif band == 0:
                 color = QColor(LOW_TRUST_QCOLOR)
-                color.setAlpha(LOW_TRUST_ALPHA)
+                color.setAlpha(low_alpha)
                 r *= 0.85
             elif band == 1:
                 color = QColor(PLAYLIST_QCOLOR[item.quadrant])
@@ -638,6 +673,8 @@ class MoodMap(QGraphicsView):
                 r *= 0.92
             else:
                 color = QColor(PLAYLIST_QCOLOR[item.quadrant])
+            # Floor radius so large-library stacks stay pickable at default zoom.
+            r = max(r, 3.2 if density_mode else 2.6)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(color))
             painter.drawEllipse(pos, r, r)
