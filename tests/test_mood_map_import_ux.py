@@ -88,10 +88,60 @@ def test_mood_map_plots_full_ranked_set_and_density_bake() -> None:
     m.set_tracks(ranked, None)
     assert len(m._ranked) == 3000
     assert len(m._positions) == 3000
+    # Field signature enumerates every track id — bake does not merge/cull stars.
+    _cid, parts = m._field_signature()
+    assert len(parts) == 3000
+    assert {p[0] for p in parts} == set(range(1, 3001))
     # Density underlay + floor radius: bake must produce a non-null field pixmap.
     pix = m._field.pixmap()
     assert not pix.isNull()
     assert pix.width() > 0 and pix.height() > 0
+
+
+def test_one_song_one_star_cardinality_close_coords() -> None:
+    """Product rule: N distinct tracks → N map stars/positions even when clustered."""
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+
+    from meridian.queue_engine import Quadrant
+    from meridian.ui.mood_map import MoodMap
+
+    n = 64
+    m = MoodMap()
+    ranked = []
+    for i in range(n):
+        # Tight neighborhood (analysis-like cluster), not identical seed collapse.
+        track = SimpleNamespace(
+            id=1000 + i,
+            valence=0.50 + (i % 8) * 0.002,
+            energy=0.44 + (i // 8) * 0.002,
+            label=f"Close{i}",
+            loved=False,
+            pinned=False,
+            mood_confidence=0.7,
+            confidence_note="analyzed",
+        )
+        ranked.append(
+            SimpleNamespace(
+                track=track,
+                quadrant=Quadrant.FILL,
+                fit=0.9,
+                importance=0.5,
+            )
+        )
+    m.set_tracks(ranked, None)
+    assert len(m._ranked) == n
+    assert len(m._positions) == n
+    assert set(m._ranked) == {1000 + i for i in range(n)}
+    assert set(m._positions) == set(m._ranked)
+    # Grid indexes every star for sky pick — no merged pickable entity.
+    grid_ids = {tid for cell in m._star_grid.values() for tid, _ in cell}
+    assert grid_ids == set(m._ranked)
+    _cid, parts = m._field_signature()
+    assert len(parts) == n
 
 
 def test_scan_progress_includes_folder_and_scanning_verb(tmp_path: Path) -> None:
