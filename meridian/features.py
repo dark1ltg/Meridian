@@ -1,1 +1,1 @@
-PLACEHOLDER_LOAD_FROM_JSON
+{{file:/home/dark1ltg/Projects/Meridian/meridian/features.py}}
