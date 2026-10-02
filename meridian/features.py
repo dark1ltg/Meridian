@@ -1,1 +1,4 @@
-@/home/dark1ltg/.cursor/projects/home-dark1ltg/agent-tools/792a5722-6ef5-4fca-a9b3-78e488f0a77d.txt
+from __future__ import annotations
+
+# PLACEHOLDER_WILL_REPLACE — if you see this the upload failed
+raise RuntimeError('features.py stub — replace with real source')
