@@ -42,10 +42,11 @@ That gives a starting “neighborhood” — like “this is probably metal-ener
 
 ### 3. The short listen (`ffmpeg`)
 
-It asks your computer’s `ffmpeg` for that ~28s of audio.
+It asks your computer’s `ffmpeg` for that ~28s of audio. Meridian does **not** ship `ffmpeg` inside the AppImage — it must be on the host `PATH`.
 
 - If the first grab is silence, it tries another spot.  
 - On long tracks, two tastes are compared. If the intro and the drop feel like different songs, it keeps the **steadier** taste instead of averaging them into something fake in the middle.
+- If `ffmpeg` is missing, Meridian still plays music, but analyze leaves stars on genre/folder seeds instead of inventing a waveform placement. Startup shows a warning dialog and a sticky status tip (same idea as the missing-libx264 tip).
 
 If **aubio** is installed, it also hears tempo / beat-ish clues. Without aubio, Meridian still works; it just has less rhythm info.
 
@@ -72,6 +73,8 @@ Simple rules of thumb Meridian tries to follow:
 ### 5. Save the result
 
 It stores the map position, a confidence note (“how sure are we”), and a few leftover clues (brightness, flux, steady rhythm) for later tidy-ups — **without** listening again.
+
+**Rescan / mtime refresh:** when Meridian clears the “analyzed” flag so a track will be listened to again, it still **keeps the existing PCM mood coords** if leftover brightness/flux clues remain — so Rescan does not flash stars back to genre seeds until a new successful decode lands.
 
 ### 6. Tidy the whole library (after many tracks)
 

@@ -69,6 +69,8 @@ Low confidence means “take this with a grain of salt” in the UI — it doesn
 The star’s position is written to the library.  
 If you dragged and **pinned** a star, analyze will not overwrite that pin.
 
+**Rescan does not wipe a real listen:** clearing `analyzed` to re-queue decode still preserves valence/energy (and related PCM fields) when prior brightness/flux clues are still on the row. Stars stay where the last successful listen put them until a new decode replaces them.
+
 ### 7. Light tidy after a big analyze
 
 Without listening again:

@@ -4,7 +4,13 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 ## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-10-02)
 
-Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds search select→play/queue inject, high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
+Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds bug-hunt fixes (Rescan PCM keep, matrix click, zoom LOD, host ffmpeg warn), search select→play/queue inject, high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
+
+### 2026-10-02 refresh (bug-hunt: Rescan / matrix / zoom / ffmpeg)
+- Rescan: when prior PCM left `brightness` / `acoustic_flux`, keep mood coords after Rescan zeros `analyzed` (no genre-seed flash / wipe until a new decode)
+- Matrix: clicking the already-playing (or queue-cursor) track restarts it in place — no pop/reinsert / ephemeral one-shot that strands the next song
+- Mood map: zoom past the ceiling still schedules LOD end so live stars return after the gesture
+- Host deps: startup warning dialog + sticky status when `ffmpeg` is missing on PATH (same pattern as libx264); analyze does not invent waveform placement without it
 
 ### 2026-10-02 refresh (search select + high-sev / score 7–10)
 - Search: double-click a result or arrow + Enter injects play + context queue; single-click only highlights (query no longer wiped by completer labels)
@@ -65,7 +71,7 @@ Renew Queue: an explicit new recommendation pass from the current listen matrix,
 
 ### Docs / packaging
 - README and AppStream note Renew queue; AppImage baseline remains Ubuntu 24.04 / glibc 2.38+
-- Release AppImage refreshed 2026-10-02 with search select→play/queue inject, high-sev reliability (score 7–10), and prior mood-map import UX
+- Release AppImage refreshed 2026-10-02 with bug-hunt Rescan/matrix/zoom/ffmpeg fixes, search select→play/queue inject, high-sev reliability (score 7–10), and prior mood-map import UX
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-09)
 
