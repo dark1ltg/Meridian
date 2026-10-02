@@ -1,1 +1,1 @@
-2026-10-01 high-sev refresh — move v1.3.6 tag + rebuild AppImage (with CHANGELOG/AppStream)
+2026-10-01 high-sev refresh — fix AppDir glibc audit path + retag v1.3.6

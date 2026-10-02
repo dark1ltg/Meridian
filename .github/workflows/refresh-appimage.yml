@@ -31,7 +31,17 @@ jobs:
         run: |
           test -f dist/Meridian-x86_64.AppImage
           sha256sum dist/Meridian-x86_64.AppImage | tee dist/Meridian-x86_64.AppImage.sha256
-          python3 packaging/audit-appimage-glibc.py dist/Meridian-x86_64.AppImage
+          # audit expects an AppDir (build script already audited during package);
+          # fall back to extracting the AppImage if AppDir was cleaned up.
+          if [[ -d dist/Meridian.AppDir ]]; then
+            python3 packaging/audit-appimage-glibc.py dist/Meridian.AppDir
+          else
+            mkdir -p /tmp/meridian-ai-audit
+            cd /tmp/meridian-ai-audit
+            chmod +x "$GITHUB_WORKSPACE/dist/Meridian-x86_64.AppImage"
+            "$GITHUB_WORKSPACE/dist/Meridian-x86_64.AppImage" --appimage-extract >/dev/null
+            python3 "$GITHUB_WORKSPACE/packaging/audit-appimage-glibc.py" squashfs-root
+          fi
 
       - name: Retag, recreate release, upload AppImage
         env:
