@@ -50,7 +50,7 @@ class RenewalContext:
     prior_queue_ids: context queue being replaced.
     renew_streak: consecutive renews already applied (0 = first renew).
     exempt_ids: never demote (e.g. currently playing).
-    heard_ids: session finishes/plays — not "presented but unused."
+    heard_ids: session finishes/plays — not \"presented but unused.\"
     """
 
     prior_queue_ids: frozenset[int]
@@ -270,9 +270,11 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
             item.quadrant = Quadrant.FILL
         range_order += 1
 
-    # Loved / often-played tracks just outside NOW still belong in DEEP, not SHELF.
+    # Loved / often-played tracks near the lens belong in DEEP, not SHELF or FILL.
+    # FILL→DEEP matters when band bias pushes a lens-center loved track into the
+    # outer ring (e.g. DAY) so short NOW+DEEP plans still keep it (H4).
     for i, item in enumerate(ranked):
-        if item.quadrant != Quadrant.SHELF:
+        if item.quadrant in (Quadrant.NOW, Quadrant.DEEP):
             continue
         if item.importance >= 0.42 and distances[i] <= radius * 3.2:
             item.quadrant = Quadrant.DEEP

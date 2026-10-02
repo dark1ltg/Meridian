@@ -477,6 +477,7 @@ def _credit_text(albumartist: str = "", composer: str = "") -> str:
         parts.append(comp)
     return " ".join(parts)
 
+
 def _filename_mood_text(path: str | None) -> str:
     if not path:
         return ""
@@ -739,6 +740,19 @@ def _stable_jitter(path: str) -> tuple[float, float]:
     )
 
 
+def _close_decode_pipes(proc: subprocess.Popen) -> None:
+    """Close stdout/stderr PIPEs so timeout/abort cannot leak FDs."""
+    for stream in (proc.stdout, proc.stderr):
+        if stream is None:
+            continue
+        try:
+            if getattr(stream, "closed", False):
+                continue
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
 def _decode_pcm(path: str, *, start_s: float = 12.0, duration_s: float = 28.0) -> np.ndarray | None:
     global _decode_pcm_calls, _decode_proc
     _decode_pcm_calls += 1
@@ -748,6 +762,8 @@ def _decode_pcm(path: str, *, start_s: float = 12.0, duration_s: float = 28.0) -
     if not ffmpeg:
         return None
     dur = max(2.0, float(duration_s))
+    # Wall clock must cover the requested window plus IO/codec slack (M1).
+    wall_timeout = max(dur + 10.0, 30.0)
     cmd = [
         ffmpeg,
         "-v",
@@ -776,25 +792,48 @@ def _decode_pcm(path: str, *, start_s: float = 12.0, duration_s: float = 28.0) -
         return None
     with _decode_proc_lock:
         _decode_proc = proc
+    stdout: bytes | None = None
     try:
         if _decode_abort:
-            proc.kill()
-            proc.wait(timeout=2)
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                # Drain + close PIPEs after kill (AB1/H3).
+                proc.communicate(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                _close_decode_pipes(proc)
+                try:
+                    proc.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
             return None
-        stdout, _stderr = proc.communicate(timeout=20)
+        stdout, _stderr = proc.communicate(timeout=wall_timeout)
     except subprocess.TimeoutExpired:
         try:
             proc.kill()
-            proc.wait(timeout=2)
         except OSError:
             pass
+        try:
+            # communicate after kill reaps and closes stdout/stderr PIPEs.
+            proc.communicate(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            _close_decode_pipes(proc)
+            try:
+                proc.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         return None
     except OSError:
+        _close_decode_pipes(proc)
         return None
     finally:
         with _decode_proc_lock:
             if _decode_proc is proc:
                 _decode_proc = None
+        # Belt-and-suspenders: any path that skipped communicate still closes FDs.
+        _close_decode_pipes(proc)
     if _decode_abort:
         return None
     if proc.returncode != 0 or not stdout:
