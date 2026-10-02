@@ -979,6 +979,9 @@ class MoodMap(QGraphicsView):
     def _apply_zoom_level(self, new_zoom: float, view_pos: QPoint) -> None:
         new_zoom = max(VIEW_ZOOM_MIN, min(VIEW_ZOOM_MAX, new_zoom))
         if abs(new_zoom - self._user_zoom) < 1e-5:
+            # Wheel/pinch past the zoom ceiling still begins a gesture that hides
+            # live stars — schedule LOD end so they come back.
+            self._schedule_zoom_lod()
             return
         if new_zoom <= VIEW_ZOOM_MIN + 1e-3:
             self.reset_view()

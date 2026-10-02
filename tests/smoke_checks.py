@@ -1181,6 +1181,42 @@ def check_severity_5_10_guards(db_path: Path) -> None:
         assert not t.analyzed
         assert t.title == "a2"
 
+        # Rescan zeros analyzed first; prior PCM brightness/flux must still
+        # keep coords through the following force upsert (seed flash / wipe).
+        lib.set_analyzed_mood(
+            1, 0.11, 0.22, 90.0, confidence=0.8, brightness=0.55, acoustic_flux=0.44
+        )
+        lib.mark_all_pending_analysis()
+        pending = lib.get(1)
+        assert pending is not None and not pending.analyzed
+        lib.upsert_track(
+            {
+                "path": "/u/a.mp3",
+                "title": "a3",
+                "artist": "Band",
+                "albumartist": "Band",
+                "album": "LP",
+                "genre": "Rock",
+                "duration_ms": 1,
+                "year": None,
+                "bpm": 120,
+                "valence": 0.90,
+                "energy": 0.90,
+                "mood_confidence": 0.2,
+                "confidence_note": "seed",
+                "low_trust": 1,
+                "added_at": 9,
+                "mtime": 3,
+                "analyzed": 0,
+            }
+        )
+        after_rescan = lib.get(1)
+        assert after_rescan is not None
+        assert abs(after_rescan.valence - 0.11) < 1e-9
+        assert abs(after_rescan.energy - 0.22) < 1e-9
+        assert not after_rescan.analyzed
+        assert after_rescan.title == "a3"
+
         lib.mark_playback_failed(1)
         assert lib.is_playback_denied(1)
         lib.close()

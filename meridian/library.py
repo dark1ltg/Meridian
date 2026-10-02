@@ -186,7 +186,8 @@ class Library:
         with self.lock:
             existing = self.conn.execute(
                 "SELECT id, pinned, analyzed, valence, energy, mood_confidence, "
-                "low_trust, confidence_note FROM tracks WHERE path = ?",
+                "low_trust, confidence_note, brightness, acoustic_flux "
+                "FROM tracks WHERE path = ?",
                 (path,),
             ).fetchone()
             if existing:
@@ -207,12 +208,19 @@ class Library:
                     ):
                         payload.pop(key, None)
                 elif (
-                    int(existing["analyzed"] or 0) == 1
-                    and "analyzed" in payload
+                    "analyzed" in payload
                     and int(payload.get("analyzed") or 0) == 0
+                    and (
+                        # Normal mtime refresh while still marked analyzed.
+                        int(existing["analyzed"] or 0) == 1
+                        # Rescan zeros analyzed first; prior PCM still leaves
+                        # brightness/flux — keep placement until a new decode.
+                        or existing["brightness"] is not None
+                        or existing["acoustic_flux"] is not None
+                    )
                 ):
-                    # Mtime/tag refresh: re-queue analyze but keep PCM placement
-                    # until a successful decode lands (avoids seed flash / sticky seed).
+                    # Re-queue analyze but keep PCM placement until a successful
+                    # decode lands (avoids seed flash / sticky seed / Rescan wipe).
                     for key in (
                         "valence",
                         "energy",

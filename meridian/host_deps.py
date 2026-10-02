@@ -1,10 +1,11 @@
-"""Host library checks for AppImage / Qt Multimedia playback."""
+"""Host library checks for AppImage / Qt Multimedia playback and analyze."""
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.util
 import os
+import shutil
 import sys
 
 # Common sonames across distros (Arch/CachyOS currently ships .165).
@@ -38,6 +39,11 @@ def host_libx264_available() -> bool:
     return False
 
 
+def host_ffmpeg_available() -> bool:
+    """True when the host ``ffmpeg`` CLI is on PATH (needed for mood analyze)."""
+    return shutil.which("ffmpeg") is not None
+
+
 def ffmpeg_media_backend_likely() -> bool:
     """True when Qt is likely to use the FFmpeg multimedia plugin."""
     backend = (os.environ.get("QT_MEDIA_BACKEND") or "").strip().lower()
@@ -53,6 +59,11 @@ def ffmpeg_media_backend_likely() -> bool:
 
 def should_warn_missing_libx264() -> bool:
     return ffmpeg_media_backend_likely() and not host_libx264_available()
+
+
+def should_warn_missing_ffmpeg() -> bool:
+    """Analyze needs a host ffmpeg binary; AppImage does not ship one."""
+    return not host_ffmpeg_available()
 
 
 def libx264_missing_message() -> str:
@@ -72,3 +83,22 @@ def libx264_missing_message() -> str:
 
 def libx264_missing_status() -> str:
     return "Playback may fail — install system libx264 (e.g. pacman -S x264), then restart."
+
+
+def ffmpeg_missing_message() -> str:
+    return (
+        "Meridian needs the host <b>ffmpeg</b> command to decode audio and place "
+        "tracks on the mood map. It is not bundled in the AppImage.\n\n"
+        "ffmpeg was not found on this computer. Playback can still work, but "
+        "scan/analyze will leave stars on genre seeds instead of waveform "
+        "placement.\n\n"
+        "<b>Install ffmpeg from your distribution, then restart Meridian.</b>\n\n"
+        "Examples:\n"
+        "• Arch / CachyOS: <code>sudo pacman -S ffmpeg</code>\n"
+        "• Fedora: <code>sudo dnf install ffmpeg</code>\n"
+        "• Debian / Ubuntu: <code>sudo apt install ffmpeg</code>\n"
+    )
+
+
+def ffmpeg_missing_status() -> str:
+    return "Mood analysis needs ffmpeg on this system (e.g. pacman -S ffmpeg), then restart."

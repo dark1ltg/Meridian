@@ -35,8 +35,11 @@ from meridian.context import (
     mode_bias,
 )
 from meridian.host_deps import (
+    ffmpeg_missing_message,
+    ffmpeg_missing_status,
     libx264_missing_message,
     libx264_missing_status,
+    should_warn_missing_ffmpeg,
     should_warn_missing_libx264,
 )
 from meridian.library import Library
@@ -91,6 +94,7 @@ class MainWindow(QMainWindow):
         self._outgoing_settle_finish: bool = False
         self._expect_natural_advance: bool = False
         self._host_codec_sticky = False
+        self._host_ffmpeg_sticky = False
         self._job_status: str | None = None
         self._analyze_map_tick = 0
         self._last_analyze_map_refresh = 0.0
@@ -124,16 +128,23 @@ class MainWindow(QMainWindow):
         self.refresh_plan()
         QTimer.singleShot(400, self.start_scan)
         QTimer.singleShot(900, self._maybe_warn_libx264)
+        QTimer.singleShot(1100, self._maybe_warn_ffmpeg)
 
     def _paint_status(self, message: str) -> None:
-        """Write the status strip, keeping a sticky libx264 tip when the host lacks it."""
+        """Write the status strip, keeping sticky host tips when dependencies are missing."""
         text = message or ""
+        tips: list[str] = []
         if self._host_codec_sticky and should_warn_missing_libx264():
-            tip = libx264_missing_status()
-            if tip and tip not in text:
-                text = f"{text} · {tip}" if text else tip
+            tips.append(libx264_missing_status())
         else:
             self._host_codec_sticky = False
+        if self._host_ffmpeg_sticky and should_warn_missing_ffmpeg():
+            tips.append(ffmpeg_missing_status())
+        else:
+            self._host_ffmpeg_sticky = False
+        for tip in tips:
+            if tip and tip not in text:
+                text = f"{text} · {tip}" if text else tip
         self.status_label.setText(text)
         if self._job_status:
             self.status_label.setStyleSheet("color: #c5cde0; font-weight: 500;")
@@ -177,6 +188,26 @@ class MainWindow(QMainWindow):
         # Re-assert after the dialog so scan/analyze progress cannot bury the tip forever.
         self._set_status(libx264_missing_status())
 
+    def _maybe_warn_ffmpeg(self) -> None:
+        """Mood analyze needs host ffmpeg — warn when PATH has no binary."""
+        if not should_warn_missing_ffmpeg():
+            self._host_ffmpeg_sticky = False
+            return
+        self._host_ffmpeg_sticky = True
+        self._set_status(ffmpeg_missing_status())
+        if self.settings.value("host/skip_ffmpeg_warning", False, type=bool):
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("ffmpeg needed for mood analysis")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(ffmpeg_missing_message())
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dont = box.addButton("Don’t show again", QMessageBox.ButtonRole.AcceptRole)
+        box.exec()
+        if box.clickedButton() is dont:
+            self.settings.setValue("host/skip_ffmpeg_warning", True)
+        self._set_status(ffmpeg_missing_status())
     def _build(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
@@ -884,12 +915,23 @@ class MainWindow(QMainWindow):
 
     def _pull_and_play(self, track_id: int) -> None:
         """Insert a matrix pick into the context queue, play it once, then continue."""
+        current_id = self.player.current.id if self.player.current else None
+        at_queue_cursor = (
+            track_id in self.session_queue
+            and self.session_queue.index(track_id) == self.queue_index
+        )
+        # Re-activating the playing / current queue track: restart in place.
+        # Do not pop/reinsert (strands the former next above the highlight) or
+        # mark ephemeral (would one-shot a track the user is already on).
+        if track_id == current_id or at_queue_cursor:
+            if track_id in self.session_queue:
+                self.queue_index = self.session_queue.index(track_id)
+            self.play_id(track_id)
+            return
         if track_id in self.session_queue:
             old = self.session_queue.index(track_id)
             self.session_queue.pop(old)
             if old < self.queue_index:
-                self.queue_index -= 1
-            elif old == self.queue_index and self.queue_index > 0:
                 self.queue_index -= 1
         if self.player.current and self.session_queue:
             insert_at = min(self.queue_index + 1, len(self.session_queue))

@@ -178,6 +178,7 @@ def test_sticky_job_status_survives_hover() -> None:
 
     w = MainWindow.__new__(MainWindow)
     w._host_codec_sticky = False
+    w._host_ffmpeg_sticky = False
     w._job_status = None
     w.status_label = QLabel()
     # Bind real methods.
