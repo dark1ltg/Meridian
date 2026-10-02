@@ -75,6 +75,7 @@ class MainWindow(QMainWindow):
         self.skips_window: list[float] = []
         self._scan_thread = None
         self._scan_worker = None
+        self._scan_gen = 0
         self._analyze_thread = None
         self._analyze_worker = None
         self._analyze_gen = 0
@@ -600,7 +601,9 @@ class MainWindow(QMainWindow):
         self._set_job_status(f"Rescanning library ({pending} tracks to re-analyze)…")
         self._start_scan_worker(force=True, on_finished=self._rescan_done)
 
-    def _rescan_done(self, count: int) -> None:
+    def _rescan_done(self, count: int, gen: int | None = None) -> None:
+        if gen is not None and gen != self._scan_gen:
+            return
         self._cleanup_scan_thread()
         if self._closing:
             return
@@ -619,13 +622,17 @@ class MainWindow(QMainWindow):
             # Do not start a second scan while a timed-out worker still holds the DB.
             self._set_job_status("Waiting for previous scan/analyze to finish…")
             return
-        if self._scan_thread and self._scan_thread.isRunning():
+        # Refuse while prior scan refs remain — even if the thread already quit —
+        # so a queued finished slot can reap its own generation (AB2/H1).
+        if self._scan_thread is not None or self._scan_worker is not None:
             return
         self._set_job_status("Scanning local files…")
         self._start_scan_worker(force=False, on_finished=self._scan_done)
 
     def _start_scan_worker(self, *, force: bool, on_finished) -> None:
         self._cleanup_scan_thread()
+        self._scan_gen += 1
+        gen = self._scan_gen
         self._scan_worker = ScanWorker(self.library, force=force)
         self._scan_thread = start_worker(self._scan_worker)
         # Always queue UI slots — Python lambdas default to DirectConnection and
@@ -635,7 +642,9 @@ class MainWindow(QMainWindow):
         self._scan_worker.failed.connect(
             lambda m: QMessageBox.warning(self, "Scan failed", m), queued
         )
-        self._scan_worker.finished.connect(on_finished, queued)
+        self._scan_worker.finished.connect(
+            lambda added, g=gen: on_finished(added, g), queued
+        )
 
     def _disconnect_worker(self, worker) -> None:
         if worker is None:
@@ -725,6 +734,8 @@ class MainWindow(QMainWindow):
 
     def _cleanup_scan_thread(self, wait_ms: int = 8000) -> bool:
         """Stop the scan worker. Returns True when the thread is fully stopped."""
+        # Invalidate queued finished slots before clearing refs (AB2/H1).
+        self._scan_gen += 1
         worker = self._scan_worker
         thread = self._scan_thread
         self._scan_worker = None
@@ -746,7 +757,10 @@ class MainWindow(QMainWindow):
             worker.abort()
         return self._reap_worker_thread(thread, worker, wait_ms=wait_ms)
 
-    def _scan_done(self, added: int) -> None:
+    def _scan_done(self, added: int, gen: int | None = None) -> None:
+        # Ignore stale finished after a newer scan started / cleanup bumped gen.
+        if gen is not None and gen != self._scan_gen:
+            return
         # Finished already ran; reap without abort racing a live walk.
         worker = self._scan_worker
         thread = self._scan_thread
@@ -771,8 +785,15 @@ class MainWindow(QMainWindow):
             self._pending_analyze_after_linger = True
             self._set_job_status("Waiting for previous analyze to finish…")
             return
-        if self._analyze_thread and self._analyze_thread.isRunning():
-            return
+        # Reap a finished-but-not-yet-disposed analyze before overwrite (AB3/H2).
+        prev_thread = self._analyze_thread
+        prev_worker = self._analyze_worker
+        if prev_thread is not None or prev_worker is not None:
+            if prev_thread is not None and prev_thread.isRunning():
+                return
+            self._analyze_thread = None
+            self._analyze_worker = None
+            self._reap_worker_thread(prev_thread, prev_worker, wait_ms=3000)
         if self.library.closed:
             return
         if not self.library.unanalyzed_ids():
@@ -784,12 +805,16 @@ class MainWindow(QMainWindow):
         self._last_analyze_map_refresh = 0.0
         self._analyze_gen += 1
         gen = self._analyze_gen
-        self._analyze_worker = AnalyzeWorker(self.library)
-        self._analyze_thread = start_worker(self._analyze_worker)
+        worker = AnalyzeWorker(self.library)
+        thread = start_worker(worker)
+        self._analyze_worker = worker
+        self._analyze_thread = thread
         queued = Qt.ConnectionType.QueuedConnection
-        self._analyze_worker.progress.connect(self._on_analyze_progress, queued)
-        self._analyze_worker.finished.connect(
-            lambda g=gen: self._analyze_done(g), queued
+        worker.progress.connect(self._on_analyze_progress, queued)
+        # Capture this generation's thread/worker so a gen-mismatch finish still
+        # disposes the superseded QThread instead of orphaning it (AB3/H2).
+        worker.finished.connect(
+            lambda g=gen, t=thread, w=worker: self._analyze_done(g, t, w), queued
         )
 
     def _on_analyze_progress(self, name: str, i: int, n: int) -> None:
@@ -804,15 +829,30 @@ class MainWindow(QMainWindow):
             self._last_analyze_map_refresh = now
             self.refresh_plan(rebuild_queue=False)
 
-    def _analyze_done(self, gen: int) -> None:
-        # Ignore stale workers that finished after abort/rescan/quit.
+    def _analyze_done(
+        self,
+        gen: int,
+        thread=None,
+        worker=None,
+    ) -> None:
+        # Always dispose the finishing worker's objects; only the matching gen
+        # owns current refs and may restart analyze.
+        if thread is None:
+            thread = self._analyze_thread
+        if worker is None:
+            worker = self._analyze_worker
+        if gen == self._analyze_gen:
+            if self._analyze_thread is thread:
+                self._analyze_thread = None
+            if self._analyze_worker is worker:
+                self._analyze_worker = None
+        elif self._analyze_thread is thread:
+            # Should not happen if start_analyze reaped first; clear safely.
+            self._analyze_thread = None
+            self._analyze_worker = None
+        self._reap_worker_thread(thread, worker, wait_ms=3000)
         if gen != self._analyze_gen:
             return
-        thread = self._analyze_thread
-        worker = self._analyze_worker
-        self._analyze_thread = None
-        self._analyze_worker = None
-        self._reap_worker_thread(thread, worker, wait_ms=3000)
         if self._closing:
             return
         # If scan added more tracks while we were analyzing, finish them.
