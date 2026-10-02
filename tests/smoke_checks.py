@@ -1,1 +1,1 @@
-__CURSOR_LOAD_FILE__/home/dark1ltg/Projects/Meridian/tests/smoke_checks.py
+PLACEHOLDER_SEE_/tmp/cd_args/full.json
