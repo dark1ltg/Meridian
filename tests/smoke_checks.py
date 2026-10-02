@@ -1,1 +1,1 @@
-LOAD_FROM_DISK:/home/dark1ltg/Projects/Meridian/tests/smoke_checks.py
+@/tmp/VERIFIED_push_args.json#smoke_checks
