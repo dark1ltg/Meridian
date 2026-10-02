@@ -1,1 +1,1 @@
-/tmp/meridian_file_contents/0
+PLACEHOLDER_LOAD_FROM_JSON
