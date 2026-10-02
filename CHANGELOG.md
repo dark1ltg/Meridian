@@ -4,9 +4,10 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 ## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-10-02)
 
-Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
+Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds search select→play/queue inject, high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
 
-### 2026-10-02 refresh (high-sev / score 7–10)
+### 2026-10-02 refresh (search select + high-sev / score 7–10)
+- Search: double-click a result or arrow + Enter injects play + context queue; single-click only highlights (query no longer wiped by completer labels)
 - Close ffmpeg decode stdout/stderr pipes on abort, timeout, and error paths (subprocess / FD leak)
 - Serialize scan-worker lifecycle with generation guards so stale completions cannot clean up or replace a newer scan
 - Capture each analyze generation’s worker, reap finished refs before replacement, and ignore stale completion restarts
@@ -64,7 +65,7 @@ Renew Queue: an explicit new recommendation pass from the current listen matrix,
 
 ### Docs / packaging
 - README and AppStream note Renew queue; AppImage baseline remains Ubuntu 24.04 / glibc 2.38+
-- Release AppImage refreshed 2026-10-02 with high-sev reliability (score 7–10) and prior mood-map import UX
+- Release AppImage refreshed 2026-10-02 with search select→play/queue inject, high-sev reliability (score 7–10), and prior mood-map import UX
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-09)
 
