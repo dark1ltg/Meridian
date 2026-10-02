@@ -1,1 +1,3 @@
-LOAD_FROM:/tmp/exact_args_for_calldynamictool.json#4
+"""Regression tests for score 7–10 bugs (FD leak, scan/analyze races, loved FILL, decode timeout)."""
+
+from __future__ import annotations

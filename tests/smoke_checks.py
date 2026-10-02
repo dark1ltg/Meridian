@@ -1,1 +1,5 @@
-LOAD_FROM:/tmp/exact_args_for_calldynamictool.json#3
+"""Shared smoke checks used by pytest and scripts/smoke_test.py."""
+
+from __future__ import annotations
+
+from pathlib import Path
