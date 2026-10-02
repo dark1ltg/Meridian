@@ -1,6 +1,1 @@
-from __future__ import annotations
-
-from pathlib import Path
-from time import time
-
-from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Slot
+LOAD_FROM_DISK:/home/dark1ltg/Projects/Meridian/meridian/ui/main_window.py

@@ -1,5 +1,1 @@
-"""Shared smoke checks used by pytest and scripts/smoke_test.py."""
-
-from __future__ import annotations
-
-from pathlib import Path
+LOAD_FROM_DISK:/home/dark1ltg/Projects/Meridian/tests/smoke_checks.py
