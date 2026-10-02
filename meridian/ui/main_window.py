@@ -1,1 +1,1 @@
-PLACEHOLDER_LOAD_FROM:/home/dark1ltg/Projects/Meridian/meridian/ui/main_window.py
+/tmp/meridian_file_contents/2
