@@ -829,7 +829,13 @@ class MainWindow(QMainWindow):
             return
         if not self.library.unanalyzed_ids():
             self._clear_job_status()
-            self._set_status("Mood map updated from local audio.")
+            pcm_ok, deferred = self.library.analyze_session_stats()
+            if deferred > 0 and pcm_ok == 0:
+                self._set_status(
+                    "Waveform decode deferred — mood map kept seed placement."
+                )
+            else:
+                self._set_status("Nothing left to analyze this session.")
             return
         self._pending_analyze_after_linger = False
         self._analyze_map_tick = 0
@@ -894,7 +900,17 @@ class MainWindow(QMainWindow):
             return
         self._clear_job_status()
         self.refresh_plan(rebuild_queue=False)
-        self._set_status("Mood map updated from local audio.")
+        pcm_ok, deferred = self.library.analyze_session_stats()
+        if pcm_ok == 0 and deferred > 0:
+            self._set_status(
+                "Waveform decode deferred — mood map kept seed placement."
+            )
+        elif deferred > 0:
+            self._set_status(
+                f"Mood map updated from local audio ({deferred} deferred)."
+            )
+        else:
+            self._set_status("Mood map updated from local audio.")
 
     def _map_activated(self, track_id: int) -> None:
         """Play a map star and keep context-queue Next/Prev aligned with it."""
@@ -987,9 +1003,30 @@ class MainWindow(QMainWindow):
             self._set_status(msg)
             next_id = self._skip_unplayable(track_id)
             if next_id is not None:
+                playing = self.player.current.id if self.player.current else None
+                # Dead next collapsed to the song already playing — keep it going.
+                # Hard-cut play_id(same) would stop+restart from 0.
+                if playing is not None and next_id == playing:
+                    self._expect_natural_advance = False
+                    self.player.release_advance_lock()
+                    if playing in self.session_queue:
+                        self.queue_index = self.session_queue.index(playing)
+                    else:
+                        self.session_queue.insert(0, playing)
+                        self.queue_index = 0
+                    self._fill_queue()
+                    self._set_status("Only one playable track in range — waiting.")
+                    return
                 self.play_id(next_id, _depth=_depth + 1)
             else:
+                playing = self.player.current.id if self.player.current else None
                 self._expect_natural_advance = False
+                if playing is not None:
+                    self.session_queue = [playing]
+                    self.queue_index = 0
+                    self._fill_queue()
+                    self.player.release_advance_lock()
+                    self._set_status("Only one playable track in range — waiting.")
             return
         self._rebuild_lock = True
         outgoing = self.player.current
@@ -1196,31 +1233,42 @@ class MainWindow(QMainWindow):
         if self.player.is_crossfading() and self._crossfade_outgoing_id is not None:
             outgoing = self._crossfade_outgoing_id
             settle_finish = self._outgoing_settle_finish
+            incoming_id = self.player.current.id if self.player.current else None
+            incoming_pos = int(self.player.backend.position() or 0) if self.player.current else 0
             self._clear_crossfade_credit()
             if settle_finish:
                 # Natural A→B: A essentially finished — never skip-credit it.
                 self._listen_nudge(outgoing, skipped=False)
-            # Leaving the incoming early: skip/finish only — never also play-count.
-            skipped = bool(self.player.current and self.player.backend.position() < 8000)
-            if self.player.current:
+            # Suppress play_id abandon credit until we know we actually moved.
+            if incoming_id is not None:
+                self._abandon_credited_id = incoming_id
+            moved = self._advance_queue(skipped=True)
+            if moved and incoming_id is not None:
+                skipped = incoming_pos < 8000
                 if skipped:
-                    self.library.record_skip(self.player.current.id)
+                    self.library.record_skip(incoming_id)
                     self.skips_window.append(time())
-                self._listen_nudge(self.player.current.id, skipped=skipped)
-                # play_id must not credit this abandoned incoming again.
-                self._abandon_credited_id = self.player.current.id
-            self._advance_queue(skipped=skipped)
+                self._listen_nudge(incoming_id, skipped=skipped)
+                self._abandon_credited_id = incoming_id
+            else:
+                self._abandon_credited_id = None
             return
-        # Credit once here, then tell play_id not to double-credit on the hard-cut/fade.
+        # Credit only after a successful move so sole-track Next cannot skip-credit.
+        abandoned_id = self.player.current.id if self.player.current else None
+        abandoned_pos = int(self.player.backend.position() or 0) if self.player.current else 0
         self._clear_crossfade_credit()
-        skipped = bool(self.player.current and self.player.backend.position() < 8000)
-        if self.player.current:
+        if abandoned_id is not None:
+            self._abandon_credited_id = abandoned_id
+        moved = self._advance_queue(skipped=True)
+        if moved and abandoned_id is not None:
+            skipped = abandoned_pos < 8000
             if skipped:
-                self.library.record_skip(self.player.current.id)
+                self.library.record_skip(abandoned_id)
                 self.skips_window.append(time())
-            self._listen_nudge(self.player.current.id, skipped=skipped)
-            self._abandon_credited_id = self.player.current.id
-        self._advance_queue(skipped=skipped)
+            self._listen_nudge(abandoned_id, skipped=skipped)
+            self._abandon_credited_id = abandoned_id
+        else:
+            self._abandon_credited_id = None
 
     def play_prev(self) -> None:
         # During crossfade, restore the outgoing song without double play_count or
@@ -1309,7 +1357,8 @@ class MainWindow(QMainWindow):
         if moved:
             self.refresh_plan(keep_current=True, rebuild_queue=False)
 
-    def _advance_queue(self, skipped: bool = False) -> None:
+    def _advance_queue(self, skipped: bool = False) -> bool:
+        """Advance to the next queue track. Returns True if a different track started."""
         current_id = self.player.current.id if self.player.current else None
         if current_id is not None and current_id in self.ephemeral:
             self.ephemeral.discard(current_id)
@@ -1325,19 +1374,30 @@ class MainWindow(QMainWindow):
             self._replenish_queue(avoid_id=current_id)
             self.queue_index = 0
         if not self.session_queue:
+            # Keep the still-playing track in the queue — do not strand empty.
+            if current_id is not None:
+                self.session_queue = [current_id]
+                self.queue_index = 0
+                self._fill_queue()
+                self._expect_natural_advance = False
+                self.player.release_advance_lock()
+                self._set_status("Only one playable track in range — waiting.")
+                return False
             self._expect_natural_advance = False
             self.player.release_advance_lock()
             self._set_status("Context queue is empty — move the lens or add more music.")
-            return
+            return False
         self.queue_index = min(max(0, self.queue_index), len(self.session_queue) - 1)
         next_id = self.session_queue[self.queue_index]
-        # Tiny libraries: never hard-cut restart the track that just ended.
-        if not skipped and current_id is not None and next_id == current_id:
+        # Tiny libraries / dead-next collapse: never hard-cut restart the current track.
+        if current_id is not None and next_id == current_id:
             self._expect_natural_advance = False
             self.player.release_advance_lock()
             self._set_status("Only one playable track in range — waiting.")
-            return
+            return False
         self.play_id(next_id)
+        after = self.player.current.id if self.player.current else None
+        return after is not None and after != current_id
 
     def _replenish_queue(self, *, avoid_id: int | None = None) -> None:
         """Build a fresh context queue from lens, time of day, and matrix lists."""
@@ -1362,8 +1422,8 @@ class MainWindow(QMainWindow):
             elif len(tracks) > 1:
                 order = [t.id for t in tracks if t.id != avoid][:18]
             else:
-                # Single-track library: do not loop the same song via hard-cut.
-                order = []
+                # Sole playable track: keep it queued. Callers must not hard-cut restart.
+                order = [avoid]
         self.ephemeral = {tid for tid in self.ephemeral if tid in order}
         self.session_queue = order
         self._fill_queue()

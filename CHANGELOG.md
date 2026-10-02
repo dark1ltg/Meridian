@@ -6,6 +6,12 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds bug-hunt fixes (Rescan PCM keep, matrix click, zoom LOD, host ffmpeg warn), search select→play/queue inject, high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
 
+### 2026-10-02 refresh (bug-hunt: queue advance / analyze honesty)
+- Dead next (missing/denied): keep the still-playing track instead of `stop`+`play_track` hard-restart from 0
+- Failed auto-advance near end: `release_advance_lock` holds fade re-arm so position ticks cannot thrash replenish/map rebuilds
+- Next on sole playable track: keep `[current]` in the queue, wait status, and skip-credit only after a real move
+- Analyze: when every decode is deferred (`pcm_ok=False`), status reports deferred seed placement instead of “Mood map updated from local audio”
+
 ### 2026-10-02 refresh (bug-hunt: Rescan / matrix / zoom / ffmpeg)
 - Rescan: when prior PCM left `brightness` / `acoustic_flux`, keep mood coords after Rescan zeros `analyzed` (no genre-seed flash / wipe until a new decode)
 - Matrix: clicking the already-playing (or queue-cursor) track restarts it in place — no pop/reinsert / ephemeral one-shot that strands the next song

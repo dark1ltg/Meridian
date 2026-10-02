@@ -263,6 +263,7 @@ class AnalyzeWorker(QObject):
 
         clear_decode_abort()
         try:
+            self.library.reset_analyze_session_stats()
             ids = self.library.unanalyzed_ids()
             total = len(ids)
             for index, track_id in enumerate(ids, start=1):

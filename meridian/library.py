@@ -111,6 +111,9 @@ class Library:
         self._analyze_denylist: set[int] = set()
         # Process-local: corrupt/unsupported files that failed playback stay out of plans.
         self._playback_denylist: set[int] = set()
+        # Per analyze-worker run: how many tracks got real PCM vs deferred.
+        self._analyze_pcm_ok_count = 0
+        self._analyze_deferred_count = 0
         self._migrate()
 
     def _migrate(self) -> None:
@@ -344,6 +347,15 @@ class Library:
             self.conn.commit()
             return True
 
+    def reset_analyze_session_stats(self) -> None:
+        """Clear per-run PCM/defer counters before an AnalyzeWorker pass."""
+        self._analyze_pcm_ok_count = 0
+        self._analyze_deferred_count = 0
+
+    def analyze_session_stats(self) -> tuple[int, int]:
+        """Return ``(pcm_ok_count, deferred_count)`` for the current analyze run."""
+        return int(self._analyze_pcm_ok_count), int(self._analyze_deferred_count)
+
     def set_analyzed_mood(
         self,
         track_id: int,
@@ -388,6 +400,7 @@ class Library:
                 ),
             )
             self.conn.commit()
+        self._analyze_pcm_ok_count += 1
 
     def mark_analyze_failed(self, track_id: int) -> None:
         """Mark a track analyzed so a poison file cannot loop the analyze worker forever.
@@ -808,6 +821,7 @@ class Library:
         """Leave analyzed=0 but denylist this session so silent PCM miss can retry later."""
         tid = int(track_id)
         self._analyze_denylist.add(tid)
+        self._analyze_deferred_count += 1
         with self.lock:
             row = self.conn.execute(
                 "SELECT pinned, confidence_note FROM tracks WHERE id = ?", (tid,)

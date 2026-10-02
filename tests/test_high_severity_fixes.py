@@ -244,6 +244,9 @@ def test_start_analyze_reaps_finished_before_overwrite(qapp) -> None:
         def unanalyzed_ids(self):
             return []
 
+        def analyze_session_stats(self):
+            return 0, 0
+
     win = MainWindow.__new__(MainWindow)
     win._closing = False
     win._lingering_workers = []

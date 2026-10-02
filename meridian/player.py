@@ -244,8 +244,22 @@ class Player(QObject):
             self.track_finished.emit()
 
     def release_advance_lock(self) -> None:
-        """Allow EndOfMedia / manual Next after a failed auto-advance."""
+        """Allow EndOfMedia / manual Next after a failed auto-advance.
+
+        If we are still inside the end-fade window, hold re-arming
+        ``track_nearly_finished`` until position leaves that window (same
+        idea as seek-into-fade). Clearing ``_advance_emitted`` alone would
+        thrash replenish/map rebuilds on every position tick.
+        """
         self._advance_emitted = False
+        duration = int(self.backend.duration() or 0)
+        position = int(self.backend.position() or 0)
+        if duration >= 12000:
+            fade = self._fade_ms(duration)
+            remaining = duration - position
+            self._seek_hold_advance = 0 <= remaining <= fade
+        else:
+            self._seek_hold_advance = False
 
     @Slot()
     def toggle(self) -> None:
