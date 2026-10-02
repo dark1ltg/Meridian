@@ -1,4 +1,1 @@
-from __future__ import annotations
-
-# PLACEHOLDER_WILL_REPLACE — if you see this the upload failed
-raise RuntimeError('features.py stub — replace with real source')
+LOAD_FROM:/home/dark1ltg/Projects/Meridian/meridian/features.py
