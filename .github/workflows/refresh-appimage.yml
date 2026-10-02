@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: refresh-appimage-v136
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build-and-upload:

@@ -43,13 +43,13 @@
   </keywords>
   <content_rating type="oars-1.1" />
   <releases>
-    <release version="1.3.6" date="2026-09-25">
+    <release version="1.3.6" date="2026-10-01">
       <description>
         <p>
-          AppImage refresh: mood-map import UX (seed scatter, density bake,
-          sticky scan status), plus prior Renew Queue hardening — mid-fade
-          play/skip credit, VA album anti-repeat, BPM 0 scan confidence,
-          first-run Renew tip, and lock rings on pinned stars.
+          AppImage refresh: high-severity reliability (ffmpeg FD cleanup,
+          scan/analyze worker generation guards, loved FILL→DEEP promotion,
+          duration-aware decode timeout), plus mood-map import UX and prior
+          Renew Queue hardening.
         </p>
       </description>
     </release>

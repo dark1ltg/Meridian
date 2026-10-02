@@ -2,9 +2,16 @@
 
 All notable Meridian releases are listed here. Download AppImages from [Releases](https://github.com/dark1ltg/Meridian/releases).
 
-## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-09-25)
+## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-10-01)
 
-Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds playback-credit, queue, map-pin hardening, and mood-map import UX fixes.
+Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
+
+### 2026-10-01 refresh
+- Close ffmpeg decode stdout/stderr pipes on abort, timeout, and error paths (subprocess / FD leak)
+- Serialize scan-worker lifecycle with generation guards so stale completions cannot clean up or replace a newer scan
+- Capture each analyze generation’s worker, reap finished refs before replacement, and ignore stale completion restarts
+- Loved tracks that fit the lens stay in NOW/DEEP instead of FILL under band bias
+- ffmpeg wall timeout scales with decode duration: `max(dur + 10.0, 30.0)`
 
 ### 2026-09-25 refresh
 - Sparse mood-map after large import: stable path-hash jitter at genre seed time so same-genre cohorts form clouds after scan (Rescan needed for existing DBs)
@@ -57,7 +64,7 @@ Renew Queue: an explicit new recommendation pass from the current listen matrix,
 
 ### Docs / packaging
 - README and AppStream note Renew queue; AppImage baseline remains Ubuntu 24.04 / glibc 2.38+
-- Release AppImage refreshed 2026-09-25 with mood-map import UX (seed jitter, density bake, sticky status)
+- Release AppImage refreshed 2026-10-01 with high-sev reliability (score 7–10) and prior mood-map import UX
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-09)
 
