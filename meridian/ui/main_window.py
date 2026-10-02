@@ -1,8 +1,1 @@
-from __future__ import annotations
-
-from pathlib import Path
-from time import time
-
-from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Slot
-
-# PLACEHOLDER_TOO_SHORT_WILL_FAIL_ASSERT
+__CURSOR_LOAD_FILE__/home/dark1ltg/Projects/Meridian/meridian/ui/main_window.py

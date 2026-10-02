@@ -1,10 +1,1 @@
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from enum import Enum
-from math import exp, hypot
-
-from meridian.context import Context, LENS_RADIUS_MIN, Mode, band_bias, mode_bias
-from meridian.library import Track
-
-# PLACEHOLDER_TOO_SHORT_WILL_FAIL_ASSERT
+__CURSOR_LOAD_FILE__/home/dark1ltg/Projects/Meridian/meridian/queue_engine.py
