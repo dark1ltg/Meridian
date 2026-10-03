@@ -1248,12 +1248,13 @@ def _decode_pcm_with_fallback(
 
     Returns
     ``(pcm_or_None, used_fallback_or_partial, merged_profile_or_None, edge_salvage)``.
-    ``edge_salvage`` is ``"intro"`` / ``"late"`` for weak single-edge placement, else
-    ``None``. Multi-window success returns a representative PCM buffer plus a merged
-    profile. Long-plan intro-only or late-only (other windows dead) salvages that
-    edge as weak PCM instead of deferring forever. Ends-only (intro+late, no mid)
-    still defers. Dual-plan intro-only falls through to a ~28s single-window
-    salvage from 0 / primary. Unknown duration uses that same ~28s listen from 0.
+    ``edge_salvage`` is ``"intro"`` / ``"late"`` / ``"ends"`` for weak placement when
+    body evidence is missing, else ``None``. Multi-window success returns a
+    representative PCM buffer plus a merged profile. Any decode with real audio
+    places (weak/low-trust if not a full honest body listen) — no defer-on-seed
+    when music was heard. Dual-plan intro-only falls through to a ~28s
+    single-window salvage from 0 / primary. Unknown duration uses that same ~28s
+    listen from 0. True silence / total decode failure still returns no PCM.
     """
     from meridian.acoustic import build_profile
 
@@ -1307,26 +1308,40 @@ def _decode_pcm_with_fallback(
             merged = _merge_pcm_profiles(None, role_profiles=role_profiles)
             return role_pcm[rep_role], partial, merged, None
 
-        # Not enough honest multi-window evidence.
+        # Not enough honest multi-window evidence — still place if we heard music.
         if ok_roles:
             first_role = plan[0][0]
             # Dual plan + usable first window (intro-only etc.): long single-window
-            # salvage (~28s) instead of hard-defer / parking the short intro alone.
+            # salvage (~28s) instead of parking the short intro alone.
             if len(plan) == 2 and first_role in ok_roles:
                 dual_salvage = True
                 # Allow a longer re-listen at the primary start (prior 12s stub is spent
                 # as a section window, not as the salvage length).
                 skip_reseek_starts.discard(round(float(plan[0][1]), 2))
-            elif len(plan) >= 3 and ok_roles == {"intro"} and "intro" in role_pcm:
-                # Long-plan intro-only (mid/late silent or missing): place from the
-                # audible head as weak PCM instead of deferring forever on seed.
+            elif ok_roles == {"intro"} and "intro" in role_pcm:
                 return role_pcm["intro"], True, None, "intro"
-            elif len(plan) >= 3 and ok_roles == {"late"} and "late" in role_pcm:
-                # Long-plan end-only: same weak placement from the audible tail.
+            elif ok_roles == {"late"} and "late" in role_pcm:
                 return role_pcm["late"], True, None, "late"
+            elif ok_roles == {"intro", "late"} and "intro" in role_pcm and "late" in role_pcm:
+                # Start+end, dead middle: weak place from both edges (not genre defer).
+                role_profiles = {
+                    role: build_profile(role_pcm[role]) for role in ("intro", "late")
+                }
+                merged = _merge_pcm_profiles(None, role_profiles=role_profiles)
+                return role_pcm["intro"], True, merged, "ends"
             else:
-                # Ends-only (intro+late, no mid) / other edge parks: defer.
-                return None, False, None, None
+                # Any other audible partial: weak place from what we got.
+                rep = (
+                    "mid"
+                    if "mid" in role_pcm
+                    else ("intro" if "intro" in role_pcm else next(iter(role_pcm)))
+                )
+                role_profiles = {role: build_profile(pcm) for role, pcm in role_pcm.items()}
+                if len(role_profiles) == 1:
+                    return role_pcm[rep], True, next(iter(role_profiles.values())), rep
+                merged = _merge_pcm_profiles(None, role_profiles=role_profiles)
+                tag = "ends" if ok_roles == {"intro", "late"} else rep
+                return role_pcm[rep], True, merged, tag
 
     # Single-window / silence-fallback / dual-salvage path.
     dur_s = _duration_s(duration_ms)
@@ -1535,7 +1550,7 @@ def analyze_audio(
     multi_window = False
     if pcm is not None:
         pcm_ok = True
-        # Single-edge long salvage is a weak listen — always tax as PCM fallback.
+        # Weak edge/ends salvage — always tax as PCM fallback (not full multi-window credit).
         if edge_salvage:
             pcm_fallback = True
         if merged_profile is not None:
@@ -1547,6 +1562,8 @@ def analyze_audio(
             multi_window = True
         else:
             valence_pcm, energy_pcm, detected_bpm, pcm_unstable, profile = _pcm_mood_cues(pcm)
+        if edge_salvage:
+            multi_window = False
         detected_bpm = _coerce_bpm(detected_bpm)
 
         onset_c = float(getattr(profile, "onset_consistency", 0.5) or 0.5) if profile else 0.5
@@ -1739,10 +1756,15 @@ def analyze_audio(
         multi_window=multi_window,
     )
     if edge_salvage:
-        # Keep single-edge salvage in the low-trust band (genre seed alone is worse,
-        # but a head/tail-only listen must not look like a full multi-window PCM place).
+        # Keep weak salvage in the low-trust band (genre seed alone is worse, but a
+        # partial listen must not look like a full honest multi-window PCM place).
         confidence = min(float(confidence), CONFIDENCE_LOW - 0.01)
-        edge_note = "intro only" if edge_salvage == "intro" else "end only"
+        edge_note = {
+            "intro": "intro only",
+            "late": "end only",
+            "ends": "ends only",
+            "mid": "mid only",
+        }.get(edge_salvage, "partial listen")
         if edge_note not in note:
             note = f"{note} · {edge_note}" if note else edge_note
     return MoodResult(

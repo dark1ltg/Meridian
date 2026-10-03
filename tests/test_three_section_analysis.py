@@ -582,8 +582,8 @@ def test_outlier_intro_does_not_poison_merge_health() -> None:
     assert "PCM weak" not in note
 
 
-def test_ends_only_intro_late_defers_on_long_plan() -> None:
-    """Rehunt score 4: intro+late without mid must defer (no pad+fade park)."""
+def test_ends_only_intro_late_salvages_on_long_plan() -> None:
+    """Start+end with dead middle: weak place from both edges (no genre defer)."""
     from meridian import features
 
     features.clear_decode_abort()
@@ -598,15 +598,29 @@ def test_ends_only_intro_late_defers_on_long_plan() -> None:
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
-            pcm, _fb, merged, edge_salvage = features._decode_pcm_with_fallback(
+            pcm, fallback, merged, edge_salvage = features._decode_pcm_with_fallback(
                 "/long.wav", duration_ms=210_000
             )
-    assert pcm is None
-    assert merged is None
+            result = features.analyze_audio(
+                "/long.wav",
+                "game",
+                "ends track",
+                "",
+                None,
+                duration_ms=210_000,
+            )
+    assert pcm is not None
+    assert merged is not None
+    assert fallback is True
+    assert edge_salvage == "ends"
+    assert result.pcm_ok is True
+    assert result.low_trust is True
+    assert result.confidence < features.CONFIDENCE_LOW
+    assert "ends only" in (result.confidence_note or "")
 
 
-def test_dual_plan_late_only_defers() -> None:
-    """Rehunt score 3: short intro+late plan with late-only decode must defer."""
+def test_dual_plan_late_only_salvages() -> None:
+    """Short intro+late plan with late-only audio: weak end place, not defer."""
     from meridian import features
 
     features.clear_decode_abort()
@@ -621,11 +635,24 @@ def test_dual_plan_late_only_defers() -> None:
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
-            pcm, _fb, merged, edge_salvage = features._decode_pcm_with_fallback(
+            pcm, fallback, merged, edge_salvage = features._decode_pcm_with_fallback(
                 "/short-dual.wav", duration_ms=35_000
             )
-    assert pcm is None
+            result = features.analyze_audio(
+                "/short-dual.wav",
+                "game",
+                "outro only",
+                "",
+                None,
+                duration_ms=35_000,
+            )
+    assert pcm is not None
     assert merged is None
+    assert fallback is True
+    assert edge_salvage == "late"
+    assert result.pcm_ok is True
+    assert result.low_trust is True
+    assert "end only" in (result.confidence_note or "")
 
 
 def test_hard_decode_miss_skips_same_seek_reffmpeg() -> None:
