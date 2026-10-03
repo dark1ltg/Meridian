@@ -1086,13 +1086,21 @@ def _merge_two_pcm_profiles(primary, secondary):
 
 
 def _weighted_profile_blend(items: list[tuple[object, float]]):
-    """Deterministic weighted mood blend (weights renormalized over survivors)."""
+    """Deterministic weighted mood blend (weights renormalized over survivors).
+
+    Zero-weight sections are dropped entirely so cold-open / vetoed intros cannot
+    poison merge health (``unstable`` / ``variation``) while coords stay mid-heavy.
+    """
     from meridian.acoustic import AcousticProfile
 
-    total_w = sum(max(0.0, float(w)) for _p, w in items)
-    if total_w <= 1e-12:
+    # Exclude zero-weight items before any health/aggregate stats (score-7 cold open).
+    positive = [(p, max(0.0, float(w))) for p, w in items if float(w) > 1e-12]
+    if not positive:
         return items[0][0]
-    normed = [(p, max(0.0, float(w)) / total_w) for p, w in items]
+    total_w = sum(w for _p, w in positive)
+    if total_w <= 1e-12:
+        return positive[0][0]
+    normed = [(p, w / total_w) for p, w in positive]
 
     def _avg(attr: str) -> float:
         return float(sum(float(getattr(p, attr)) * w for p, w in normed))
@@ -1194,22 +1202,25 @@ def _enough_section_evidence(
     planned: list[tuple[str, float]],
     ok_roles: set[str],
 ) -> bool:
-    """Partial decode is not success when it would park a lying intro-only mood."""
+    """Partial decode is not success when it would park a lying edge-only mood."""
     if not ok_roles:
         return False
     planned_roles = {role for role, _ss in planned}
-    # Long-track plan (3 windows): intro alone when mid+late failed is a lie → defer.
+    # Long-track plan (3 windows): require body evidence — not intro-only or late-only.
     if len(planned) >= 3:
         if "mid" in ok_roles:
             return True
         if "late" in ok_roles and "intro" in ok_roles:
             # Both ends without mid — usable but thin; allow with fallback note.
             return True
-        if ok_roles == {"intro"} or ok_roles == {"late"}:
-            # Single edge window on a long plan — only late is acceptable as fallback.
-            return ok_roles == {"late"}
+        # Single edge window (intro pad or fade/applause outro) → defer.
         return False
-    # Short / dual plans: any usable non-empty set is enough.
+    # Dual plans (short/medium): a later window was planned — intro-only is a lie.
+    if len(planned) == 2:
+        if ok_roles - {"intro"}:
+            return True
+        return False
+    # Single-window plan: any usable decode is enough.
     if planned_roles and ok_roles:
         return True
     return False
@@ -1231,6 +1242,9 @@ def _decode_pcm_with_fallback(
     if not plan:
         return None, False, None
 
+    # Seeks that returned audio but failed the energy gate — re-ffmpeg is waste (score-3).
+    no_signal_starts: set[float] = set()
+
     # Multi-section path (2 or 3 planned windows).
     if len(plan) >= 2:
         role_pcm: dict[str, np.ndarray] = {}
@@ -1240,6 +1254,8 @@ def _decode_pcm_with_fallback(
             pcm = _decode_pcm(path, start_s=float(start_s), duration_s=SECTION_WINDOW_S)
             if pcm is not None and _pcm_signal_ok(pcm):
                 role_pcm[role] = pcm
+            elif pcm is not None:
+                no_signal_starts.add(round(float(start_s), 2))
 
         ok_roles = set(role_pcm)
         if decode_abort_requested():
@@ -1253,17 +1269,23 @@ def _decode_pcm_with_fallback(
                 if "mid" in role_pcm
                 else ("late" if "late" in role_pcm else next(iter(role_pcm)))
             )
-            partial = ok_roles != {role for role, _ in plan}
-            # Intro-only is never "enough" on a 3-window plan (guarded above).
+            planned_roles = {role for role, _ in plan}
+            partial = ok_roles != planned_roles
+            # Silent/missing intro with solid mid+late body is full PCM credit,
+            # not a weak-fallback tax (score-5 asymmetry vs cold-open pad that passes signal).
+            if "mid" in ok_roles and "late" in ok_roles:
+                partial = False
+            # Single surviving window that passed honesty checks is still thin.
             if len(role_profiles) == 1:
                 return role_pcm[rep_role], True, None
             merged = _merge_pcm_profiles(None, role_profiles=role_profiles)
             return role_pcm[rep_role], partial, merged
 
-        # Not enough evidence for an honest multi-window mood — try single-window
-        # silence fallback only when the plan was short (1–2), not when mid+late
-        # failed on a long track leaving a cold intro.
-        if len(plan) >= 3 and ok_roles and ok_roles <= {"intro"}:
+        # Not enough honest multi-window evidence. Do not park edge-only moods
+        # (intro pad / late fade) via the single-window silence fallback below.
+        if len(plan) >= 3 and ok_roles:
+            return None, False, None
+        if len(plan) >= 2 and ok_roles and ok_roles <= {"intro"}:
             return None, False, None
 
     # Single-window / silence-fallback path.
@@ -1282,7 +1304,7 @@ def _decode_pcm_with_fallback(
         if decode_abort_requested():
             return None, False, None
         key = round(float(ss), 2)
-        if key in seen:
+        if key in seen or key in no_signal_starts:
             continue
         seen.add(key)
         pcm = _decode_pcm(path, start_s=float(ss), duration_s=win_s)

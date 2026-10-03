@@ -122,8 +122,24 @@ def test_cold_open_intro_does_not_veto_mid_late() -> None:
         unstable=True,
         variation=0.4,
     )
-    mid = _prof(valence=0.62, energy=0.70, flux=0.55, onset_rate=0.9, onset_consistency=0.85)
-    late = _prof(valence=0.60, energy=0.68, flux=0.52, onset_rate=0.85, onset_consistency=0.8)
+    mid = _prof(
+        valence=0.62,
+        energy=0.70,
+        flux=0.55,
+        onset_rate=0.9,
+        onset_consistency=0.85,
+        variation=0.08,
+        unstable=False,
+    )
+    late = _prof(
+        valence=0.60,
+        energy=0.68,
+        flux=0.52,
+        onset_rate=0.85,
+        onset_consistency=0.8,
+        variation=0.10,
+        unstable=False,
+    )
 
     merged = _merge_pcm_profiles(
         None, role_profiles={"intro": cold, "mid": mid, "late": late}
@@ -132,6 +148,9 @@ def test_cold_open_intro_does_not_veto_mid_late() -> None:
     assert merged.energy > 0.55
     assert merged.valence > 0.50
     assert abs(merged.energy - mid.energy) < abs(merged.energy - cold.energy)
+    # Score 7: zero-weight cold intro must not poison merge health stats.
+    assert merged.unstable is False
+    assert merged.variation <= max(mid.variation, late.variation) + 1e-9
 
 
 def test_enough_section_evidence_partial_rules() -> None:
@@ -141,12 +160,14 @@ def test_enough_section_evidence_partial_rules() -> None:
     assert _enough_section_evidence(plan3, {"mid"})
     assert _enough_section_evidence(plan3, {"mid", "late"})
     assert _enough_section_evidence(plan3, {"intro", "late"})
-    assert _enough_section_evidence(plan3, {"late"})
+    assert not _enough_section_evidence(plan3, {"late"})  # score 4: late-only defers
     assert not _enough_section_evidence(plan3, {"intro"})
     assert not _enough_section_evidence(plan3, set())
 
     plan2 = [("intro", 0.0), ("mid", 20.0)]
-    assert _enough_section_evidence(plan2, {"intro"})
+    assert not _enough_section_evidence(plan2, {"intro"})  # score 6: dual intro-only
+    assert _enough_section_evidence(plan2, {"mid"})
+    assert _enough_section_evidence(plan2, {"intro", "mid"})
 
 
 def test_decode_partial_intro_only_defers_on_long_plan() -> None:
@@ -289,3 +310,158 @@ def test_multi_window_confidence_note_stable() -> None:
     )
     assert score == score2
     assert note == note2
+
+
+def test_cold_open_does_not_poison_confidence() -> None:
+    """Score 7/2: zero-weight cold intro keeps body confidence (no weak/unstable tax)."""
+    from meridian.features import _merge_pcm_profiles
+
+    cold = _prof(
+        valence=0.12,
+        energy=0.10,
+        flux=0.08,
+        onset_rate=0.04,
+        onset_consistency=0.15,
+        energy_mean=0.18,
+        unstable=True,
+        variation=0.45,
+    )
+    mid = _prof(
+        valence=0.55,
+        energy=0.60,
+        flux=0.50,
+        onset_rate=0.8,
+        onset_consistency=0.85,
+        variation=0.08,
+        unstable=False,
+    )
+    late = _prof(
+        valence=0.58,
+        energy=0.62,
+        flux=0.48,
+        onset_rate=0.75,
+        onset_consistency=0.82,
+        variation=0.09,
+        unstable=False,
+    )
+    body = _merge_pcm_profiles(None, role_profiles={"mid": mid, "late": late})
+    with_cold = _merge_pcm_profiles(
+        None, role_profiles={"intro": cold, "mid": mid, "late": late}
+    )
+    assert with_cold.unstable is False
+    assert with_cold.variation <= max(mid.variation, late.variation) + 1e-9
+
+    conf_body, _ = confidence_from_evidence(
+        tag_key="rock",
+        pcm_ok=True,
+        pcm_fallback=False,
+        pcm_unstable=body.unstable,
+        variation=body.variation,
+        onset_consistency=body.onset_consistency,
+        multi_window=True,
+    )
+    conf_cold, note = confidence_from_evidence(
+        tag_key="rock",
+        pcm_ok=True,
+        pcm_fallback=False,
+        pcm_unstable=with_cold.unstable,
+        variation=with_cold.variation,
+        onset_consistency=with_cold.onset_consistency,
+        multi_window=True,
+    )
+    assert conf_cold == conf_body
+    assert "PCM weak" not in note
+    assert "unstable spectrum" not in note
+
+
+def test_dual_plan_intro_only_does_not_succeed() -> None:
+    """Score 6/2: medium dual-plan with mid decode miss must defer, not park intro."""
+    from meridian import features
+
+    features.clear_decode_abort()
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        if abs(start_s) < 0.01:
+            return np.ones(11025 * 4, dtype=np.float32) * 0.05
+        return None
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
+            pcm, _fb, merged = features._decode_pcm_with_fallback(
+                "/medium.wav", duration_ms=45_000
+            )
+    assert pcm is None
+    assert merged is None
+
+
+def test_silent_intro_mid_late_not_weak_fallback() -> None:
+    """Score 5/2: silent intro + solid mid/late is full PCM, not pcm_fallback tax."""
+    from meridian import features
+
+    features.clear_decode_abort()
+    built = [
+        _prof(valence=0.55, energy=0.60, onset_consistency=0.85, variation=0.08),
+        _prof(valence=0.58, energy=0.62, onset_consistency=0.82, variation=0.09),
+    ]
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        # Intro @ 0 is silence (signal gate fails); mid/late return audio.
+        if abs(start_s) < 0.01:
+            return np.zeros(11025 * 4, dtype=np.float32)
+        return np.ones(11025 * 4, dtype=np.float32) * 0.05
+
+    def fake_signal_ok(pcm: np.ndarray) -> bool:
+        return float(np.sqrt(np.mean(np.square(pcm)))) > 1e-4
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", side_effect=fake_signal_ok):
+            with patch("meridian.acoustic.build_profile", side_effect=built):
+                pcm, partial, merged = features._decode_pcm_with_fallback(
+                    "/long.wav", duration_ms=210_000
+                )
+    assert pcm is not None
+    assert merged is not None
+    assert partial is False  # not weak-fallback
+
+    conf_full, note_full = confidence_from_evidence(
+        tag_key="rock",
+        pcm_ok=True,
+        pcm_fallback=False,
+        multi_window=True,
+        variation=0.08,
+        onset_consistency=0.85,
+    )
+    conf_taxed, note_taxed = confidence_from_evidence(
+        tag_key="rock",
+        pcm_ok=True,
+        pcm_fallback=True,
+        multi_window=True,
+        variation=0.08,
+        onset_consistency=0.85,
+    )
+    assert conf_full > conf_taxed
+    assert "PCM fallback" not in note_full
+    assert "PCM fallback" in note_taxed
+
+
+def test_late_only_long_plan_defers() -> None:
+    """Score 4/2: late-only on a 3-window plan must defer (no outro-only park)."""
+    from meridian import features
+
+    features.clear_decode_abort()
+    plan = features._analysis_window_plan(210_000)
+    assert [r for r, _ in plan] == ["intro", "mid", "late"]
+    late_start = plan[2][1]
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        if abs(start_s - late_start) < 0.05:
+            return np.ones(11025 * 4, dtype=np.float32) * 0.05
+        return None
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
+            pcm, _fb, merged = features._decode_pcm_with_fallback(
+                "/long.wav", duration_ms=210_000
+            )
+    assert pcm is None
+    assert merged is None

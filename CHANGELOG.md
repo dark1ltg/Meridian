@@ -14,6 +14,14 @@ Renew Queue: an explicit new recommendation pass from the current listen matrix,
 - Safe seeks (unknown/short duration never past EOF); abort clears/kills active ffmpeg across sequential seeks
 - Confidence note can mention multi-window; merge weights stay deterministic (Rescan jump dampening; pins unchanged)
 
+### Local: three-section bug-hunt fixes (scores 2–7)
+- Cold-open zero-weight intro no longer poisons merge `unstable` / `variation` (body keeps real confidence)
+- Dual-plan (short/medium): intro-only when a later window was planned **defers** (no lying pad success)
+- Silent intro + solid mid/late is full PCM credit (not weak-fallback taxed)
+- Long-plan late-only (fade/applause) **defers** — require mid/body evidence
+- ~36s three-window budget: **accepted cost**; skip re-ffmpeg of seeks that already returned no-signal audio
+- Tests cover cold-open health, dual intro-only defer, silent-intro full credit, late-only defer
+
 ### 2026-10-02 refresh (bug-hunt: queue advance / analyze honesty)
 - Dead next (missing/denied): keep the still-playing track instead of `stop`+`play_track` hard-restart from 0
 - Failed auto-advance near end: `release_advance_lock` holds fade re-arm so position ticks cannot thrash replenish/map rebuilds
