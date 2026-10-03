@@ -50,14 +50,14 @@ jobs:
           set -euo pipefail
           SHA=$(cut -d' ' -f1 dist/Meridian-x86_64.AppImage.sha256)
           COMMIT=${GITHUB_SHA}
-          NOTES="Meridian 1.3.6 — source archives + AppImage refreshed 2026-10-01. Version stays **1.3.6**.
+          NOTES="Meridian 1.3.6 — source archives + AppImage refreshed $(date -u +%Y-%m-%d). Version stays **1.3.6**.
 
-          ## This refresh (high-severity / score 7–10)
-          - Close ffmpeg decode pipes on abort/timeout/error (FD / subprocess leak)
-          - Scan-worker generation guards so stale completions cannot replace a newer scan
-          - Analyze-worker capture/reap per generation; ignore stale completion restarts
-          - Loved tracks that fit the lens stay in NOW/DEEP instead of FILL under band bias
-          - ffmpeg wall timeout scales with decode duration (\`max(dur + 10, 30)\`)
+          ## What’s new (plain English)
+          - **Bug fix (critical):** first-run analyze now starts after scan on newer Qt/PySide (the handoff was silently dropped before).
+          - **Faster on SSDs:** two waveform listeners on flash storage; one on hard drives (override: \`MERIDIAN_ANALYZE_WORKERS=1\` or \`2\`).
+          - **Smarter short listens:** long songs get intro / middle / end tastes (~12s each) instead of one mid-track peek.
+          - **Whole library on the map:** any audible listen places a star (weak when partial); tags alone place a rough star; only truly empty tracks stay pending.
+          - **Bug fixes:** good listens are not wiped by a bad retry; rough pins stay dim; scan waits while analyze/tidy runs; tidy runs off the UI thread; honest status when a pass was tags-only.
 
           Source tag \`v1.3.6\` points at master \`${COMMIT}\` (GitHub Source code zip/tar.gz match this commit).
           AppImage SHA256: \`${SHA}\`
@@ -65,7 +65,7 @@ jobs:
           See [CHANGELOG.md](https://github.com/dark1ltg/Meridian/blob/master/CHANGELOG.md) for full notes.
 
           ## Still in 1.3.6
-          Mood-map import UX (2026-09-25), Renew Queue, mid-fade credit, VA album anti-repeat, BPM 0 scan confidence, Renew first-run tip, pin lock rings."
+          Queue/Rescan/search reliability (2026-10-02), mood-map import UX (2026-09-25), Renew Queue, mid-fade credit, VA album anti-repeat, BPM 0 scan confidence, Renew first-run tip, pin lock rings."
 
           # Drop existing release + tag so source archives and published_at refresh.
           gh release delete v1.3.6 --yes || true
