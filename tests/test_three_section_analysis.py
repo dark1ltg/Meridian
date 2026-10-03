@@ -159,7 +159,7 @@ def test_enough_section_evidence_partial_rules() -> None:
     plan3 = [("intro", 0.0), ("mid", 40.0), ("late", 80.0)]
     assert _enough_section_evidence(plan3, {"mid"})
     assert _enough_section_evidence(plan3, {"mid", "late"})
-    assert _enough_section_evidence(plan3, {"intro", "late"})
+    assert not _enough_section_evidence(plan3, {"intro", "late"})  # rehunt 4: ends-only
     assert not _enough_section_evidence(plan3, {"late"})  # score 4: late-only defers
     assert not _enough_section_evidence(plan3, {"intro"})
     assert not _enough_section_evidence(plan3, set())
@@ -168,6 +168,11 @@ def test_enough_section_evidence_partial_rules() -> None:
     assert not _enough_section_evidence(plan2, {"intro"})  # score 6: dual intro-only
     assert _enough_section_evidence(plan2, {"mid"})
     assert _enough_section_evidence(plan2, {"intro", "mid"})
+
+    plan_short = [("intro", 0.0), ("late", 20.0)]
+    assert not _enough_section_evidence(plan_short, {"late"})  # rehunt 3: dual late-only
+    assert not _enough_section_evidence(plan_short, {"intro"})
+    assert _enough_section_evidence(plan_short, {"intro", "late"})
 
 
 def test_decode_partial_intro_only_defers_on_long_plan() -> None:
@@ -465,3 +470,183 @@ def test_late_only_long_plan_defers() -> None:
             )
     assert pcm is None
     assert merged is None
+
+
+def test_outlier_intro_does_not_poison_merge_health() -> None:
+    """Rehunt score 5: shrunk flashy intro keeps tiny coord nudge, not health poison."""
+    from meridian.features import _merge_pcm_profiles
+
+    flashy = _prof(
+        valence=0.95,
+        energy=0.92,
+        flux=0.80,
+        onset_rate=0.95,
+        onset_consistency=0.3,
+        energy_mean=0.85,
+        unstable=True,
+        variation=0.50,
+    )
+    mid = _prof(
+        valence=0.52,
+        energy=0.55,
+        flux=0.45,
+        onset_rate=0.7,
+        onset_consistency=0.85,
+        variation=0.08,
+        unstable=False,
+    )
+    late = _prof(
+        valence=0.54,
+        energy=0.57,
+        flux=0.44,
+        onset_rate=0.68,
+        onset_consistency=0.82,
+        variation=0.09,
+        unstable=False,
+    )
+    body = _merge_pcm_profiles(None, role_profiles={"mid": mid, "late": late})
+    with_flash = _merge_pcm_profiles(
+        None, role_profiles={"intro": flashy, "mid": mid, "late": late}
+    )
+    # Coords stay near the body (tiny intro nudge allowed).
+    assert abs(with_flash.energy - body.energy) < 0.08
+    assert with_flash.unstable is False
+    assert with_flash.variation <= max(mid.variation, late.variation) + 1e-9
+
+    conf_body, _ = confidence_from_evidence(
+        tag_key="rock",
+        pcm_ok=True,
+        pcm_fallback=False,
+        pcm_unstable=body.unstable,
+        variation=body.variation,
+        onset_consistency=body.onset_consistency,
+        multi_window=True,
+    )
+    conf_flash, note = confidence_from_evidence(
+        tag_key="rock",
+        pcm_ok=True,
+        pcm_fallback=False,
+        pcm_unstable=with_flash.unstable,
+        variation=with_flash.variation,
+        onset_consistency=with_flash.onset_consistency,
+        multi_window=True,
+    )
+    assert conf_flash == conf_body
+    assert "unstable spectrum" not in note
+    assert "PCM weak" not in note
+
+
+def test_ends_only_intro_late_defers_on_long_plan() -> None:
+    """Rehunt score 4: intro+late without mid must defer (no pad+fade park)."""
+    from meridian import features
+
+    features.clear_decode_abort()
+    plan = features._analysis_window_plan(210_000)
+    assert [r for r, _ in plan] == ["intro", "mid", "late"]
+    intro_start, late_start = plan[0][1], plan[2][1]
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        if abs(start_s - intro_start) < 0.05 or abs(start_s - late_start) < 0.05:
+            return np.ones(11025 * 4, dtype=np.float32) * 0.05
+        return None
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
+            pcm, _fb, merged = features._decode_pcm_with_fallback(
+                "/long.wav", duration_ms=210_000
+            )
+    assert pcm is None
+    assert merged is None
+
+
+def test_dual_plan_late_only_defers() -> None:
+    """Rehunt score 3: short intro+late plan with late-only decode must defer."""
+    from meridian import features
+
+    features.clear_decode_abort()
+    plan = features._analysis_window_plan(35_000)
+    assert [r for r, _ in plan] == ["intro", "late"]
+    late_start = plan[1][1]
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        if abs(start_s - late_start) < 0.05:
+            return np.ones(11025 * 4, dtype=np.float32) * 0.05
+        return None
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
+            pcm, _fb, merged = features._decode_pcm_with_fallback(
+                "/short-dual.wav", duration_ms=35_000
+            )
+    assert pcm is None
+    assert merged is None
+
+
+def test_hard_decode_miss_skips_same_seek_reffmpeg() -> None:
+    """Rehunt score 2: hard decode misses must not re-ffmpeg the same section seeks."""
+    from meridian import features
+
+    features.clear_decode_abort()
+    calls: list[float] = []
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        calls.append(float(start_s))
+        return None  # hard miss every seek
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", return_value=True):
+            pcm, _fb, merged = features._decode_pcm_with_fallback(
+                "/broken.wav", duration_ms=210_000
+            )
+    assert pcm is None
+    assert merged is None
+    # 3 section seeks + at most one distinct mid_fb — not 3+3+mid_fb (=7).
+    assert len(calls) <= 4
+    # Section starts appear once each.
+    plan = features._analysis_window_plan(210_000)
+    for _role, ss in plan:
+        assert calls.count(float(ss)) == 1
+
+
+def test_mid_only_keeps_section_profile_handle() -> None:
+    """Rehunt score 2: mid-only survivor keeps built profile (multi-window credit path)."""
+    from meridian import features
+
+    features.clear_decode_abort()
+    plan = features._analysis_window_plan(210_000)
+    mid_start = plan[1][1]
+    mid_prof = _prof(
+        valence=0.55,
+        energy=0.60,
+        onset_consistency=0.88,
+        variation=0.07,
+        unstable=False,
+    )
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        if abs(start_s - mid_start) < 0.05:
+            return np.ones(11025 * 4, dtype=np.float32) * 0.05
+        return None
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
+            with patch("meridian.acoustic.build_profile", return_value=mid_prof):
+                pcm, partial, merged = features._decode_pcm_with_fallback(
+                    "/long.wav", duration_ms=210_000
+                )
+    assert pcm is not None
+    assert partial is True
+    assert merged is not None
+    assert merged.valence == mid_prof.valence
+    assert merged.energy == mid_prof.energy
+    # analyze_audio sets multi_window from merged_profile is not None
+    conf, note = confidence_from_evidence(
+        tag_key="rock",
+        pcm_ok=True,
+        pcm_fallback=True,
+        multi_window=True,
+        variation=merged.variation,
+        onset_consistency=merged.onset_consistency,
+    )
+    assert "multi-window" in note
+    assert conf > 0.0

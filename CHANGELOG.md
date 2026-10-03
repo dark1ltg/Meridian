@@ -22,6 +22,13 @@ Renew Queue: an explicit new recommendation pass from the current listen matrix,
 - ~36s three-window budget: **accepted cost**; skip re-ffmpeg of seeks that already returned no-signal audio
 - Tests cover cold-open health, dual intro-only defer, silent-intro full credit, late-only defer
 
+### Local: three-section re-hunt fixes (scores 2–5)
+- Shrunk outlier/flashy intro keeps a tiny coord nudge but is excluded from merge `unstable` / `variation` (body confidence)
+- Long-plan ends-only (`intro`+`late`, no mid) **defers** — no pad+fade park when mid was planned
+- Short dual-plan late-only **defers** (outro park; consistent with long-plan late-only)
+- Hard decode misses skip same-seek re-ffmpeg; mid-only (single survivor) keeps the built section profile / multi-window credit path
+- Tests cover outlier health, ends-only defer, dual late-only defer, hard-miss reseek skip, mid-only profile handle
+
 ### 2026-10-02 refresh (bug-hunt: queue advance / analyze honesty)
 - Dead next (missing/denied): keep the still-playing track instead of `stop`+`play_track` hard-restart from 0
 - Failed auto-advance near end: `release_advance_lock` holds fade re-arm so position ticks cannot thrash replenish/map rebuilds

@@ -910,6 +910,10 @@ SECTION_WINDOW_S = 12.0
 SECTION_MIN_GAP_S = 8.0
 # Mid-heavy blend for intro / mid / late when all three are usable.
 SECTION_BLEND_WEIGHTS = {"intro": 0.20, "mid": 0.50, "late": 0.30}
+# Shrunk outlier intro keeps a tiny coord nudge but must not poison merge health
+# (unstable / variation) — same spirit as zero-weight cold-open (rehunt score 5).
+SECTION_OUTLIER_INTRO_WEIGHT = 0.08
+SECTION_HEALTH_WEIGHT_MIN = 0.10
 
 
 def _duration_s(duration_ms: int) -> float:
@@ -1090,6 +1094,8 @@ def _weighted_profile_blend(items: list[tuple[object, float]]):
 
     Zero-weight sections are dropped entirely so cold-open / vetoed intros cannot
     poison merge health (``unstable`` / ``variation``) while coords stay mid-heavy.
+    Tiny-weight sections (shrunk outlier intro) still nudge coords but are excluded
+    from health aggregates — same spirit as zero-weight cold-open (rehunt score 5).
     """
     from meridian.acoustic import AcousticProfile
 
@@ -1101,6 +1107,13 @@ def _weighted_profile_blend(items: list[tuple[object, float]]):
     if total_w <= 1e-12:
         return positive[0][0]
     normed = [(p, w / total_w) for p, w in positive]
+
+    # Health from meaningful-weight survivors only (drop shrunk outlier intro @ 0.08).
+    health_src = [(p, w) for p, w in positive if w >= SECTION_HEALTH_WEIGHT_MIN]
+    if not health_src:
+        health_src = positive
+    health_total = sum(w for _p, w in health_src)
+    health_normed = [(p, w / health_total) for p, w in health_src]
 
     def _avg(attr: str) -> float:
         return float(sum(float(getattr(p, attr)) * w for p, w in normed))
@@ -1114,7 +1127,7 @@ def _weighted_profile_blend(items: list[tuple[object, float]]):
         valence=float(np.clip(_avg("valence"), 0.03, 0.97)),
         energy=float(np.clip(_avg("energy"), 0.03, 0.97)),
         bpm=bpm,
-        unstable=bool(any(bool(p.unstable) for p, _w in normed)),
+        unstable=bool(any(bool(p.unstable) for p, _w in health_normed)),
         brightness=float(_avg("brightness")),
         flux=float(_avg("flux")),
         band_energy=bands,
@@ -1126,7 +1139,7 @@ def _weighted_profile_blend(items: list[tuple[object, float]]):
         onset_rate=float(anchor.onset_rate),
         onset_burstiness=float(anchor.onset_burstiness),
         onset_consistency=float(anchor.onset_consistency),
-        variation=float(max(float(p.variation) for p, _w in normed)),
+        variation=float(max(float(p.variation) for p, _w in health_normed)),
         window_count=int(sum(int(p.window_count) for p, _w in normed)),
         pcm_samples=int(sum(int(p.pcm_samples) for p, _w in normed)),
     )
@@ -1167,8 +1180,9 @@ def _merge_section_profiles(role_profiles: dict[str, object]):
         weights["mid"] = 0.62
         weights["late"] = 0.38
     elif intro_vs_body > 0.22 and mid_late_agree:
-        # Active-but-outlier intro (false cold? drama open): shrink, do not veto.
-        weights["intro"] = 0.08
+        # Active-but-outlier intro (false cold? drama open): tiny coord nudge only.
+        # Health excludes this weight via SECTION_HEALTH_WEIGHT_MIN (rehunt score 5).
+        weights["intro"] = SECTION_OUTLIER_INTRO_WEIGHT
         weights["mid"] = 0.55
         weights["late"] = 0.37
 
@@ -1206,20 +1220,19 @@ def _enough_section_evidence(
     if not ok_roles:
         return False
     planned_roles = {role for role, _ss in planned}
-    # Long-track plan (3 windows): require body evidence — not intro-only or late-only.
+    # Long-track plan (3 windows): require mid/body — not edges-only (pad+fade).
     if len(planned) >= 3:
-        if "mid" in ok_roles:
-            return True
-        if "late" in ok_roles and "intro" in ok_roles:
-            # Both ends without mid — usable but thin; allow with fallback note.
-            return True
-        # Single edge window (intro pad or fade/applause outro) → defer.
-        return False
-    # Dual plans (short/medium): a later window was planned — intro-only is a lie.
+        # Mid planned and missing → reject intro+late ends-only (rehunt score 4).
+        # Also rejects intro-only / late-only (prior score 4/6 honesty).
+        return "mid" in ok_roles
+    # Dual plans (short/medium): intro-only is a lie; late-only outro also defers
+    # (rehunt score 3 — prefer defer for consistency with long-plan late-only).
     if len(planned) == 2:
-        if ok_roles - {"intro"}:
-            return True
-        return False
+        if not (ok_roles - {"intro"}):
+            return False
+        if ok_roles == {"late"} and "mid" not in planned_roles:
+            return False
+        return True
     # Single-window plan: any usable decode is enough.
     if planned_roles and ok_roles:
         return True
@@ -1242,8 +1255,9 @@ def _decode_pcm_with_fallback(
     if not plan:
         return None, False, None
 
-    # Seeks that returned audio but failed the energy gate — re-ffmpeg is waste (score-3).
-    no_signal_starts: set[float] = set()
+    # Seeks already tried: no-signal (energy gate) or hard decode miss — do not
+    # blindly re-ffmpeg the same offsets in the silence-fallback pass (rehunt score 2).
+    skip_reseek_starts: set[float] = set()
 
     # Multi-section path (2 or 3 planned windows).
     if len(plan) >= 2:
@@ -1252,10 +1266,12 @@ def _decode_pcm_with_fallback(
             if decode_abort_requested():
                 return None, False, None
             pcm = _decode_pcm(path, start_s=float(start_s), duration_s=SECTION_WINDOW_S)
+            key = round(float(start_s), 2)
             if pcm is not None and _pcm_signal_ok(pcm):
                 role_pcm[role] = pcm
-            elif pcm is not None:
-                no_signal_starts.add(round(float(start_s), 2))
+            else:
+                # Hard miss (None) or quiet/no-signal audio — both are spent seeks.
+                skip_reseek_starts.add(key)
 
         ok_roles = set(role_pcm)
         if decode_abort_requested():
@@ -1275,17 +1291,17 @@ def _decode_pcm_with_fallback(
             # not a weak-fallback tax (score-5 asymmetry vs cold-open pad that passes signal).
             if "mid" in ok_roles and "late" in ok_roles:
                 partial = False
-            # Single surviving window that passed honesty checks is still thin.
+            # Single survivor that passed honesty: keep the built section profile so
+            # analyze retains the merge-handle / multi-window credit path (rehunt score 2).
             if len(role_profiles) == 1:
-                return role_pcm[rep_role], True, None
+                sole = next(iter(role_profiles.values()))
+                return role_pcm[rep_role], True, sole
             merged = _merge_pcm_profiles(None, role_profiles=role_profiles)
             return role_pcm[rep_role], partial, merged
 
         # Not enough honest multi-window evidence. Do not park edge-only moods
-        # (intro pad / late fade) via the single-window silence fallback below.
-        if len(plan) >= 3 and ok_roles:
-            return None, False, None
-        if len(plan) >= 2 and ok_roles and ok_roles <= {"intro"}:
+        # (intro pad / late fade / ends-only / dual late-only) via silence fallback.
+        if len(plan) >= 2 and ok_roles:
             return None, False, None
 
     # Single-window / silence-fallback path.
@@ -1304,7 +1320,7 @@ def _decode_pcm_with_fallback(
         if decode_abort_requested():
             return None, False, None
         key = round(float(ss), 2)
-        if key in seen or key in no_signal_starts:
+        if key in seen or key in skip_reseek_starts:
             continue
         seen.add(key)
         pcm = _decode_pcm(path, start_s=float(ss), duration_s=win_s)
