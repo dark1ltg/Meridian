@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from time import time
 
-from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Slot
+from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Slot
 from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -55,6 +55,43 @@ from meridian.ui.mood_map import MoodMap
 from meridian.ui.transport import TransportBar
 
 
+class _ScanFinishBridge(QObject):
+    """Queued scan finished/failed must be real Slots — PySide drops lambda queues."""
+
+    def __init__(self, handler, gen: int, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._handler = handler
+        self._gen = gen
+
+    @Slot(int)
+    def on_finished(self, added: int) -> None:
+        handler = self._handler
+        if handler is not None:
+            handler(added, self._gen)
+
+
+class _AnalyzeFinishBridge(QObject):
+    """Capture gen/thread/worker for analyze finished without a Queued lambda."""
+
+    def __init__(
+        self,
+        window: "MainWindow",
+        gen: int,
+        thread,
+        worker,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._window = window
+        self._gen = gen
+        self._thread = thread
+        self._worker = worker
+
+    @Slot()
+    def on_finished(self) -> None:
+        self._window._analyze_done(self._gen, self._thread, self._worker)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -79,9 +116,11 @@ class MainWindow(QMainWindow):
         self._scan_thread = None
         self._scan_worker = None
         self._scan_gen = 0
+        self._scan_finish_bridge: _ScanFinishBridge | None = None
         self._analyze_thread = None
         self._analyze_worker = None
         self._analyze_gen = 0
+        self._analyze_finish_bridge: _AnalyzeFinishBridge | None = None
         # Timed-out workers kept alive (signals disconnected) until QThread ends.
         self._lingering_workers: list[tuple] = []
         self._close_library_when_idle = False
@@ -666,16 +705,19 @@ class MainWindow(QMainWindow):
         gen = self._scan_gen
         self._scan_worker = ScanWorker(self.library, force=force)
         self._scan_thread = start_worker(self._scan_worker)
-        # Always queue UI slots — Python lambdas default to DirectConnection and
-        # would run on the worker thread (unsafe for widgets / QThread.wait).
+        # Queue UI handlers on the GUI thread. Use real @Slot bridges — PySide 6.11
+        # silently drops QueuedConnection to lambdas/partials (scan never handed
+        # off to analyze on first-run).
         queued = Qt.ConnectionType.QueuedConnection
         self._scan_worker.progress.connect(self._set_job_status, queued)
-        self._scan_worker.failed.connect(
-            lambda m: QMessageBox.warning(self, "Scan failed", m), queued
-        )
-        self._scan_worker.finished.connect(
-            lambda added, g=gen: on_finished(added, g), queued
-        )
+        self._scan_worker.failed.connect(self._on_scan_failed, queued)
+        bridge = _ScanFinishBridge(on_finished, gen, parent=self)
+        self._scan_finish_bridge = bridge
+        self._scan_worker.finished.connect(bridge.on_finished, queued)
+
+    @Slot(str)
+    def _on_scan_failed(self, message: str) -> None:
+        QMessageBox.warning(self, "Scan failed", message)
 
     def _disconnect_worker(self, worker) -> None:
         if worker is None:
@@ -850,10 +892,12 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self._on_analyze_progress, queued)
         # Capture this generation's thread/worker so a gen-mismatch finish still
         # disposes the superseded QThread instead of orphaning it (AB3/H2).
-        worker.finished.connect(
-            lambda g=gen, t=thread, w=worker: self._analyze_done(g, t, w), queued
-        )
+        # Must be a @Slot bridge — Queued lambda never delivers on PySide 6.11.
+        bridge = _AnalyzeFinishBridge(self, gen, thread, worker, parent=self)
+        self._analyze_finish_bridge = bridge
+        worker.finished.connect(bridge.on_finished, queued)
 
+    @Slot(str, int, int)
     def _on_analyze_progress(self, name: str, i: int, n: int) -> None:
         self._set_job_status(f"Listening to waveform {i}/{n}: {name}")
         # Throttle map refresh so the sky opens during long analyzes without

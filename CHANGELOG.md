@@ -6,6 +6,11 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds bug-hunt fixes (Rescan PCM keep, matrix click, zoom LOD, host ffmpeg warn), search select→play/queue inject, high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
 
+### Local: scan→analyze handoff (QueuedConnection lambda drop)
+- PySide 6.11 drops `QueuedConnection` to lambdas/partials — first-run scan never called `start_analyze`, leaving seed-only moods
+- Scan/analyze `finished` (and scan `failed`) now use `@Slot` bridges so the GUI thread receives the handoff
+- Status should advance to `Listening to waveform i/n…` after index; tests cover the framework drop and Slot delivery
+
 ### Local: three-section app-wide fixes (scores 2, 4, 6)
 - Dual short/medium plans: when the second window fails but the first succeeded, **salvage** with a ~28s single listen from 0 / primary (pre-three-section) instead of hard-deferring to seed
 - Unknown duration (`duration_ms==0`): decode ~28s from 0 (not a lone 12s mid stub)
