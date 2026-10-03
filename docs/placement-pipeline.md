@@ -29,7 +29,7 @@ From tags and folders, Meridian picks a starting spot — the “genre cloud.”
 
 ### 2. Compare to the short listen
 
-After analysis, it has a second opinion from the waveform.
+After analysis, it has a second opinion from the waveform (on long tracks: a mid-heavy blend of intro / mid / late 12s tastes — see [How Meridian listens](audio-analysis-pipeline.md)).
 
 It asks: *How far apart are the sticker guess and the listen?*  
 And: *Did the listen sound steady and trustworthy, or shaky?*

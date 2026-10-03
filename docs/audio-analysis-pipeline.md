@@ -9,10 +9,12 @@ For how that listen turns into a star on the map, see [How stars get placed](pla
 
 Meridian does **not** listen to the whole song every time.
 
-It takes about **28 seconds** of sound (mono, lower quality on purpose so it’s fast), usually from the **middle** of the track.  
-Long songs get **two shorter tastes** (about 14 + 14 seconds) that still add up to the same 28-second budget — not extra work.
+On long enough tracks it takes **three 12-second tastes** — **intro**, **mid**, and **late** (about **36 seconds** total).  
+Those tastes are blended with a **mid-heavy** mix (roughly 20% intro / 50% mid / 30% late), not a blind average.
 
-From that snippet it guesses:
+Shorter tracks get **one or two** windows only — Meridian will not triple-sample the same few seconds of audio.
+
+From that listen it guesses:
 
 - **Shadow ↔ Glow** — darker / softer vs brighter / more open  
 - **Still ↔ Kinetic** — calm vs moving / punchy  
@@ -42,17 +44,19 @@ That gives a starting “neighborhood” — like “this is probably metal-ener
 
 ### 3. The short listen (`ffmpeg`)
 
-It asks your computer’s `ffmpeg` for that ~28s of audio. Meridian does **not** ship `ffmpeg` inside the AppImage — it must be on the host `PATH`.
+It asks your computer’s `ffmpeg` for those section windows. Meridian does **not** ship `ffmpeg` inside the AppImage — it must be on the host `PATH`.
 
-- If the first grab is silence, it tries another spot.  
-- On long tracks, two tastes are compared. If the intro and the drop feel like different songs, it keeps the **steadier** taste instead of averaging them into something fake in the middle.
-- If `ffmpeg` is missing, Meridian still plays music, but analyze leaves stars on genre/folder seeds instead of inventing a waveform placement. Startup shows a warning dialog and a sticky status tip (same idea as the missing-libx264 tip).
+- Seeks stay inside the known duration (unknown length → listen from the start only).  
+- On long tracks, intro / mid / late are compared. A silent or cold-open intro does **not** veto a clear mid+late body. When sections disagree, Meridian keeps the **steadier** song-like taste and may inject contrast from a more active window — not a fake middle.  
+- If only the intro decoded and mid+late failed, analyze **defers** instead of parking a lying intro-only mood.  
+- If `ffmpeg` is missing, Meridian still plays music, but analyze leaves stars on genre/folder seeds instead of inventing a waveform placement. Startup shows a warning dialog and a sticky status tip (same idea as the missing-libx264 tip).  
+- Stopping analyze kills the active `ffmpeg` process so sequential seeks do not leave a stuck decoder.
 
 If **aubio** is installed, it also hears tempo / beat-ish clues. Without aubio, Meridian still works; it just has less rhythm info.
 
 ### 4. What it measures in that snippet
 
-Still on that same short buffer (no extra “go fetch more audio”):
+Still on each already-decoded buffer (no extra “go fetch more audio” beyond the section plan):
 
 - Bright vs dark tone  
 - Bass-heavy vs treble-heavy  
@@ -72,9 +76,9 @@ Simple rules of thumb Meridian tries to follow:
 
 ### 5. Save the result
 
-It stores the map position, a confidence note (“how sure are we”), and a few leftover clues (brightness, flux, steady rhythm) for later tidy-ups — **without** listening again.
+It stores the map position, a confidence note (“how sure are we” — multi-window listens say so), and a few leftover clues (brightness, flux, steady rhythm) for later tidy-ups — **without** listening again.
 
-**Rescan / mtime refresh:** when Meridian clears the “analyzed” flag so a track will be listened to again, it still **keeps the existing PCM mood coords** if leftover brightness/flux clues remain — so Rescan does not flash stars back to genre seeds until a new successful decode lands.
+**Rescan / mtime refresh:** when Meridian clears the “analyzed” flag so a track will be listened to again, it still **keeps the existing PCM mood coords** if leftover brightness/flux clues remain — so Rescan does not flash stars back to genre seeds until a new successful decode lands. Section blend weights are deterministic (no random jitter on merge).
 
 ### 6. Tidy the whole library (after many tracks)
 
@@ -90,13 +94,13 @@ If you **pinned** a star, that pin stays. Analyze will not drag it.
 
 - Not “pro studio analysis of the full album.”  
 - Not surround / 3D spatial audio. “Spatial” here means **where it sits on the mood map**.  
-- Not a promise that every song will feel perfectly placed — short listens can miss weird intros or long builds.
+- Not a promise that every song will feel perfectly placed — short listens can still miss weird structures, but three sections catch more than a single mid-track grab.
 
 ## Where the code lives (if you care)
 
 | File | Job |
 |---|---|
 | `meridian/scanner.py` | Import worker + analyze worker |
-| `meridian/features.py` | Tags, short decode, glue |
-| `meridian/acoustic.py` | Measuring the snippet |
+| `meridian/features.py` | Tags, section decode, glue |
+| `meridian/acoustic.py` | Measuring one snippet buffer |
 | `meridian/library.py` | Saving moods and tidy-ups |

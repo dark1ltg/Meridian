@@ -1,0 +1,291 @@
+"""Three-section (intro / mid / late) analyze path — merge, seeks, short, partial, abort."""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+
+from meridian.acoustic import AcousticProfile, confidence_from_evidence
+
+
+def _prof(
+    *,
+    valence: float,
+    energy: float,
+    brightness: float = 0.5,
+    flux: float = 0.4,
+    onset_rate: float = 0.5,
+    onset_consistency: float = 0.7,
+    variation: float = 0.1,
+    unstable: bool = False,
+    energy_mean: float = 0.55,
+    bpm: float | None = 120.0,
+) -> AcousticProfile:
+    return AcousticProfile(
+        valence=valence,
+        energy=energy,
+        bpm=bpm,
+        unstable=unstable,
+        brightness=brightness,
+        flux=flux,
+        onset_rate=onset_rate,
+        onset_consistency=onset_consistency,
+        onset_burstiness=0.2,
+        variation=variation,
+        energy_mean=energy_mean,
+        energy_std=0.1,
+        energy_peak=0.6,
+        energy_range=0.2,
+        energy_trend=0.0,
+        window_count=3,
+        pcm_samples=1000,
+    )
+
+
+def test_analysis_window_plan_short_unknown_long() -> None:
+    from meridian.features import SECTION_MIN_GAP_S, _analysis_window_plan
+
+    # Unknown / very short → single listen from 0.
+    assert _analysis_window_plan(0) == [("mid", 0.0)]
+    assert _analysis_window_plan(10_000) == [("mid", 0.0)]
+
+    # Short but long enough for two separated windows.
+    short_two = _analysis_window_plan(35_000)
+    assert len(short_two) == 2
+    assert short_two[0][0] == "intro"
+    assert short_two[1][0] == "late"
+    assert short_two[1][1] - short_two[0][1] >= SECTION_MIN_GAP_S
+
+    # Medium → intro + mid (not three).
+    medium = _analysis_window_plan(50_000)
+    assert [r for r, _ in medium] == ["intro", "mid"]
+
+    # Long → intro / mid / late with safe EOF clamps and separation.
+    long = _analysis_window_plan(210_000)
+    assert [r for r, _ in long] == ["intro", "mid", "late"]
+    starts = [s for _r, s in long]
+    assert starts[0] == 0.0
+    assert starts[1] > starts[0] + SECTION_MIN_GAP_S - 1e-6
+    assert starts[2] > starts[1] + SECTION_MIN_GAP_S - 1e-6
+    # Late seek must leave room for a 12s window inside 210s.
+    assert starts[2] + 12.0 <= 210.0 + 1e-6
+
+
+def test_analysis_window_plan_never_seeks_past_eof() -> None:
+    from meridian.features import SECTION_WINDOW_S, _analysis_window_plan, _clamp_seek_s
+
+    for ms in (0, 5_000, 25_000, 45_000, 90_000, 180_000):
+        dur_s = ms / 1000.0
+        for _role, start in _analysis_window_plan(ms):
+            if dur_s > 0:
+                assert start >= 0.0
+                assert start <= _clamp_seek_s(start, dur_s, SECTION_WINDOW_S) + 1e-9
+                assert start < dur_s
+
+
+def test_merge_dual_compat_and_mid_heavy_three() -> None:
+    from meridian.features import SECTION_BLEND_WEIGHTS, _merge_pcm_profiles
+
+    intro = _prof(valence=0.44, energy=0.46, onset_consistency=0.8)
+    mid = _prof(valence=0.50, energy=0.50, onset_consistency=0.85)
+    # Mild spreads so neither cold-open nor body-disagree branches fire.
+    late = _prof(valence=0.56, energy=0.54, onset_consistency=0.75)
+
+    # Dual legacy path still works.
+    dual = _merge_pcm_profiles(intro, mid)
+    assert 0.03 <= dual.valence <= 0.97
+
+    merged = _merge_pcm_profiles(
+        None, role_profiles={"intro": intro, "mid": mid, "late": late}
+    )
+    # Mid-heavy (~20/50/30): deterministic weighted blend.
+    expected = (
+        SECTION_BLEND_WEIGHTS["intro"] * intro.valence
+        + SECTION_BLEND_WEIGHTS["mid"] * mid.valence
+        + SECTION_BLEND_WEIGHTS["late"] * late.valence
+    )
+    assert abs(merged.valence - expected) < 0.02
+    assert abs(merged.valence - mid.valence) < abs(merged.valence - intro.valence)
+
+
+def test_cold_open_intro_does_not_veto_mid_late() -> None:
+    from meridian.features import _merge_pcm_profiles
+
+    cold = _prof(
+        valence=0.15,
+        energy=0.12,
+        flux=0.10,
+        onset_rate=0.05,
+        onset_consistency=0.2,
+        energy_mean=0.20,
+        unstable=True,
+        variation=0.4,
+    )
+    mid = _prof(valence=0.62, energy=0.70, flux=0.55, onset_rate=0.9, onset_consistency=0.85)
+    late = _prof(valence=0.60, energy=0.68, flux=0.52, onset_rate=0.85, onset_consistency=0.8)
+
+    merged = _merge_pcm_profiles(
+        None, role_profiles={"intro": cold, "mid": mid, "late": late}
+    )
+    # Body agreement + cold intro → result near mid/late, not dragged to silence.
+    assert merged.energy > 0.55
+    assert merged.valence > 0.50
+    assert abs(merged.energy - mid.energy) < abs(merged.energy - cold.energy)
+
+
+def test_enough_section_evidence_partial_rules() -> None:
+    from meridian.features import _enough_section_evidence
+
+    plan3 = [("intro", 0.0), ("mid", 40.0), ("late", 80.0)]
+    assert _enough_section_evidence(plan3, {"mid"})
+    assert _enough_section_evidence(plan3, {"mid", "late"})
+    assert _enough_section_evidence(plan3, {"intro", "late"})
+    assert _enough_section_evidence(plan3, {"late"})
+    assert not _enough_section_evidence(plan3, {"intro"})
+    assert not _enough_section_evidence(plan3, set())
+
+    plan2 = [("intro", 0.0), ("mid", 20.0)]
+    assert _enough_section_evidence(plan2, {"intro"})
+
+
+def test_decode_partial_intro_only_defers_on_long_plan() -> None:
+    """Severity 8: intro-only on a 3-window plan must not succeed as pcm_ok."""
+    from meridian import features
+
+    features.clear_decode_abort()
+    calls: list[tuple[float, float]] = []
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        calls.append((float(start_s), float(duration_s)))
+        # Only the first (intro @ 0) returns usable audio.
+        if abs(start_s) < 0.01:
+            return np.ones(11025 * 4, dtype=np.float32) * 0.05
+        return None
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
+            pcm, fallback, merged = features._decode_pcm_with_fallback(
+                "/long.wav", duration_ms=210_000
+            )
+    assert pcm is None
+    assert merged is None
+    assert len(calls) >= 3  # attempted intro/mid/late
+
+
+def test_decode_short_track_does_not_triple_sample() -> None:
+    from meridian import features
+
+    features.clear_decode_abort()
+    starts: list[float] = []
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        starts.append(float(start_s))
+        return np.ones(11025 * 4, dtype=np.float32) * 0.05
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", return_value=True):
+            with patch("meridian.acoustic.build_profile", return_value=_prof(valence=0.5, energy=0.5)):
+                pcm, _fb, merged = features._decode_pcm_with_fallback(
+                    "/short.wav", duration_ms=15_000
+                )
+    assert pcm is not None
+    # Single-window plan for ~15s — at most one section decode (plus possible silence FB).
+    section_starts = starts[:1]
+    assert len(section_starts) == 1
+    assert len(set(round(s, 2) for s in starts)) <= 2
+
+
+def test_decode_long_track_three_windows_mid_heavy_merge() -> None:
+    from meridian import features
+
+    features.clear_decode_abort()
+    starts: list[float] = []
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        starts.append(float(start_s))
+        assert abs(duration_s - 12.0) < 1e-6
+        return np.ones(11025 * 4, dtype=np.float32) * 0.05
+
+    built = [
+        _prof(valence=0.2, energy=0.2, onset_consistency=0.8),
+        _prof(valence=0.5, energy=0.5, onset_consistency=0.85),
+        _prof(valence=0.8, energy=0.8, onset_consistency=0.75),
+    ]
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", return_value=True):
+            with patch("meridian.acoustic.build_profile", side_effect=built):
+                pcm, partial, merged = features._decode_pcm_with_fallback(
+                    "/long.wav", duration_ms=210_000
+                )
+    assert pcm is not None
+    assert merged is not None
+    assert partial is False
+    assert len(starts) == 3
+    assert abs(merged.valence - 0.5) < abs(merged.valence - 0.2)
+    assert abs(merged.valence - 0.5) < abs(merged.valence - 0.8)
+
+
+def test_abort_kills_active_proc_across_seeks() -> None:
+    """Severity 9: abort clears the active slot and kills; later seeks do not stick."""
+    from meridian import features
+
+    features.clear_decode_abort()
+    killed: list[object] = []
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.stdout = MagicMock()
+            self.stderr = MagicMock()
+            self.stdout.closed = False
+            self.stderr.closed = False
+            self.returncode = 0
+            self._blocked = True
+
+        def communicate(self, timeout=None):
+            # First call blocks until abort kills / flag flips.
+            if features.decode_abort_requested():
+                self.returncode = -9
+                self.stdout.closed = True
+                self.stderr.closed = True
+                return b"", b""
+            # Simulate hanging decode.
+            raise TimeoutError("should have been aborted")
+
+        def kill(self) -> None:
+            killed.append(self)
+
+        def wait(self, timeout=None) -> int:
+            return -9
+
+    proc = FakeProc()
+    assert features._register_decode_proc(proc) is True
+    features.request_decode_abort()
+    assert features._decode_proc is None
+    assert killed == [proc]
+    # A subsequent decode attempt must refuse while abort is set.
+    with patch("meridian.features.shutil.which", return_value="/usr/bin/ffmpeg"):
+        out = features._decode_pcm("/x.wav", start_s=40.0, duration_s=12.0)
+    assert out is None
+    features.clear_decode_abort()
+
+
+def test_multi_window_confidence_note_stable() -> None:
+    score, note = confidence_from_evidence(
+        tag_key="rock",
+        pcm_ok=True,
+        multi_window=True,
+        variation=0.05,
+        onset_consistency=0.8,
+    )
+    assert "multi-window" in note
+    score2, note2 = confidence_from_evidence(
+        tag_key="rock",
+        pcm_ok=True,
+        multi_window=True,
+        variation=0.05,
+        onset_consistency=0.8,
+    )
+    assert score == score2
+    assert note == note2

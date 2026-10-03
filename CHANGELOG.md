@@ -6,6 +6,14 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds bug-hunt fixes (Rescan PCM keep, matrix click, zoom LOD, host ffmpeg warn), search select→play/queue inject, high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
 
+### Local: three-section audio analysis (intro / mid / late)
+- Long tracks: three **12s** windows (intro / mid / late, ~36s budget) with mid-heavy blend (~20/50/30)
+- Short tracks: **1–2** windows only (no triple-sampling the same audio)
+- Partial decode: intro-only when mid+late failed **defers** instead of parking a lying mood
+- Cold-open intro cannot veto a clear mid+late body; dual/triple disagreement keeps stabler + inject
+- Safe seeks (unknown/short duration never past EOF); abort clears/kills active ffmpeg across sequential seeks
+- Confidence note can mention multi-window; merge weights stay deterministic (Rescan jump dampening; pins unchanged)
+
 ### 2026-10-02 refresh (bug-hunt: queue advance / analyze honesty)
 - Dead next (missing/denied): keep the still-playing track instead of `stop`+`play_track` hard-restart from 0
 - Failed auto-advance near end: `release_advance_lock` holds fade re-arm so position ticks cannot thrash replenish/map rebuilds
