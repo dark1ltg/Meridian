@@ -111,6 +111,9 @@ class Library:
         self._analyze_denylist: set[int] = set()
         # Process-local: corrupt/unsupported files that failed playback stay out of plans.
         self._playback_denylist: set[int] = set()
+        # Per analyze-worker run: how many tracks got real PCM vs deferred.
+        self._analyze_pcm_ok_count = 0
+        self._analyze_deferred_count = 0
         self._migrate()
 
     def _migrate(self) -> None:
@@ -344,6 +347,15 @@ class Library:
             self.conn.commit()
             return True
 
+    def reset_analyze_session_stats(self) -> None:
+        """Clear per-run PCM/defer counters before an AnalyzeWorker pass."""
+        self._analyze_pcm_ok_count = 0
+        self._analyze_deferred_count = 0
+
+    def analyze_session_stats(self) -> tuple[int, int]:
+        """Return ``(pcm_ok_count, deferred_count)`` for the current analyze run."""
+        return int(self._analyze_pcm_ok_count), int(self._analyze_deferred_count)
+
     def set_analyzed_mood(
         self,
         track_id: int,
@@ -357,37 +369,124 @@ class Library:
         onset_consistency: float | None = None,
         acoustic_flux: float | None = None,
         brightness: float | None = None,
+        from_pcm: bool = True,
     ) -> None:
         with self.lock:
-            self.conn.execute(
+            if from_pcm:
+                self.conn.execute(
+                    """
+                    UPDATE tracks
+                    SET valence = CASE WHEN pinned = 1 THEN valence ELSE ? END,
+                        energy = CASE WHEN pinned = 1 THEN energy ELSE ? END,
+                        bpm = CASE WHEN pinned = 1 THEN bpm ELSE ? END,
+                        mood_confidence = CASE WHEN pinned = 1 THEN mood_confidence ELSE ? END,
+                        low_trust = CASE WHEN pinned = 1 THEN low_trust ELSE ? END,
+                        confidence_note = CASE WHEN pinned = 1 THEN confidence_note ELSE ? END,
+                        onset_consistency = ?,
+                        acoustic_flux = ?,
+                        brightness = ?,
+                        analyzed = 1
+                    WHERE id = ?
+                    """,
+                    (
+                        valence,
+                        energy,
+                        bpm,
+                        float(confidence),
+                        int(low_trust),
+                        confidence_note or "",
+                        onset_consistency,
+                        acoustic_flux,
+                        brightness,
+                        track_id,
+                    ),
+                )
+            else:
+                # Seed-only conclude: never NULL out prior waveform acoustics, and do
+                # not overwrite a prior PCM placement with a weaker tag/path guess.
+                self.conn.execute(
+                    """
+                    UPDATE tracks
+                    SET valence = CASE
+                            WHEN pinned = 1 THEN valence
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN valence
+                            ELSE ? END,
+                        energy = CASE
+                            WHEN pinned = 1 THEN energy
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN energy
+                            ELSE ? END,
+                        bpm = CASE
+                            WHEN pinned = 1 THEN bpm
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN bpm
+                            ELSE ? END,
+                        mood_confidence = CASE
+                            WHEN pinned = 1 THEN mood_confidence
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN mood_confidence
+                            ELSE ? END,
+                        low_trust = CASE
+                            WHEN pinned = 1 THEN low_trust
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN low_trust
+                            ELSE ? END,
+                        confidence_note = CASE
+                            WHEN pinned = 1 THEN confidence_note
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN confidence_note
+                            ELSE ? END,
+                        onset_consistency = COALESCE(?, onset_consistency),
+                        acoustic_flux = COALESCE(?, acoustic_flux),
+                        brightness = COALESCE(?, brightness),
+                        analyzed = 1
+                    WHERE id = ?
+                    """,
+                    (
+                        valence,
+                        energy,
+                        bpm,
+                        float(confidence),
+                        int(low_trust),
+                        confidence_note or "",
+                        onset_consistency,
+                        acoustic_flux,
+                        brightness,
+                        track_id,
+                    ),
+                )
+            if from_pcm:
+                self._analyze_pcm_ok_count += 1
+            self.conn.commit()
+
+    def had_pcm_acoustics(self, track_id: int) -> bool:
+        """True when a prior waveform pass left brightness/flux (keep over seed wipe)."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT brightness, acoustic_flux FROM tracks WHERE id = ?",
+                (int(track_id),),
+            ).fetchone()
+        if not row:
+            return False
+        return row["brightness"] is not None or row["acoustic_flux"] is not None
+
+    def requeue_seed_only_without_pcm(self) -> int:
+        """One-shot: re-queue seed-only rows that never got waveform (ffmpeg may be back)."""
+        with self.lock:
+            rows = self.conn.execute(
                 """
-                UPDATE tracks
-                SET valence = CASE WHEN pinned = 1 THEN valence ELSE ? END,
-                    energy = CASE WHEN pinned = 1 THEN energy ELSE ? END,
-                    bpm = CASE WHEN pinned = 1 THEN bpm ELSE ? END,
-                    mood_confidence = CASE WHEN pinned = 1 THEN mood_confidence ELSE ? END,
-                    low_trust = CASE WHEN pinned = 1 THEN low_trust ELSE ? END,
-                    confidence_note = CASE WHEN pinned = 1 THEN confidence_note ELSE ? END,
-                    onset_consistency = ?,
-                    acoustic_flux = ?,
-                    brightness = ?,
-                    analyzed = 1
-                WHERE id = ?
-                """,
-                (
-                    valence,
-                    energy,
-                    bpm,
-                    float(confidence),
-                    int(low_trust),
-                    confidence_note or "",
-                    onset_consistency,
-                    acoustic_flux,
-                    brightness,
-                    track_id,
-                ),
+                SELECT id FROM tracks
+                WHERE analyzed = 1 AND pinned = 0
+                  AND brightness IS NULL AND acoustic_flux IS NULL
+                  AND instr(lower(COALESCE(confidence_note, '')), 'seed only') > 0
+                """
+            ).fetchall()
+            ids = [int(r["id"]) for r in rows]
+            if not ids:
+                return 0
+            self.conn.executemany(
+                "UPDATE tracks SET analyzed = 0 WHERE id = ? AND pinned = 0",
+                [(i,) for i in ids],
             )
             self.conn.commit()
+        for tid in ids:
+            self._analyze_denylist.discard(tid)
+        return len(ids)
 
     def mark_analyze_failed(self, track_id: int) -> None:
         """Mark a track analyzed so a poison file cannot loop the analyze worker forever.
@@ -497,7 +596,7 @@ class Library:
     ) -> int:
         from statistics import median
 
-        from meridian.features import confidence_low_trust
+        from meridian.features import CONFIDENCE_LOW, confidence_low_trust
 
         with self.lock:
             rows = self.conn.execute(group_sql).fetchall()
@@ -534,8 +633,14 @@ class Library:
                 if abs(v - v0) <= 1e-9 and abs(e - e0) <= 1e-9:
                     continue
                 conf0 = float(item["mood_confidence"] if item["mood_confidence"] is not None else 0.3)
-                # Snapping toward trusted neighbors raises confidence into mid band.
-                conf = min(0.62, max(conf0, 0.42) + 0.12)
+                # Tidy may bump confidence a bit when snapping toward neighbors — but
+                # never promote a sub-0.45 rough place (seed/edge salvage) into mid-trust.
+                # Position still clusters; the star stays dim / low-trust.
+                bumped = min(0.62, max(conf0, 0.42) + 0.12)
+                if conf0 < CONFIDENCE_LOW:
+                    conf = min(bumped, CONFIDENCE_LOW - 0.01)
+                else:
+                    conf = bumped
                 note = self._append_note(item["confidence_note"] if "confidence_note" in item.keys() else "", note_tag)
                 updates.append((v, e, conf, int(confidence_low_trust(conf)), note, int(item["id"])))
 
@@ -809,6 +914,7 @@ class Library:
         tid = int(track_id)
         self._analyze_denylist.add(tid)
         with self.lock:
+            self._analyze_deferred_count += 1
             row = self.conn.execute(
                 "SELECT pinned, confidence_note FROM tracks WHERE id = ?", (tid,)
             ).fetchone()

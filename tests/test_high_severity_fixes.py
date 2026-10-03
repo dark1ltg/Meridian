@@ -213,6 +213,9 @@ def test_analyze_done_disposes_stale_generation(qapp) -> None:
     win._analyze_gen = 5
     win._analyze_thread = object()  # newer analyze
     win._analyze_worker = object()
+    win._analyze_pool = []
+    win._analyze_remaining = 0
+    win._analyze_run_tidy = False
     win._clear_job_status = lambda: None
     win._set_status = lambda *_a: None
     win._set_job_status = lambda *_a: None
@@ -244,6 +247,15 @@ def test_start_analyze_reaps_finished_before_overwrite(qapp) -> None:
         def unanalyzed_ids(self):
             return []
 
+        def analyze_session_stats(self):
+            return 0, 0
+
+        def requeue_seed_only_without_pcm(self):
+            return 0
+
+        def folders(self):
+            return []
+
     win = MainWindow.__new__(MainWindow)
     win._closing = False
     win._lingering_workers = []
@@ -251,6 +263,8 @@ def test_start_analyze_reaps_finished_before_overwrite(qapp) -> None:
     win._analyze_gen = 1
     win._analyze_map_tick = 0
     win._last_analyze_map_refresh = 0.0
+    win._analyze_pool = []
+    win._seed_retry_wave = True
     win.library = FakeLib()  # type: ignore[assignment]
     win._clear_job_status = lambda: None
     win._set_status = lambda *_a: None

@@ -1019,13 +1019,15 @@ def check_severity_6_8_guards(db_path: Path) -> None:
     assert _path_genre_keys("/Music/Indie Rock/cut.mp3") == ["indie rock"]
     assert _path_genre_keys("/Music/Drum & Bass/cut.mp3") == ["drum and bass"]
 
-    # Short / unknown duration: do not seek to 12s / 45s past EOF.
+    # Short / unknown duration: do not seek past EOF; long tracks start at intro=0.
     assert _primary_seek_s(0) == 0.0
     assert _primary_seek_s(20_000) == 0.0
     assert _secondary_seek_s(0) is None
-    assert _secondary_seek_s(20_000) is not None
-    assert float(_secondary_seek_s(20_000)) < 5.0
-    assert _primary_seek_s(180_000) == 12.0
+    # ~20s is too short for a second distinct window.
+    assert _secondary_seek_s(20_000) is None
+    assert _primary_seek_s(180_000) == 0.0
+    assert _secondary_seek_s(180_000) is not None
+    assert float(_secondary_seek_s(180_000)) > 20.0
 
     # Empty lens: far tracks stay SHELF (not promoted into NOW via nearest-N).
     def far_track(i: int) -> Track:

@@ -233,18 +233,24 @@ CONFIDENCE_HIGH = 0.75
 # Test hook: increments whenever ffmpeg decode is attempted.
 _decode_pcm_calls = 0
 # Cooperative abort for AnalyzeWorker.stop / quit (kills in-flight ffmpeg).
+# Set of procs — dual analyze workers may each own an ffmpeg at once.
 _decode_abort = False
-_decode_proc: subprocess.Popen | None = None
+_decode_procs: set[subprocess.Popen] = set()
 _decode_proc_lock = threading.Lock()
 
 
 def request_decode_abort() -> None:
-    """Stop any in-flight ffmpeg decode ASAP (analyze abort / quit)."""
-    global _decode_abort, _decode_proc
+    """Stop any in-flight ffmpeg decode ASAP (analyze abort / quit).
+
+    Clears every active-proc slot under the lock so a sequential multi-seek
+    ``finally`` cannot resurrect a pointer to a process we already killed.
+    """
+    global _decode_abort
     _decode_abort = True
     with _decode_proc_lock:
-        proc = _decode_proc
-    if proc is not None:
+        procs = list(_decode_procs)
+        _decode_procs.clear()
+    for proc in procs:
         try:
             proc.kill()
         except OSError:
@@ -258,6 +264,21 @@ def clear_decode_abort() -> None:
 
 def decode_abort_requested() -> bool:
     return bool(_decode_abort)
+
+
+def _register_decode_proc(proc: subprocess.Popen) -> bool:
+    """Publish *proc* as a kill target. Return False if abort already won."""
+    with _decode_proc_lock:
+        if _decode_abort:
+            return False
+        _decode_procs.add(proc)
+        return True
+
+
+def _clear_decode_proc(proc: subprocess.Popen) -> None:
+    """Drop *proc* from the active set when its decode finishes."""
+    with _decode_proc_lock:
+        _decode_procs.discard(proc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +314,8 @@ class MoodResult:
     acoustic_flux: float | None = None
     brightness: float | None = None
     pcm_ok: bool = False
+    # Genre/path/keyword evidence usable when waveform decode finds nothing.
+    seed_evidence: bool = False
 
 def _text(tag) -> str:
     if tag is None:
@@ -753,14 +776,16 @@ def _close_decode_pipes(proc: subprocess.Popen) -> None:
             pass
 
 
-def _decode_pcm(path: str, *, start_s: float = 12.0, duration_s: float = 28.0) -> np.ndarray | None:
-    global _decode_pcm_calls, _decode_proc
+def _decode_pcm(path: str, *, start_s: float = 0.0, duration_s: float = 12.0) -> np.ndarray | None:
+    global _decode_pcm_calls
     _decode_pcm_calls += 1
     if _decode_abort:
         return None
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None
+    # Never ask ffmpeg to seek to a negative offset.
+    seek = max(0.0, float(start_s))
     dur = max(2.0, float(duration_s))
     # Wall clock must cover the requested window plus IO/codec slack (M1).
     wall_timeout = max(dur + 10.0, 30.0)
@@ -769,7 +794,7 @@ def _decode_pcm(path: str, *, start_s: float = 12.0, duration_s: float = 28.0) -
         "-v",
         "error",
         "-ss",
-        f"{float(start_s):.3f}",
+        f"{seek:.3f}",
         "-t",
         f"{dur:.3f}",
         "-i",
@@ -790,8 +815,21 @@ def _decode_pcm(path: str, *, start_s: float = 12.0, duration_s: float = 28.0) -
         )
     except OSError:
         return None
-    with _decode_proc_lock:
-        _decode_proc = proc
+    if not _register_decode_proc(proc):
+        # Abort won the race between Popen and registration — kill immediately.
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.communicate(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            _close_decode_pipes(proc)
+            try:
+                proc.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return None
     stdout: bytes | None = None
     try:
         if _decode_abort:
@@ -829,9 +867,7 @@ def _decode_pcm(path: str, *, start_s: float = 12.0, duration_s: float = 28.0) -
         _close_decode_pipes(proc)
         return None
     finally:
-        with _decode_proc_lock:
-            if _decode_proc is proc:
-                _decode_proc = None
+        _clear_decode_proc(proc)
         # Belt-and-suspenders: any path that skipped communicate still closes FDs.
         _close_decode_pipes(proc)
     if _decode_abort:
@@ -868,41 +904,123 @@ def _coerce_bpm(bpm: float | None) -> float | None:
     return value
 
 
-def _secondary_seek_s(duration_ms: int) -> float | None:
-    """Mid-track seek for dual-window / fallback decode, or None when too short / unknown."""
-    dur_s = max(0.0, float(duration_ms) / 1000.0) if duration_ms else 0.0
-    if dur_s <= 0:
-        # Unknown duration: do not seek far — caller starts at 0.
-        return None
+# Per-window listen length for multi-section analysis.
+SECTION_WINDOW_S = 12.0
+# Prior single-window listen length (unknown duration + dual-plan salvage).
+LONG_SINGLE_WINDOW_S = 28.0
+# Minimum separation between section starts so we do not triple-sample the same audio.
+SECTION_MIN_GAP_S = 8.0
+# Mid-heavy blend for intro / mid / late when all three are usable.
+SECTION_BLEND_WEIGHTS = {"intro": 0.20, "mid": 0.50, "late": 0.30}
+# Shrunk outlier intro keeps a tiny coord nudge but must not poison merge health
+# (unstable / variation) — same spirit as zero-weight cold-open (rehunt score 5).
+SECTION_OUTLIER_INTRO_WEIGHT = 0.08
+SECTION_HEALTH_WEIGHT_MIN = 0.10
+
+
+def _duration_s(duration_ms: int) -> float:
+    return max(0.0, float(duration_ms) / 1000.0) if duration_ms else 0.0
+
+
+def _clamp_seek_s(start_s: float, duration_s: float, window_s: float = SECTION_WINDOW_S) -> float:
+    """Clamp a seek so the window stays inside the known file (never past EOF)."""
+    seek = max(0.0, float(start_s))
+    if duration_s <= 0.0:
+        return 0.0
+    # Leave a tiny tail so -t still has samples when duration is exact.
+    max_start = max(0.0, float(duration_s) - max(2.0, float(window_s) * 0.5))
+    return float(min(seek, max_start))
+
+
+def _analysis_window_plan(duration_ms: int) -> list[tuple[str, float]]:
+    """Return ordered ``(role, start_s)`` windows — 1, 2, or 3 distinct tastes.
+
+    Long tracks: intro / mid / late at 12s each (~36s budget).
+    Short / unknown: never triple-sample the same audio.
+    """
+    dur_s = _duration_s(duration_ms)
+    win = SECTION_WINDOW_S
+    gap = SECTION_MIN_GAP_S
+
+    if dur_s <= 0.0:
+        # Unknown duration: single listen from 0 (decode uses LONG_SINGLE_WINDOW_S).
+        return [("mid", 0.0)]
+
+    if dur_s < 18.0:
+        return [("mid", 0.0)]
+
     if dur_s < 40.0:
-        return max(0.0, dur_s * 0.15)
-    return float(np.clip(dur_s * 0.35, 20.0, max(20.0, dur_s - 30.0)))
+        # Short: one window, or two only when starts are well separated.
+        late = _clamp_seek_s(dur_s - win - 1.0, dur_s, win)
+        if late >= gap:
+            return [("intro", 0.0), ("late", late)]
+        return [("mid", 0.0)]
+
+    if dur_s < 60.0:
+        # Medium: intro + mid (not three overlapping listens).
+        mid = _clamp_seek_s(dur_s * 0.42, dur_s, win)
+        if mid >= gap:
+            return [("intro", 0.0), ("mid", mid)]
+        return [("mid", 0.0)]
+
+    # Long enough for three distinct 12s windows.
+    intro = 0.0
+    mid = _clamp_seek_s(float(np.clip(dur_s * 0.45, 20.0, dur_s - win - 2.0)), dur_s, win)
+    late = _clamp_seek_s(dur_s - win - 2.0, dur_s, win)
+    # Enforce separation; collapse roles rather than sampling the same region thrice.
+    if mid - intro < gap:
+        mid = _clamp_seek_s(intro + gap, dur_s, win)
+    if late - mid < gap:
+        late = _clamp_seek_s(mid + gap, dur_s, win)
+    if late - mid < gap or mid - intro < gap:
+        # Still too tight (weird/wrong duration) — fall back to two or one.
+        if mid >= gap:
+            return [("intro", intro), ("mid", mid)]
+        return [("mid", 0.0)]
+    return [("intro", intro), ("mid", mid), ("late", late)]
 
 
 def _primary_seek_s(duration_ms: int) -> float:
-    """Primary window start — 0 for short/unknown so we actually hear the file."""
-    dur_s = max(0.0, float(duration_ms) / 1000.0) if duration_ms else 0.0
-    if dur_s <= 0 or dur_s < 40.0:
-        return 0.0
-    return 12.0
+    """Compat: first planned window start (0 for short/unknown)."""
+    plan = _analysis_window_plan(duration_ms)
+    return float(plan[0][1]) if plan else 0.0
 
 
-def _merge_pcm_profiles(primary, secondary):
+def _secondary_seek_s(duration_ms: int) -> float | None:
+    """Compat: second planned window start, or None when only one listen."""
+    plan = _analysis_window_plan(duration_ms)
+    if len(plan) < 2:
+        return None
+    return float(plan[1][1])
+
+
+def _profile_stability(p) -> float:
+    """Higher is better: consistent onsets, low variation, not marked unstable."""
+    return (
+        float(p.onset_consistency)
+        + (0.0 if p.unstable else 0.25)
+        + float(np.clip(1.0 - float(p.variation), 0.0, 1.0)) * 0.35
+    )
+
+
+def _is_cold_open_profile(p) -> bool:
+    """True when a window looks like silence / cold-open pad, not the song body."""
+    return (
+        float(p.energy) < 0.30
+        and float(p.flux) < 0.28
+        and float(getattr(p, "onset_rate", 0.0) or 0.0) < 0.45
+        and float(p.energy_mean) < 0.42
+    )
+
+
+def _merge_two_pcm_profiles(primary, secondary):
     """Combine two window profiles; on strong disagreement prefer the stabler song-like window."""
     from meridian.acoustic import AcousticProfile
-
-    def _stability(p) -> float:
-        # Higher is better: consistent onsets, low variation, not marked unstable.
-        return (
-            float(p.onset_consistency)
-            + (0.0 if p.unstable else 0.25)
-            + float(np.clip(1.0 - float(p.variation), 0.0, 1.0)) * 0.35
-        )
 
     disagree = float(
         np.hypot(primary.valence - secondary.valence, primary.energy - secondary.energy)
     )
-    s1, s2 = _stability(primary), _stability(secondary)
+    s1, s2 = _profile_stability(primary), _profile_stability(secondary)
     if s1 >= s2:
         winner, loser = primary, secondary
     else:
@@ -936,10 +1054,6 @@ def _merge_pcm_profiles(primary, secondary):
             ostats_src = loser if float(loser.onset_rate) >= float(winner.onset_rate) else winner
     else:
         # Mild disagreement: lean toward the stabler window.
-        w = 0.62 if s1 != s2 else 0.5
-        if winner is secondary:
-            w = 1.0 - w
-        # w = weight on primary when winner is primary… simplify:
         wp = 0.62 if primary is winner else 0.38
         ws = 1.0 - wp
         valence = float(wp * primary.valence + ws * secondary.valence)
@@ -977,59 +1091,310 @@ def _merge_pcm_profiles(primary, secondary):
     )
 
 
+def _weighted_profile_blend(items: list[tuple[object, float]]):
+    """Deterministic weighted mood blend (weights renormalized over survivors).
+
+    Zero-weight sections are dropped entirely so cold-open / vetoed intros cannot
+    poison merge health (``unstable`` / ``variation``) while coords stay mid-heavy.
+    Tiny-weight sections (shrunk outlier intro) still nudge coords but are excluded
+    from health aggregates — same spirit as zero-weight cold-open (rehunt score 5).
+    """
+    from meridian.acoustic import AcousticProfile
+
+    # Exclude zero-weight items before any health/aggregate stats (score-7 cold open).
+    positive = [(p, max(0.0, float(w))) for p, w in items if float(w) > 1e-12]
+    if not positive:
+        return items[0][0]
+    total_w = sum(w for _p, w in positive)
+    if total_w <= 1e-12:
+        return positive[0][0]
+    normed = [(p, w / total_w) for p, w in positive]
+
+    # Health from meaningful-weight survivors only (drop shrunk outlier intro @ 0.08).
+    health_src = [(p, w) for p, w in positive if w >= SECTION_HEALTH_WEIGHT_MIN]
+    if not health_src:
+        health_src = positive
+    health_total = sum(w for _p, w in health_src)
+    health_normed = [(p, w / health_total) for p, w in health_src]
+
+    def _avg(attr: str) -> float:
+        return float(sum(float(getattr(p, attr)) * w for p, w in normed))
+
+    # Prefer BPM / onset cues from the heaviest (or stabler-on-tie) survivor.
+    anchor = max(normed, key=lambda pw: (pw[1], _profile_stability(pw[0])))[0]
+    bpms = [float(p.bpm) for p, _w in normed if getattr(p, "bpm", None) is not None]
+    bpm = float(np.median(bpms)) if bpms else None
+    bands = dict(anchor.band_energy)
+    return AcousticProfile(
+        valence=float(np.clip(_avg("valence"), 0.03, 0.97)),
+        energy=float(np.clip(_avg("energy"), 0.03, 0.97)),
+        bpm=bpm,
+        unstable=bool(any(bool(p.unstable) for p, _w in health_normed)),
+        brightness=float(_avg("brightness")),
+        flux=float(_avg("flux")),
+        band_energy=bands,
+        energy_mean=float(np.median([float(p.energy_mean) for p, _w in normed])),
+        energy_std=float(np.median([float(p.energy_std) for p, _w in normed])),
+        energy_peak=float(max(float(p.energy_peak) for p, _w in normed)),
+        energy_range=float(np.median([float(p.energy_range) for p, _w in normed])),
+        energy_trend=float(_avg("energy_trend")),
+        onset_rate=float(anchor.onset_rate),
+        onset_burstiness=float(anchor.onset_burstiness),
+        onset_consistency=float(anchor.onset_consistency),
+        variation=float(max(float(p.variation) for p, _w in health_normed)),
+        window_count=int(sum(int(p.window_count) for p, _w in normed)),
+        pcm_samples=int(sum(int(p.pcm_samples) for p, _w in normed)),
+    )
+
+
+def _merge_section_profiles(role_profiles: dict[str, object]):
+    """Mid-heavy intro/mid/late merge; cold-open intro cannot veto mid+late."""
+    if not role_profiles:
+        raise ValueError("role_profiles must not be empty")
+    if len(role_profiles) == 1:
+        return next(iter(role_profiles.values()))
+    if len(role_profiles) == 2:
+        # Preserve dual-window stabler/inject behavior for two survivors.
+        ordered = [role_profiles[k] for k in ("intro", "mid", "late") if k in role_profiles]
+        if len(ordered) == 2:
+            return _merge_two_pcm_profiles(ordered[0], ordered[1])
+        return _merge_two_pcm_profiles(*ordered)
+
+    intro = role_profiles.get("intro")
+    mid = role_profiles.get("mid")
+    late = role_profiles.get("late")
+    if intro is None or mid is None or late is None:
+        ordered = [role_profiles[k] for k in ("intro", "mid", "late") if k in role_profiles]
+        return _merge_two_pcm_profiles(ordered[0], ordered[1])
+
+    weights = dict(SECTION_BLEND_WEIGHTS)
+    # Cold-open / silent intro must not veto a clear mid+late body.
+    mid_late_agree = float(np.hypot(mid.valence - late.valence, mid.energy - late.energy)) <= 0.18
+    intro_vs_body = float(
+        np.hypot(
+            intro.valence - 0.5 * (mid.valence + late.valence),
+            intro.energy - 0.5 * (mid.energy + late.energy),
+        )
+    )
+    if _is_cold_open_profile(intro) and (mid_late_agree or intro_vs_body > 0.16):
+        weights["intro"] = 0.0
+        # Renormalize mid-heavy among body windows.
+        weights["mid"] = 0.62
+        weights["late"] = 0.38
+    elif intro_vs_body > 0.22 and mid_late_agree:
+        # Active-but-outlier intro (false cold? drama open): tiny coord nudge only.
+        # Health excludes this weight via SECTION_HEALTH_WEIGHT_MIN (rehunt score 5).
+        weights["intro"] = SECTION_OUTLIER_INTRO_WEIGHT
+        weights["mid"] = 0.55
+        weights["late"] = 0.37
+
+    # Strong mid vs late disagreement: prefer stabler body, inject from active loser.
+    body_disagree = float(np.hypot(mid.valence - late.valence, mid.energy - late.energy))
+    if body_disagree > 0.18:
+        body = _merge_two_pcm_profiles(mid, late)
+        if weights["intro"] <= 1e-9:
+            return body
+        return _weighted_profile_blend([(intro, weights["intro"]), (body, 1.0 - weights["intro"])])
+
+    return _weighted_profile_blend(
+        [
+            (intro, weights["intro"]),
+            (mid, weights["mid"]),
+            (late, weights["late"]),
+        ]
+    )
+
+
+def _merge_pcm_profiles(primary, secondary=None, *, role_profiles: dict[str, object] | None = None):
+    """Combine window profiles (dual legacy args, or role-tagged intro/mid/late)."""
+    if role_profiles is not None:
+        return _merge_section_profiles(role_profiles)
+    if secondary is None:
+        return primary
+    return _merge_two_pcm_profiles(primary, secondary)
+
+
+def _enough_section_evidence(
+    planned: list[tuple[str, float]],
+    ok_roles: set[str],
+) -> bool:
+    """Partial decode is not success when it would park a lying edge-only mood."""
+    if not ok_roles:
+        return False
+    planned_roles = {role for role, _ss in planned}
+    # Long-track plan (3 windows): require mid/body — not edges-only (pad+fade).
+    if len(planned) >= 3:
+        # Mid planned and missing → reject intro+late ends-only (rehunt score 4).
+        # Also rejects intro-only / late-only (prior score 4/6 honesty).
+        return "mid" in ok_roles
+    # Dual plans (short/medium): intro-only is a lie; late-only outro also defers
+    # (rehunt score 3 — prefer defer for consistency with long-plan late-only).
+    if len(planned) == 2:
+        if not (ok_roles - {"intro"}):
+            return False
+        if ok_roles == {"late"} and "mid" not in planned_roles:
+            return False
+        return True
+    # Single-window plan: any usable decode is enough.
+    if planned_roles and ok_roles:
+        return True
+    return False
+
+
 def _decode_pcm_with_fallback(
     path: str, duration_ms: int = 0
-) -> tuple[np.ndarray | None, bool, object | None]:
-    """Decode within ~28s total budget; dual 14s windows when the track is long enough.
+) -> tuple[np.ndarray | None, bool, object | None, str | None]:
+    """Decode intro/mid/late 12s windows (~36s) when the track is long enough.
 
-    Returns (pcm_or_None, used_secondary_seek, merged_profile_or_None).
-    When dual windows succeed, pcm is the first window (for callers that need a
-    buffer) and merged_profile carries median mood cues from both seeks.
+    Returns
+    ``(pcm_or_None, used_fallback_or_partial, merged_profile_or_None, edge_salvage)``.
+    ``edge_salvage`` is ``"intro"`` / ``"late"`` / ``"ends"`` for weak placement when
+    body evidence is missing, else ``None``. Multi-window success returns a
+    representative PCM buffer plus a merged profile. Any decode with real audio
+    places (weak/low-trust if not a full honest body listen) — no defer-on-seed
+    when music was heard. Dual-plan intro-only falls through to a ~28s
+    single-window salvage from 0 / primary. Unknown duration uses that same ~28s
+    listen from 0. True silence / total decode failure still returns no PCM.
     """
     from meridian.acoustic import build_profile
 
-    dur_s = max(0.0, float(duration_ms) / 1000.0) if duration_ms else 0.0
-    primary = _primary_seek_s(duration_ms)
-    secondary = _secondary_seek_s(duration_ms)
+    plan = _analysis_window_plan(duration_ms)
+    if not plan:
+        return None, False, None, None
 
-    # Dual-window path: same total seconds (~28) as a single long window.
-    if dur_s >= 55.0 and secondary is not None and abs(secondary - primary) >= 8.0:
-        if decode_abort_requested():
-            return None, False, None
-        pcm_a = _decode_pcm(path, start_s=primary, duration_s=14.0)
-        if decode_abort_requested():
-            return None, False, None
-        pcm_b = _decode_pcm(path, start_s=float(secondary), duration_s=14.0)
-        ok_a = pcm_a is not None and _pcm_signal_ok(pcm_a)
-        ok_b = pcm_b is not None and _pcm_signal_ok(pcm_b)
-        if ok_a and ok_b:
-            p1 = build_profile(pcm_a)
-            p2 = build_profile(pcm_b)
-            return pcm_a, True, _merge_pcm_profiles(p1, p2)
-        if ok_a:
-            return pcm_a, False, None
-        if ok_b:
-            return pcm_b, True, None
+    # Seeks already tried: no-signal (energy gate) or hard decode miss — do not
+    # blindly re-ffmpeg the same offsets in the silence-fallback pass (rehunt score 2).
+    skip_reseek_starts: set[float] = set()
+    # Dual/long-plan salvage: section evidence failed → ~28s single listen.
+    dual_salvage = False
+    # If longer salvage fails, weak-place this stashed intro stub.
+    edge_fallback: tuple[np.ndarray, str] | None = None
 
-    # Single 28s window with silence fallback (short tracks / dual failed).
-    starts = [primary]
-    if secondary is not None:
-        starts.append(float(secondary))
-    if primary > 0.0:
+    # Multi-section path (2 or 3 planned windows).
+    if len(plan) >= 2:
+        role_pcm: dict[str, np.ndarray] = {}
+        for role, start_s in plan:
+            if decode_abort_requested():
+                return None, False, None, None
+            pcm = _decode_pcm(path, start_s=float(start_s), duration_s=SECTION_WINDOW_S)
+            key = round(float(start_s), 2)
+            if pcm is not None and _pcm_signal_ok(pcm):
+                role_pcm[role] = pcm
+            else:
+                # Hard miss (None) or quiet/no-signal audio — both are spent seeks.
+                skip_reseek_starts.add(key)
+
+        ok_roles = set(role_pcm)
+        if decode_abort_requested():
+            return None, False, None, None
+
+        if _enough_section_evidence(plan, ok_roles):
+            role_profiles = {role: build_profile(pcm) for role, pcm in role_pcm.items()}
+            # Prefer mid buffer for callers that still want a PCM handle.
+            rep_role = (
+                "mid"
+                if "mid" in role_pcm
+                else ("late" if "late" in role_pcm else next(iter(role_pcm)))
+            )
+            planned_roles = {role for role, _ in plan}
+            partial = ok_roles != planned_roles
+            # Silent/missing intro with solid mid+late body is full PCM credit,
+            # not a weak-fallback tax (score-5 asymmetry vs cold-open pad that passes signal).
+            if "mid" in ok_roles and "late" in ok_roles:
+                partial = False
+            # Mid-only body is honest placement: full PCM credit, but not multi-window
+            # (single section — rebuild cues from PCM so we do not claim a merge).
+            if len(role_profiles) == 1 and "mid" in ok_roles:
+                return role_pcm[rep_role], False, None, None
+            # Other single survivors keep the built profile with a weak-fallback tax.
+            if len(role_profiles) == 1:
+                sole = next(iter(role_profiles.values()))
+                return role_pcm[rep_role], True, sole, None
+            merged = _merge_pcm_profiles(None, role_profiles=role_profiles)
+            return role_pcm[rep_role], partial, merged, None
+
+        # Not enough honest multi-window evidence — still place if we heard music.
+        if ok_roles:
+            first_role = plan[0][0]
+            # Dual plan + usable first window (intro-only etc.): long single-window
+            # salvage (~28s) instead of parking the short intro alone.
+            if len(plan) == 2 and first_role in ok_roles:
+                dual_salvage = True
+                # Allow a longer re-listen at the primary start (prior 12s stub is spent
+                # as a section window, not as the salvage length).
+                skip_reseek_starts.discard(round(float(plan[0][1]), 2))
+                if first_role == "intro" and "intro" in role_pcm:
+                    edge_fallback = (role_pcm["intro"], "intro")
+            elif ok_roles == {"intro"} and "intro" in role_pcm:
+                # Long-plan intro-only: same ~28s salvage as dual, then weak intro stub.
+                dual_salvage = True
+                skip_reseek_starts.discard(round(float(plan[0][1]), 2))
+                edge_fallback = (role_pcm["intro"], "intro")
+            elif ok_roles == {"late"} and "late" in role_pcm:
+                return role_pcm["late"], True, None, "late"
+            elif ok_roles == {"intro", "late"} and "intro" in role_pcm and "late" in role_pcm:
+                # Start+end, dead middle: weak place from both edges (not genre defer).
+                role_profiles = {
+                    role: build_profile(role_pcm[role]) for role in ("intro", "late")
+                }
+                merged = _merge_pcm_profiles(None, role_profiles=role_profiles)
+                return role_pcm["intro"], True, merged, "ends"
+            else:
+                # Any other audible partial: weak place from what we got.
+                rep = (
+                    "mid"
+                    if "mid" in role_pcm
+                    else ("intro" if "intro" in role_pcm else next(iter(role_pcm)))
+                )
+                role_profiles = {role: build_profile(pcm) for role, pcm in role_pcm.items()}
+                if len(role_profiles) == 1:
+                    return role_pcm[rep], True, next(iter(role_profiles.values())), rep
+                merged = _merge_pcm_profiles(None, role_profiles=role_profiles)
+                tag = "ends" if ok_roles == {"intro", "late"} else rep
+                return role_pcm[rep], True, merged, tag
+
+    # Single-window / silence-fallback / dual-salvage path.
+    dur_s = _duration_s(duration_ms)
+    if dur_s <= 0.0 or dual_salvage:
+        # Unknown duration or intro-only salvage: prior ~28s single listen from 0.
+        win_s = LONG_SINGLE_WINDOW_S
+    elif dur_s < 40.0:
+        win_s = min(LONG_SINGLE_WINDOW_S, max(SECTION_WINDOW_S, dur_s))
+    else:
+        win_s = LONG_SINGLE_WINDOW_S
+    starts = [float(ss) for _role, ss in plan]
+    if dual_salvage:
+        # Prefer primary / 0 first for the long salvage listen.
+        primary = float(plan[0][1])
+        starts = [primary] + [s for s in starts if abs(s - primary) > 1e-9]
+    if dur_s > 0.0:
+        mid_fb = _clamp_seek_s(dur_s * 0.35, dur_s, win_s)
+        if mid_fb not in starts:
+            starts.append(mid_fb)
+    if 0.0 not in starts:
         starts.append(0.0)
 
     seen: set[float] = set()
     for index, ss in enumerate(starts):
         if decode_abort_requested():
-            return None, False, None
+            return None, False, None, None
         key = round(float(ss), 2)
-        if key in seen:
+        if key in seen or key in skip_reseek_starts:
             continue
         seen.add(key)
-        pcm = _decode_pcm(path, start_s=float(ss), duration_s=28.0)
+        pcm = _decode_pcm(path, start_s=float(ss), duration_s=win_s)
         if pcm is not None and _pcm_signal_ok(pcm):
-            return pcm, index > 0, None
-    return None, False, None
+            # Longer salvage after multi-window honesty failed — still fallback-taxed.
+            # If we only ever had intro evidence, keep the intro edge tag so a pad
+            # head cannot look mid-trust after a ~28s re-listen of the same region.
+            if edge_fallback is not None:
+                return pcm, True, None, edge_fallback[1]
+            return pcm, bool(index > 0 or dual_salvage), None, None
+    # Longer salvage found nothing — weak-place the stashed intro stub if we have it.
+    if edge_fallback is not None:
+        pcm_fb, tag_fb = edge_fallback
+        return pcm_fb, True, None, tag_fb
+    return None, False, None, None
 
 
 def _genre_pair_conflict(tag_key: str | None, path_key: str | None) -> bool:
@@ -1057,6 +1422,7 @@ def mood_confidence(
     variation: float = 0.0,
     flux: float | None = None,
     onset_consistency: float | None = None,
+    multi_window: bool = False,
 ) -> tuple[float, str]:
     """Graduated placement confidence in 0..1 plus a short evidence note for tooltips."""
     from meridian.acoustic import confidence_from_evidence
@@ -1077,6 +1443,7 @@ def mood_confidence(
         flux=flux,
         onset_consistency=onset_consistency,
         genre_conflict=_genre_pair_conflict(tag_key, path_key),
+        multi_window=multi_window,
     )
 
 
@@ -1194,17 +1561,26 @@ def analyze_audio(
     profile = None
     soft_shift = SOFT_PCM_MAX_SHIFT
 
-    pcm, pcm_fallback, merged_profile = _decode_pcm_with_fallback(path, duration_ms=duration_ms)
+    pcm, pcm_fallback, merged_profile, edge_salvage = _decode_pcm_with_fallback(
+        path, duration_ms=duration_ms
+    )
+    multi_window = False
     if pcm is not None:
         pcm_ok = True
+        # Weak edge/ends salvage — always tax as PCM fallback (not full multi-window credit).
+        if edge_salvage:
+            pcm_fallback = True
         if merged_profile is not None:
             profile = merged_profile
             valence_pcm = float(profile.valence)
             energy_pcm = float(profile.energy)
             detected_bpm = profile.bpm
             pcm_unstable = bool(profile.unstable)
+            multi_window = True
         else:
             valence_pcm, energy_pcm, detected_bpm, pcm_unstable, profile = _pcm_mood_cues(pcm)
+        if edge_salvage:
+            multi_window = False
         detected_bpm = _coerce_bpm(detected_bpm)
 
         onset_c = float(getattr(profile, "onset_consistency", 0.5) or 0.5) if profile else 0.5
@@ -1394,7 +1770,26 @@ def analyze_audio(
         variation=float(getattr(profile, "variation", 0.0) or 0.0) if profile else 0.0,
         flux=float(getattr(profile, "flux", 0.0)) if profile else None,
         onset_consistency=float(getattr(profile, "onset_consistency", 0.5)) if profile else None,
+        multi_window=multi_window,
     )
+    if edge_salvage:
+        # Keep edge salvage clearly weaker than seed-only / mid-body (dimmer on map).
+        # Still places so the collection is complete — just obviously unsure.
+        confidence = min(float(confidence), CONFIDENCE_LOW - 0.08)
+        edge_note = {
+            "intro": "intro only",
+            "late": "end only",
+            "ends": "ends only",
+            "mid": "mid only",
+        }.get(edge_salvage, "partial listen")
+        if edge_note not in note:
+            note = f"{note} · {edge_note}" if note else edge_note
+    # Tag/path/keyword evidence — enough to conclude without waveform.
+    seed_evidence = bool(seed.clamp_match or seed.keyword_hit)
+    if not pcm_ok and seed_evidence:
+        confidence = min(float(confidence), CONFIDENCE_LOW - 0.01)
+        if "seed only" not in note:
+            note = f"{note} · seed only" if note else "seed only"
     return MoodResult(
         valence=float(valence),
         energy=float(energy),
@@ -1408,4 +1803,5 @@ def analyze_audio(
         acoustic_flux=float(getattr(profile, "flux", 0.0)) if profile else None,
         brightness=float(getattr(profile, "brightness", 0.5)) if profile else None,
         pcm_ok=bool(pcm_ok),
+        seed_evidence=seed_evidence,
     )

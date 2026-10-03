@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from time import time
 
-from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Slot
+from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Slot
 from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -45,7 +45,13 @@ from meridian.host_deps import (
 from meridian.library import Library
 from meridian.player import Player
 from meridian.queue_engine import Quadrant, QueuePlan, RenewalContext, build_plan
-from meridian.scanner import AnalyzeWorker, ScanWorker, start_worker
+from meridian.scanner import (
+    AnalyzeTrackQueue,
+    AnalyzeWorker,
+    ScanWorker,
+    TidyWorker,
+    start_worker,
+)
 from meridian.ui.search import TrackSearch
 from meridian.ui.fit_list import FitList
 from meridian.ui.fonts import condensed
@@ -53,6 +59,65 @@ from meridian.ui.palette import PLAYLIST_HEX
 from meridian.ui.matrix import EisenhowerMatrix
 from meridian.ui.mood_map import MoodMap
 from meridian.ui.transport import TransportBar
+
+
+class _ScanFinishBridge(QObject):
+    """Queued scan finished/failed must be real Slots — PySide drops lambda queues."""
+
+    def __init__(self, handler, gen: int, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._handler = handler
+        self._gen = gen
+
+    @Slot(int)
+    def on_finished(self, added: int) -> None:
+        handler = self._handler
+        if handler is not None:
+            handler(added, self._gen)
+
+
+class _AnalyzeFinishBridge(QObject):
+    """Capture gen/thread/worker for analyze finished without a Queued lambda."""
+
+    def __init__(
+        self,
+        window: "MainWindow",
+        gen: int,
+        thread,
+        worker,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._window = window
+        self._gen = gen
+        self._thread = thread
+        self._worker = worker
+
+    @Slot()
+    def on_finished(self) -> None:
+        self._window._analyze_done(self._gen, self._thread, self._worker)
+
+
+class _TidyFinishBridge(QObject):
+    """Queued tidy finished must be a real Slot — PySide drops Queued lambdas."""
+
+    def __init__(
+        self,
+        window: "MainWindow",
+        gen: int,
+        thread,
+        worker,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._window = window
+        self._gen = gen
+        self._thread = thread
+        self._worker = worker
+
+    @Slot(str)
+    def on_finished(self, error: str) -> None:
+        self._window._analyze_tidy_done(self._gen, error, self._thread, self._worker)
 
 
 class MainWindow(QMainWindow):
@@ -79,9 +144,21 @@ class MainWindow(QMainWindow):
         self._scan_thread = None
         self._scan_worker = None
         self._scan_gen = 0
+        self._scan_finish_bridge: _ScanFinishBridge | None = None
         self._analyze_thread = None
         self._analyze_worker = None
+        # Active analyze pool (1 on HDD, up to 2 on SSD/NVMe). Primary pair also
+        # mirrored in `_analyze_thread` / `_analyze_worker` for legacy stop/reap.
+        self._analyze_pool: list[tuple] = []
+        self._analyze_finish_bridges: list[_AnalyzeFinishBridge] = []
+        self._analyze_remaining = 0
+        self._analyze_run_tidy = False
+        self._analyze_progress_shown = 0
+        self._tidy_thread = None
+        self._tidy_worker = None
+        self._tidy_finish_bridge: _TidyFinishBridge | None = None
         self._analyze_gen = 0
+        self._analyze_finish_bridge: _AnalyzeFinishBridge | None = None
         # Timed-out workers kept alive (signals disconnected) until QThread ends.
         self._lingering_workers: list[tuple] = []
         self._close_library_when_idle = False
@@ -194,6 +271,8 @@ class MainWindow(QMainWindow):
             self._host_ffmpeg_sticky = False
             return
         self._host_ffmpeg_sticky = True
+        # Next successful ffmpeg session may re-queue seed-only never-heard rows.
+        self.settings.setValue("analyze/retry_seed_after_ffmpeg", True)
         self._set_status(ffmpeg_missing_status())
         if self.settings.value("host/skip_ffmpeg_warning", False, type=bool):
             return
@@ -646,12 +725,29 @@ class MainWindow(QMainWindow):
         self.refresh_plan(rebuild_queue=False)
         self.start_analyze()
 
+    def _analyze_busy(self) -> bool:
+        """True while any analyze (or post-analyze tidy) thread is still running."""
+        pool = list(getattr(self, "_analyze_pool", []) or [])
+        if any(t is not None and t.isRunning() for t, _w in pool):
+            return True
+        thread = getattr(self, "_analyze_thread", None)
+        if thread is not None and thread.isRunning():
+            return True
+        tidy = getattr(self, "_tidy_thread", None)
+        if tidy is not None and tidy.isRunning():
+            return True
+        return False
+
     def start_scan(self) -> None:
         if self._closing:
             return
         if self._lingering_workers:
             # Do not start a second scan while a timed-out worker still holds the DB.
             self._set_job_status("Waiting for previous scan/analyze to finish…")
+            return
+        if self._analyze_busy():
+            # Dual analyze writers + scan thrash SQLite — wait (Rescan stops analyze).
+            self._set_job_status("Waiting for waveform analyze to finish…")
             return
         # Refuse while prior scan refs remain — even if the thread already quit —
         # so a queued finished slot can reap its own generation (AB2/H1).
@@ -666,16 +762,19 @@ class MainWindow(QMainWindow):
         gen = self._scan_gen
         self._scan_worker = ScanWorker(self.library, force=force)
         self._scan_thread = start_worker(self._scan_worker)
-        # Always queue UI slots — Python lambdas default to DirectConnection and
-        # would run on the worker thread (unsafe for widgets / QThread.wait).
+        # Queue UI handlers on the GUI thread. Use real @Slot bridges — PySide 6.11
+        # silently drops QueuedConnection to lambdas/partials (scan never handed
+        # off to analyze on first-run).
         queued = Qt.ConnectionType.QueuedConnection
         self._scan_worker.progress.connect(self._set_job_status, queued)
-        self._scan_worker.failed.connect(
-            lambda m: QMessageBox.warning(self, "Scan failed", m), queued
-        )
-        self._scan_worker.finished.connect(
-            lambda added, g=gen: on_finished(added, g), queued
-        )
+        self._scan_worker.failed.connect(self._on_scan_failed, queued)
+        bridge = _ScanFinishBridge(on_finished, gen, parent=self)
+        self._scan_finish_bridge = bridge
+        self._scan_worker.finished.connect(bridge.on_finished, queued)
+
+    @Slot(str)
+    def _on_scan_failed(self, message: str) -> None:
+        QMessageBox.warning(self, "Scan failed", message)
 
     def _disconnect_worker(self, worker) -> None:
         if worker is None:
@@ -776,17 +875,41 @@ class MainWindow(QMainWindow):
         return self._reap_worker_thread(thread, worker, wait_ms=wait_ms)
 
     def _stop_analyze(self, wait_ms: int = 20000) -> bool:
-        """Stop analyze. Returns True when the thread is fully stopped."""
+        """Stop analyze (+ tidy). Returns True when every thread is fully stopped."""
         # Bump generation first so a late finished signal cannot restart analyze.
         # Abort kills in-flight ffmpeg so this wait stays bounded.
         self._analyze_gen += 1
-        worker = self._analyze_worker
-        thread = self._analyze_thread
+        pool = list(self._analyze_pool)
+        if not pool and (self._analyze_thread is not None or self._analyze_worker is not None):
+            pool = [(self._analyze_thread, self._analyze_worker)]
+        tidy_pair = None
+        if getattr(self, "_tidy_thread", None) is not None or getattr(self, "_tidy_worker", None) is not None:
+            tidy_pair = (self._tidy_thread, self._tidy_worker)
+        self._analyze_pool = []
+        self._analyze_finish_bridges = []
+        self._analyze_remaining = 0
+        self._analyze_run_tidy = False
+        self._analyze_progress_shown = 0
         self._analyze_worker = None
         self._analyze_thread = None
-        if worker is not None:
-            worker.abort()
-        return self._reap_worker_thread(thread, worker, wait_ms=wait_ms)
+        self._tidy_thread = None
+        self._tidy_worker = None
+        self._tidy_finish_bridge = None
+        for _thread, worker in pool:
+            if worker is not None:
+                worker.abort()
+        # Shared deadline so dual workers do not stack 20s + 20s.
+        deadline = time() + max(0.0, float(wait_ms) / 1000.0)
+        ok = True
+        for thread, worker in pool:
+            left_ms = max(0, int((deadline - time()) * 1000.0))
+            if not self._reap_worker_thread(thread, worker, wait_ms=left_ms):
+                ok = False
+        if tidy_pair is not None:
+            left_ms = max(0, int((deadline - time()) * 1000.0))
+            if not self._reap_worker_thread(tidy_pair[0], tidy_pair[1], wait_ms=left_ms):
+                ok = False
+        return ok
 
     def _scan_done(self, added: int, gen: int | None = None) -> None:
         # Ignore stale finished after a newer scan started / cleanup bumped gen.
@@ -816,39 +939,94 @@ class MainWindow(QMainWindow):
             self._pending_analyze_after_linger = True
             self._set_job_status("Waiting for previous analyze to finish…")
             return
-        # Reap a finished-but-not-yet-disposed analyze before overwrite (AB3/H2).
-        prev_thread = self._analyze_thread
-        prev_worker = self._analyze_worker
-        if prev_thread is not None or prev_worker is not None:
-            if prev_thread is not None and prev_thread.isRunning():
+        # Reap finished-but-not-yet-disposed analyze pool before overwrite (AB3/H2).
+        prev_pool = list(getattr(self, "_analyze_pool", []) or [])
+        if not prev_pool and (
+            self._analyze_thread is not None or self._analyze_worker is not None
+        ):
+            prev_pool = [(self._analyze_thread, self._analyze_worker)]
+        if prev_pool:
+            if any(t is not None and t.isRunning() for t, _w in prev_pool):
                 return
+            self._analyze_pool = []
             self._analyze_thread = None
             self._analyze_worker = None
-            self._reap_worker_thread(prev_thread, prev_worker, wait_ms=3000)
+            for prev_thread, prev_worker in prev_pool:
+                self._reap_worker_thread(prev_thread, prev_worker, wait_ms=3000)
         if self.library.closed:
             return
-        if not self.library.unanalyzed_ids():
+        # One-shot recovery: only re-queue seed-only never-heard rows after a
+        # session that saw ffmpeg missing (not every launch).
+        if not getattr(self, "_seed_retry_wave", False):
+            self._seed_retry_wave = True
+            from meridian.host_deps import host_ffmpeg_available
+
+            if host_ffmpeg_available() and self.settings.value(
+                "analyze/retry_seed_after_ffmpeg", False, type=bool
+            ):
+                self.library.requeue_seed_only_without_pcm()
+                self.settings.setValue("analyze/retry_seed_after_ffmpeg", False)
+        pending_ids = self.library.unanalyzed_ids()
+        if not pending_ids:
             self._clear_job_status()
-            self._set_status("Mood map updated from local audio.")
+            pcm_ok, deferred = self.library.analyze_session_stats()
+            if deferred > 0 and pcm_ok == 0:
+                self._set_status(
+                    "Some tracks need another listen — mood map kept what it could."
+                )
+            else:
+                self._set_status("Nothing left to analyze this session.")
             return
         self._pending_analyze_after_linger = False
         self._analyze_map_tick = 0
         self._last_analyze_map_refresh = 0.0
+        self._analyze_progress_shown = 0
         self._analyze_gen += 1
         gen = self._analyze_gen
-        worker = AnalyzeWorker(self.library)
-        thread = start_worker(worker)
-        self._analyze_worker = worker
-        self._analyze_thread = thread
-        queued = Qt.ConnectionType.QueuedConnection
-        worker.progress.connect(self._on_analyze_progress, queued)
-        # Capture this generation's thread/worker so a gen-mismatch finish still
-        # disposes the superseded QThread instead of orphaning it (AB3/H2).
-        worker.finished.connect(
-            lambda g=gen, t=thread, w=worker: self._analyze_done(g, t, w), queued
-        )
+        from meridian.features import clear_decode_abort
+        from meridian.host_deps import preferred_analyze_workers
 
+        clear_decode_abort()
+        self.library.reset_analyze_session_stats()
+        worker_n = preferred_analyze_workers(self.library.folders())
+        worker_n = max(1, min(2, int(worker_n)))
+        if len(pending_ids) < 2:
+            worker_n = 1
+        queue = AnalyzeTrackQueue(pending_ids)
+        queued = Qt.ConnectionType.QueuedConnection
+        pool: list[tuple] = []
+        bridges: list[_AnalyzeFinishBridge] = []
+        for index in range(worker_n):
+            worker = AnalyzeWorker(
+                self.library,
+                queue=queue,
+                run_tidy=False,
+                reset_session=False,
+                clear_abort=False,
+            )
+            thread = start_worker(worker)
+            pool.append((thread, worker))
+            worker.progress.connect(self._on_analyze_progress, queued)
+            # Must be a @Slot bridge — Queued lambda never delivers on PySide 6.11.
+            bridge = _AnalyzeFinishBridge(self, gen, thread, worker, parent=self)
+            bridges.append(bridge)
+            worker.finished.connect(bridge.on_finished, queued)
+        self._analyze_pool = pool
+        self._analyze_finish_bridges = bridges
+        self._analyze_remaining = len(pool)
+        self._analyze_run_tidy = True
+        # Legacy single-slot refs → primary worker (stop/reap / older tests).
+        self._analyze_thread = pool[0][0]
+        self._analyze_worker = pool[0][1]
+        self._analyze_finish_bridge = bridges[0]
+
+    @Slot(str, int, int)
     def _on_analyze_progress(self, name: str, i: int, n: int) -> None:
+        # Dual workers can deliver Queued progress out of order — ignore backward jumps.
+        shown = int(getattr(self, "_analyze_progress_shown", 0) or 0)
+        if i < shown:
+            return
+        self._analyze_progress_shown = i
         self._set_job_status(f"Listening to waveform {i}/{n}: {name}")
         # Throttle map refresh so the sky opens during long analyzes without
         # rebaking on every track (and without waiting for the full tidy pass).
@@ -866,17 +1044,22 @@ class MainWindow(QMainWindow):
         thread=None,
         worker=None,
     ) -> None:
-        # Always dispose the finishing worker's objects; only the matching gen
-        # owns current refs and may restart analyze.
+        # Always dispose the finishing worker's objects; only when the whole pool
+        # for this gen is idle may we tidy / restart analyze.
         if thread is None:
             thread = self._analyze_thread
         if worker is None:
             worker = self._analyze_worker
+        pool = list(getattr(self, "_analyze_pool", []) or [])
+        if pool:
+            self._analyze_pool = [(t, w) for t, w in pool if t is not thread and w is not worker]
         if gen == self._analyze_gen:
             if self._analyze_thread is thread:
                 self._analyze_thread = None
             if self._analyze_worker is worker:
                 self._analyze_worker = None
+            if getattr(self, "_analyze_remaining", 0) > 0:
+                self._analyze_remaining -= 1
         elif self._analyze_thread is thread:
             # Should not happen if start_analyze reaped first; clear safely.
             self._analyze_thread = None
@@ -884,7 +1067,59 @@ class MainWindow(QMainWindow):
         self._reap_worker_thread(thread, worker, wait_ms=3000)
         if gen != self._analyze_gen:
             return
+        # Wait for sibling workers in the SSD dual pool.
+        if getattr(self, "_analyze_remaining", 0) > 0:
+            return
+        self._analyze_finish_bridges = []
         if self._closing:
+            return
+        if getattr(self, "_analyze_run_tidy", False):
+            self._analyze_run_tidy = False
+            self._start_analyze_tidy(gen)
+            return
+        self._finish_analyze_session(gen)
+
+    def _start_analyze_tidy(self, gen: int) -> None:
+        """Run album tidy on a background thread so the GUI stays responsive."""
+        if self._closing or gen != self._analyze_gen:
+            return
+        self._set_job_status("Tidying mood map…")
+        worker = TidyWorker(self.library)
+        thread = start_worker(worker)
+        self._tidy_worker = worker
+        self._tidy_thread = thread
+        queued = Qt.ConnectionType.QueuedConnection
+        bridge = _TidyFinishBridge(self, gen, thread, worker, parent=self)
+        self._tidy_finish_bridge = bridge
+        worker.finished.connect(bridge.on_finished, queued)
+
+    def _analyze_tidy_done(
+        self,
+        gen: int,
+        error: str,
+        thread=None,
+        worker=None,
+    ) -> None:
+        if thread is None:
+            thread = self._tidy_thread
+        if worker is None:
+            worker = self._tidy_worker
+        if self._tidy_thread is thread:
+            self._tidy_thread = None
+        if self._tidy_worker is worker:
+            self._tidy_worker = None
+        self._tidy_finish_bridge = None
+        self._reap_worker_thread(thread, worker, wait_ms=3000)
+        if gen != self._analyze_gen:
+            return
+        if self._closing:
+            return
+        if error:
+            self._set_status(f"Mood map tidy failed: {error}")
+        self._finish_analyze_session(gen)
+
+    def _finish_analyze_session(self, gen: int) -> None:
+        if gen != self._analyze_gen or self._closing:
             return
         # If scan added more tracks while we were analyzing, finish them.
         if self.library.unanalyzed_ids():
@@ -894,7 +1129,22 @@ class MainWindow(QMainWindow):
             return
         self._clear_job_status()
         self.refresh_plan(rebuild_queue=False)
-        self._set_status("Mood map updated from local audio.")
+        pcm_ok, deferred = self.library.analyze_session_stats()
+        if pcm_ok == 0 and deferred > 0:
+            self._set_status(
+                "Some tracks need another listen — mood map kept what it could."
+            )
+        elif pcm_ok == 0:
+            # Tag/path concluded with no waveform this pass — do not imply a listen.
+            self._set_status(
+                "Mood map updated from tags — no waveform listen this pass."
+            )
+        elif deferred > 0:
+            self._set_status(
+                f"Mood map updated from local audio ({deferred} still pending)."
+            )
+        else:
+            self._set_status("Mood map updated from local audio.")
 
     def _map_activated(self, track_id: int) -> None:
         """Play a map star and keep context-queue Next/Prev aligned with it."""
@@ -987,9 +1237,30 @@ class MainWindow(QMainWindow):
             self._set_status(msg)
             next_id = self._skip_unplayable(track_id)
             if next_id is not None:
+                playing = self.player.current.id if self.player.current else None
+                # Dead next collapsed to the song already playing — keep it going.
+                # Hard-cut play_id(same) would stop+restart from 0.
+                if playing is not None and next_id == playing:
+                    self._expect_natural_advance = False
+                    self.player.release_advance_lock()
+                    if playing in self.session_queue:
+                        self.queue_index = self.session_queue.index(playing)
+                    else:
+                        self.session_queue.insert(0, playing)
+                        self.queue_index = 0
+                    self._fill_queue()
+                    self._set_status("Only one playable track in range — waiting.")
+                    return
                 self.play_id(next_id, _depth=_depth + 1)
             else:
+                playing = self.player.current.id if self.player.current else None
                 self._expect_natural_advance = False
+                if playing is not None:
+                    self.session_queue = [playing]
+                    self.queue_index = 0
+                    self._fill_queue()
+                    self.player.release_advance_lock()
+                    self._set_status("Only one playable track in range — waiting.")
             return
         self._rebuild_lock = True
         outgoing = self.player.current
@@ -1196,31 +1467,42 @@ class MainWindow(QMainWindow):
         if self.player.is_crossfading() and self._crossfade_outgoing_id is not None:
             outgoing = self._crossfade_outgoing_id
             settle_finish = self._outgoing_settle_finish
+            incoming_id = self.player.current.id if self.player.current else None
+            incoming_pos = int(self.player.backend.position() or 0) if self.player.current else 0
             self._clear_crossfade_credit()
             if settle_finish:
                 # Natural A→B: A essentially finished — never skip-credit it.
                 self._listen_nudge(outgoing, skipped=False)
-            # Leaving the incoming early: skip/finish only — never also play-count.
-            skipped = bool(self.player.current and self.player.backend.position() < 8000)
-            if self.player.current:
+            # Suppress play_id abandon credit until we know we actually moved.
+            if incoming_id is not None:
+                self._abandon_credited_id = incoming_id
+            moved = self._advance_queue(skipped=True)
+            if moved and incoming_id is not None:
+                skipped = incoming_pos < 8000
                 if skipped:
-                    self.library.record_skip(self.player.current.id)
+                    self.library.record_skip(incoming_id)
                     self.skips_window.append(time())
-                self._listen_nudge(self.player.current.id, skipped=skipped)
-                # play_id must not credit this abandoned incoming again.
-                self._abandon_credited_id = self.player.current.id
-            self._advance_queue(skipped=skipped)
+                self._listen_nudge(incoming_id, skipped=skipped)
+                self._abandon_credited_id = incoming_id
+            else:
+                self._abandon_credited_id = None
             return
-        # Credit once here, then tell play_id not to double-credit on the hard-cut/fade.
+        # Credit only after a successful move so sole-track Next cannot skip-credit.
+        abandoned_id = self.player.current.id if self.player.current else None
+        abandoned_pos = int(self.player.backend.position() or 0) if self.player.current else 0
         self._clear_crossfade_credit()
-        skipped = bool(self.player.current and self.player.backend.position() < 8000)
-        if self.player.current:
+        if abandoned_id is not None:
+            self._abandon_credited_id = abandoned_id
+        moved = self._advance_queue(skipped=True)
+        if moved and abandoned_id is not None:
+            skipped = abandoned_pos < 8000
             if skipped:
-                self.library.record_skip(self.player.current.id)
+                self.library.record_skip(abandoned_id)
                 self.skips_window.append(time())
-            self._listen_nudge(self.player.current.id, skipped=skipped)
-            self._abandon_credited_id = self.player.current.id
-        self._advance_queue(skipped=skipped)
+            self._listen_nudge(abandoned_id, skipped=skipped)
+            self._abandon_credited_id = abandoned_id
+        else:
+            self._abandon_credited_id = None
 
     def play_prev(self) -> None:
         # During crossfade, restore the outgoing song without double play_count or
@@ -1309,7 +1591,8 @@ class MainWindow(QMainWindow):
         if moved:
             self.refresh_plan(keep_current=True, rebuild_queue=False)
 
-    def _advance_queue(self, skipped: bool = False) -> None:
+    def _advance_queue(self, skipped: bool = False) -> bool:
+        """Advance to the next queue track. Returns True if a different track started."""
         current_id = self.player.current.id if self.player.current else None
         if current_id is not None and current_id in self.ephemeral:
             self.ephemeral.discard(current_id)
@@ -1325,19 +1608,30 @@ class MainWindow(QMainWindow):
             self._replenish_queue(avoid_id=current_id)
             self.queue_index = 0
         if not self.session_queue:
+            # Keep the still-playing track in the queue — do not strand empty.
+            if current_id is not None:
+                self.session_queue = [current_id]
+                self.queue_index = 0
+                self._fill_queue()
+                self._expect_natural_advance = False
+                self.player.release_advance_lock()
+                self._set_status("Only one playable track in range — waiting.")
+                return False
             self._expect_natural_advance = False
             self.player.release_advance_lock()
             self._set_status("Context queue is empty — move the lens or add more music.")
-            return
+            return False
         self.queue_index = min(max(0, self.queue_index), len(self.session_queue) - 1)
         next_id = self.session_queue[self.queue_index]
-        # Tiny libraries: never hard-cut restart the track that just ended.
-        if not skipped and current_id is not None and next_id == current_id:
+        # Tiny libraries / dead-next collapse: never hard-cut restart the current track.
+        if current_id is not None and next_id == current_id:
             self._expect_natural_advance = False
             self.player.release_advance_lock()
             self._set_status("Only one playable track in range — waiting.")
-            return
+            return False
         self.play_id(next_id)
+        after = self.player.current.id if self.player.current else None
+        return after is not None and after != current_id
 
     def _replenish_queue(self, *, avoid_id: int | None = None) -> None:
         """Build a fresh context queue from lens, time of day, and matrix lists."""
@@ -1362,8 +1656,8 @@ class MainWindow(QMainWindow):
             elif len(tracks) > 1:
                 order = [t.id for t in tracks if t.id != avoid][:18]
             else:
-                # Single-track library: do not loop the same song via hard-cut.
-                order = []
+                # Sole playable track: keep it queued. Callers must not hard-cut restart.
+                order = [avoid]
         self.ephemeral = {tid for tid in self.ephemeral if tid in order}
         self.session_queue = order
         self._fill_queue()

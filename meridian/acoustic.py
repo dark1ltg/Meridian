@@ -1,9 +1,9 @@
-"""Expanded acoustic profile from the existing PCM decode budget (no extra FFmpeg beyond ~28s).
+"""Expanded acoustic profile from one PCM buffer (section decode is orchestrated upstream).
 
 Items 2–11: multi-band energy, spectral flux, RMS dynamics, onset stats,
 brightness normalization, confidence, local-window aggregation — still projecting
-onto Shadow↔Glow / Still↔Kinetic only. Dual mid-track windows (two ~14s seeks)
-are orchestrated in features when duration allows; this module profiles one buffer.
+onto Shadow↔Glow / Still↔Kinetic only. Intro/mid/late ~12s seeks (~36s budget on
+long tracks) are orchestrated in features; this module profiles one buffer.
 """
 
 from __future__ import annotations
@@ -487,6 +487,7 @@ def confidence_from_evidence(
     flux: float | None = None,
     onset_consistency: float | None = None,
     genre_conflict: bool = False,
+    multi_window: bool = False,
 ) -> tuple[float, str]:
     """Graduated confidence: consistent evidence up, conflict/unstable down."""
     score = 0.0
@@ -515,6 +516,9 @@ def confidence_from_evidence(
         else:
             score += 0.50
             reasons.append("PCM only")
+        if multi_window:
+            # Note only — no score jitter (tidy/spread thresholds must not move on the flag).
+            reasons.append("multi-window")
         if variation > 0.28:
             score -= float(np.clip((variation - 0.28) * 0.35, 0.0, 0.12))
             reasons.append("unstable spectrum")
