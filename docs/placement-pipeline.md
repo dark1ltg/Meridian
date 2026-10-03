@@ -79,6 +79,15 @@ Without listening again:
 - Unstick clones that stacked on the same spot  
 - Spread the sky a bit relative to *your* collection  
 
+Rough / partial listens (seed-only, intro-only, end-only) can get nudged toward album mates, but tidy keeps them in the **unsure** confidence band so they still look dim.  
+
+### Partial listens and “seed only”
+
+- Heard *some* audio but not a solid middle → star still placed, marked low-trust.  
+- Heard nothing but tags/folders help → rough `seed only` place (better than a missing star).  
+- Heard nothing *and* no tags → deferred for a later retry.  
+- A later failed listen does **not** overwrite a prior good waveform pin.
+
 ## How listening feeds placement
 
 | From the short listen | What placement does with it |

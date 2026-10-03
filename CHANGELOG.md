@@ -2,147 +2,75 @@
 
 All notable Meridian releases are listed here. Download AppImages from [Releases](https://github.com/dark1ltg/Meridian/releases).
 
-## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-10-02)
+## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-10-03)
 
-Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds bug-hunt fixes (Rescan PCM keep, matrix click, zoom LOD, host ffmpeg warn), search select→play/queue inject, high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
+Version stays **1.3.6**. This refresh is about making first-run analyze actually run, showing your whole library on the mood map, listening smarter, and speeding up analyze on SSDs — plus a pile of bug fixes.
 
-### Local: dual-worker hunt fixes (scores 1–7)
-- Intro ~28s salvage keeps `intro only` low-trust (pad head cannot look mid-sure)
-- Scan waits while analyze/tidy is running (no SQLite thrash with dual writers)
-- Post-analyze tidy runs on a background thread; failures surface in status
-- Progress ignores out-of-order dual emits; stop uses one shared wait budget
-- Seed-only requeue only after a session that saw ffmpeg missing
-- Seed conclude preserves prior PCM confidence notes; session counters under the DB lock
+### What’s new (plain English)
 
-### Local: silent dual analyze workers (SSD → 2, HDD → 1)
-- No UI — library folders on non-rotational disks (SSD/NVMe) run **two** AnalyzeWorkers sharing one track queue; HDD or unknown stays at **one**
-- Mixed libraries (any rotational folder) stay single-worker to avoid thrash
-- Decode abort tracks every in-flight ffmpeg (both workers); tidy runs once when the pool finishes
-- Override with `MERIDIAN_ANALYZE_WORKERS=1` or `2` if needed
+**Faster listening on SSDs**
+- On flash storage (SSD/NVMe), Meridian quietly uses **two** waveform listeners at once so large libraries finish sooner.
+- On hard drives (or mixed/unknown disks) it stays at **one** listener so the drive isn’t thrashed.
+- No new settings or switches — it just happens. Advanced override: `MERIDIAN_ANALYZE_WORKERS=1` or `2`.
 
-### Local: album/artist smooth keeps rough places dim
-- Tidy still pulls low-trust tracks toward album/artist mates (tags + whatever listen landed)
-- Confidence may bump a little inside the unsure band, but **stays under 0.45** — no mid-trust wash for seed-only / edge-salvage pins
+**Smarter short listen (intro / middle / end)**
+- Long songs get three short listens (~12s each at the start, middle, and end) instead of one mid-track peek.
+- Short songs still get one or two listens — Meridian doesn’t triple-sample the same bit of audio.
+- A silent cold open no longer “vetoes” a clear middle and end.
 
-### Local: seed/edge honesty (bug-hunt 1–4, 6–8)
-- Seed-conclude never wipes prior PCM coords/acoustics; prior waveform → defer retry (`kept prior`)
-- One session wave re-queues `seed only` rows with no acoustics when ffmpeg is available
-- Edge salvage (intro/end/ends) places but caps confidence lower (~0.37) so they stay obviously dim
-- Mid-only body: full PCM credit, not `PCM fallback · multi-window`
-- Long-plan intro-only tries the same ~28s salvage as dual-plan before parking a 12s stub
-- Status: all-seed pass says tags / no waveform listen (not bare “Mood map updated”)
+**Your whole collection on the map**
+- If Meridian heard *any* real audio (even just the start or the fade), the track gets a star — marked unsure when the listen was partial.
+- If it heard nothing but tags/folder names exist, it still places a rough star from those (`seed only`) so songs aren’t stuck invisible as “deferred.”
+- It only leaves a track pending when there’s **no audio and no useful tags**.
 
-### Local: defer only with no audio and no tags
-- If any section has real audio → place (weak/low-trust when partial)
-- If no waveform but genre/path/keyword tags exist → **conclude** on that seed (`seed only`, low-trust), not defer
-- **Defer only** when every listen fails and there is no usable tagging evidence at all
-- (Supersedes older changelog lines that said intro/late/ends **defer** — those now weak-place)
+### Bug fixes
 
-### Local: scan→analyze handoff (QueuedConnection lambda drop)
-- PySide 6.11 drops `QueuedConnection` to lambdas/partials — first-run scan never called `start_analyze`, leaving seed-only moods
-- Scan/analyze `finished` (and scan `failed`) now use `@Slot` bridges so the GUI thread receives the handoff
-- Status should advance to `Listening to waveform i/n…` after index; tests cover the framework drop and Slot delivery
+**First-run analyze never started (critical)**
+- On newer PySide/Qt, the “scan finished → start listening” handoff was silently dropped, so the map stayed on tag guesses with no waveform pass.
+- **Fixed:** that handoff now uses real Qt slots so analyze starts after indexing.
 
-### Local: three-section app-wide fixes (scores 2, 4, 6)
-- Dual short/medium plans: when the second window fails but the first succeeded, **salvage** with a ~28s single listen from 0 / primary (pre-three-section) instead of hard-deferring to seed
-- Unknown duration (`duration_ms==0`): decode ~28s from 0 (not a lone 12s mid stub)
-- `multi_window` confidence: keep the note, **remove** the +0.02 score nudge (tidy/spread thresholds unchanged by the flag alone)
-- Score **3** (~36s three-window wall) left accepted — no parallel/shorter 3×9 change
-- Tests cover dual intro-only salvage, unknown-duration 28s, multi-window note-without-nudge
+**Good listens no longer get wiped by a bad retry**
+- If a song already had a real listen and a later pass can’t hear it, Meridian keeps the good pin and tries again later — it doesn’t replace it with a genre sticky-note.
 
-### Local: three-section audio analysis (intro / mid / late)
-- Long tracks: three **12s** windows (intro / mid / late, ~36s budget) with mid-heavy blend (~20/50/30)
-- Short tracks: **1–2** windows only (no triple-sampling the same audio)
-- Partial decode: intro/late/ends with no mid → **weak low-trust place** (policy: full collection over defer)
-- Cold-open intro cannot veto a clear mid+late body; dual/triple disagreement keeps stabler + inject
-- Safe seeks (unknown/short duration never past EOF); abort clears/kills active ffmpeg across sequential seeks
-- Confidence note can mention multi-window; merge weights stay deterministic (Rescan jump dampening; pins unchanged)
+**Rough placements stay honestly dim**
+- Start-only / end-only / ends-only listens stay low-confidence so they look unsure on the map.
+- Album tidy can still nudge those stars toward album mates, but it won’t promote them into “looks trusted.”
+- A longer salvage listen of a pad/intro head still stays marked intro-only / unsure.
 
-### Local: three-section bug-hunt fixes (scores 2–7)
-- Cold-open zero-weight intro no longer poisons merge `unstable` / `variation` (body keeps real confidence)
-- Dual-plan (short/medium): intro-only salvages ~28s from 0 / primary (then weak place if needed)
-- Silent intro + solid mid/late is full PCM credit (not weak-fallback taxed)
-- Long-plan late-only / ends-only → weak low-trust place (not genre defer)
-- ~36s three-window budget: **accepted cost**; skip re-ffmpeg of seeks that already returned no-signal audio
+**Honest status messages**
+- If a pass placed everything from tags with no waveform listen, the status says so — it no longer implies “updated from local audio.”
 
-### Local: three-section re-hunt fixes (scores 2–5)
-- Shrunk outlier/flashy intro keeps a tiny coord nudge but is excluded from merge `unstable` / `variation` (body confidence)
-- Long-plan ends-only (`intro`+`late`, no mid) → weak `ends only` place
-- Short dual-plan late-only → weak `end only` place
-- Hard decode misses skip same-seek re-ffmpeg; mid-only body gets full PCM credit (not multi-window claim)
+**Scan vs analyze**
+- Adding folders / scanning waits while waveform analyze (or tidy) is still running, so two jobs don’t fight over the library database.
+- Stopping analyze with two listeners uses one shared time budget instead of stacking long waits.
 
-### 2026-10-02 refresh (bug-hunt: queue advance / analyze honesty)
-- Dead next (missing/denied): keep the still-playing track instead of `stop`+`play_track` hard-restart from 0
-- Failed auto-advance near end: `release_advance_lock` holds fade re-arm so position ticks cannot thrash replenish/map rebuilds
-- Next on sole playable track: keep `[current]` in the queue, wait status, and skip-credit only after a real move
-- Analyze: when every decode is deferred (`pcm_ok=False`), status reports deferred seed placement instead of “Mood map updated from local audio”
+**Other analyze polish**
+- Mid-only body listens get full credit (not a confusing “weak + multi-window” label).
+- Seed-only retries after a missing-ffmpeg day only re-run when ffmpeg was actually missing before — not every launch.
+- Post-analyze tidy (album clustering) runs in the background so the window doesn’t freeze.
+- Decode abort kills every in-flight ffmpeg when you stop.
 
-### 2026-10-02 refresh (bug-hunt: Rescan / matrix / zoom / ffmpeg)
-- Rescan: when prior PCM left `brightness` / `acoustic_flux`, keep mood coords after Rescan zeros `analyzed` (no genre-seed flash / wipe until a new decode)
-- Matrix: clicking the already-playing (or queue-cursor) track restarts it in place — no pop/reinsert / ephemeral one-shot that strands the next song
-- Mood map: zoom past the ceiling still schedules LOD end so live stars return after the gesture
-- Host deps: startup warning dialog + sticky status when `ffmpeg` is missing on PATH (same pattern as libx264); analyze does not invent waveform placement without it
+### Earlier 1.3.6 refreshes (still included)
 
-### 2026-10-02 refresh (search select + high-sev / score 7–10)
-- Search: double-click a result or arrow + Enter injects play + context queue; single-click only highlights (query no longer wiped by completer labels)
-- Close ffmpeg decode stdout/stderr pipes on abort, timeout, and error paths (subprocess / FD leak)
-- Serialize scan-worker lifecycle with generation guards so stale completions cannot clean up or replace a newer scan
-- Capture each analyze generation’s worker, reap finished refs before replacement, and ignore stale completion restarts
-- Loved tracks that fit the lens stay in NOW/DEEP instead of FILL under band bias
-- ffmpeg wall timeout scales with decode duration: `max(dur + 10.0, 30.0)`
+**2026-10-02 — queue / Rescan / search / reliability**
+- Dead next / sole-track next no longer hard-restarts or strands playback; deferred analyze status is honest.
+- Rescan keeps prior waveform placement until a new decode lands; matrix re-click restarts in place; zoom LOD recovers; missing host ffmpeg warns at startup.
+- Search: double-click or Enter injects play + queue; single-click only highlights.
+- High-severity reliability: ffmpeg pipe closes, scan/analyze generation guards, loved tracks stay in NOW/DEEP when they fit, scaled ffmpeg timeouts.
 
-### 2026-09-25 refresh
-- Sparse mood-map after large import: stable path-hash jitter at genre seed time so same-genre cohorts form clouds after scan (Rescan needed for existing DBs)
-- Density-aware starfield bake for large libraries; throttled map refresh during analyze
-- Sticky job status vs hover tips; richer scan progress (folder + indexed counts)
-- Tests lock 1-song=1-star mood-map cardinality
+**2026-09-25 — mood-map import UX**
+- Same-genre tracks form clouds after scan; denser starfield for large libraries; throttled map refresh during analyze; sticky job status; 1 song = 1 star.
 
-### 2026-09-23 refresh
-- Mid-fade map jumps credit an abandoned song once; clicking the outgoing star restarts it without an extra play count; re-clicking the incoming star still counts that start
-- Various Artists comps share one album anti-repeat bucket via album artist
-- Scan confidence ignores tagged BPM 0
-- Renew queue explains itself on first use (hover tooltip stays); later clicks skip the dialog
-- Pinned stars show a lock ring on the live map and the baked night sky
+**2026-09-23 and earlier in 1.3.6**
+- Mid-fade credit, Various Artists album buckets, BPM 0 ignored at scan, Renew Queue first-run tip, pin lock rings on the map.
+- **Renew Queue:** fresh recommendation pass from the current listen matrix without treating replaced songs as skips.
 
-### Context queue
-- **Renew queue** rebuilds the context queue from the current Queue Matrix (lens neighborhood + mode + clock)
-- Moving the lens still updates the matrix without replacing the live queue until you renew (or the queue replenishes)
-- Renewal is a queue-selection event — it does **not** write skip/finish history or raise skip pressure
-- Soft demotion of the immediately previous queue’s unheard leftovers encourages a genuinely new route through the same context
-- Exempt from that demotion: currently playing, explicit matrix pulls, loved, and pinned tracks; session-heard tracks are not treated as “unused leftovers”
-- Small neighborhoods (&lt; ~12 preferred-matrix candidates) turn the renew penalty off so tiny libraries can reuse tracks
-- Mid-size pools use a lighter penalty; larger pools use the normal soft strength
-- Consecutive renews (streak, reset on lens/mode change) add a bounded extra nudge — not a random walk out of context
-- Artist/album anti-repeat and mode-aware mix stay in the same `build_plan` path as normal queues
+### Packaging
 
-### Optimization
-- Album acoustic spread and relative percentile rescale run once per analyze note (no compounding drift on every pass)
-- Smooth / spread / rescale only touch `analyzed=1` tracks so deferred PCM misses stay put until a real decode
-- Empty lens keeps far tracks on SHELF instead of promoting nearest-N into NOW
-- Short / unknown-duration files seek PCM from 0 (no 12s / 45s past EOF)
-- Path genre prefers the deepest matching folder; residual matching rejects device names like `rock-drive`
-- `Drum & Bass`-style folders normalize `&` → `and`; Various Artists diversity uses the real track artist
-- Album spread anchors on median brightness/flux and leaves high-confidence stars alone
-- Scan prune requires ~85% of known tracks visible before deleting missing rows
-- Pins still receive brightness / flux acoustics on analyze (mood coords stay protected)
+- AppImage baseline remains Ubuntu 24.04 / glibc 2.38+.
+- Host **ffmpeg** required for mood analysis; system **libx264** for H.264 playback through Qt’s FFmpeg plugin (not bundled).
+- Release AppImage refreshed **2026-10-03** with the analyze / dual-worker / map-completeness work above.
 
-### Bugfixes
-- Corrupt QSettings mode / lens values no longer crash launch (safe parse + clamp)
-- Denylisted last track: Play / Space clears and advances instead of retrying the dead file
-- Seek into the fade window no longer auto-advances; hard-cut restarts same-URL audio reliably
-- Same-track restart does not bump `play_count`; pause mid-fade still counts the kept track as a play
-- Next no longer double skip-credits; crossfade leave uses skip/finish only (no play+skip double)
-- Abandon while paused credits once; Prev from a one-shot matrix pull no longer overshoots
-- Natural-advance flag clears when the unplayable chain empties; mid-fade same-track restart still finish-nudges the outgoing song
-- Mtime / tag refresh keeps PCM placement while re-queuing analyze; silent PCM miss defers instead of sticky “analyzed”
-- Symlink / `.hidden` subtrees stay indexed; deleted files under those dirs are dropped without weakening sparse-mount guards
-- Playback denylist persists across relaunch and clears on scan refresh (including pins)
-- `unrecord_play` clears `last_played` when count hits zero; linger scan shows a status instead of silent no-op
-- Scrub remain-time follows the slider while dragging
-
-### Docs / packaging
-- README and AppStream note Renew queue; AppImage baseline remains Ubuntu 24.04 / glibc 2.38+
-- Release AppImage refreshed 2026-10-02 with bug-hunt Rescan/matrix/zoom/ffmpeg fixes, search select→play/queue inject, high-sev reliability (score 7–10), and prior mood-map import UX
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-09)
 

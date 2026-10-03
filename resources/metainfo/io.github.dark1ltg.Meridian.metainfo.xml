@@ -43,13 +43,13 @@
   </keywords>
   <content_rating type="oars-1.1" />
   <releases>
-    <release version="1.3.6" date="2026-10-01">
+    <release version="1.3.6" date="2026-10-03">
       <description>
         <p>
-          AppImage refresh: high-severity reliability (ffmpeg FD cleanup,
-          scan/analyze worker generation guards, loved FILL→DEEP promotion,
-          duration-aware decode timeout), plus mood-map import UX and prior
-          Renew Queue hardening.
+          AppImage refresh (still 1.3.6): first-run analyze handoff fix,
+          intro/mid/end listening, place the full library (weak pins instead of
+          stuck deferred tracks), silent dual analyze workers on SSD, and bug
+          fixes so good listens are not wiped and rough pins stay dim.
         </p>
       </description>
     </release>
