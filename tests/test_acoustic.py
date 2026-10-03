@@ -465,3 +465,62 @@ def test_genre_conflict_reduces_metadata_not_max_pcm() -> None:
         conflicted_weak = analyze_audio(path_conflict, "metal", "x", "y", 120.0)
     # Unstable PCM must not inherit most of the freed metadata authority.
     assert abs(conflicted_weak.energy - seed_c.energy) < moved_c - 0.005
+
+
+def test_path_to_9_clamp_constants() -> None:
+    """Path-to-9: slightly looser soft/clamp envelopes; energy widen ≤ valence."""
+    from meridian.features import (
+        EVIDENCE_SOFT_ENERGY_MAX,
+        EVIDENCE_SOFT_VALENCE_MAX,
+        PCM_MAX_SHIFT,
+        PCM_STRONG_ONSET_MAX,
+        SOFT_PCM_MAX_SHIFT,
+    )
+
+    assert SOFT_PCM_MAX_SHIFT == 0.09
+    assert EVIDENCE_SOFT_VALENCE_MAX == 0.14
+    assert EVIDENCE_SOFT_ENERGY_MAX == 0.12
+    assert EVIDENCE_SOFT_ENERGY_MAX <= EVIDENCE_SOFT_VALENCE_MAX
+    assert PCM_MAX_SHIFT == 0.16
+    assert PCM_STRONG_ONSET_MAX == 0.18
+    assert min(PCM_STRONG_ONSET_MAX, PCM_MAX_SHIFT * 1.25) == 0.18
+
+
+def test_meta_accurate_vs_weak_kinetic_pull() -> None:
+    """Good metadata + strong onset fine-tunes Kinetic; weak metadata allows more pull."""
+    from unittest.mock import patch
+
+    from meridian.acoustic import AcousticProfile
+    from meridian.features import SOFT_PCM_MAX_SHIFT, analyze_audio, genre_seed
+
+    seed = genre_seed("metal", "x", "y", path="/music/Metal/Album/track.flac")
+    # Far-calm PCM with steady onsets + real detected BPM.
+    profile = AcousticProfile(
+        valence=0.40,
+        energy=0.25,
+        bpm=96.0,
+        unstable=False,
+        brightness=0.45,
+        flux=0.22,
+        onset_consistency=0.88,
+        variation=0.06,
+        window_count=3,
+        pcm_samples=8000,
+    )
+    pcm = np.zeros(SAMPLERATE, dtype=np.float32)
+    with patch(
+        "meridian.features._decode_pcm_with_fallback",
+        return_value=(pcm, False, profile, None),
+    ):
+        good = analyze_audio(
+            "/music/Metal/Album/track.flac", "metal", "x", "y", 180.0
+        )
+        # Missing tag BPM → not soft-locked; stronger Kinetic pull inside clamp.
+        weak = analyze_audio(
+            "/music/Metal/Album/track.flac", "metal", "x", "y", None
+        )
+
+    moved_good = abs(good.energy - seed.energy)
+    moved_weak = abs(weak.energy - seed.energy)
+    assert moved_good <= SOFT_PCM_MAX_SHIFT + 1e-9
+    assert moved_weak > moved_good + 0.03

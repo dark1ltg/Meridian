@@ -40,10 +40,10 @@ Depending on the file, Meridian uses different rules:
 
 **Well-tagged song with a real BPM**  
 Stay near the sticker. Only allow a **small** nudge from the listen.  
-If the listen is clear, steady, and *obviously* elsewhere, allow a **bigger** nudge — especially on Glow (brightness), a bit less on Kinetic (pace often matches genre/BPM already).
+If the listen is clear, steady, and *obviously* elsewhere, allow a **bigger** nudge on Glow (brightness). Kinetic stays a **fine-tune** when tags are good and the rhythm evidence is steady — pace often matches genre/BPM already.
 
-**Genre known, but BPM missing / weak**  
-Mix sticker and listen, but don’t let the listen yank the star too far from the genre neighborhood.
+**Genre known, but BPM missing / weak / conflicting / container-only**  
+Mix sticker and listen inside a slightly looser genre neighborhood. With steady onset evidence, Kinetic may pull harder from the waveform (aubio/PCM) than the soft-lock path allows.
 
 **Messy / empty tags (common on raw dumps)**  
 Trust the listen much more.

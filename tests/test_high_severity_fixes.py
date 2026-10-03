@@ -339,3 +339,50 @@ def test_loved_fill_promoted_under_day_band() -> None:
             renewal=RenewalContext(prior_queue_ids=frozenset({1}), renew_streak=0),
         )
         assert 1 in plan.order
+
+
+def test_queue_prefers_sure_pins_over_low_trust() -> None:
+    """Path-to-9: subtle importance/fit lift for high-confidence pins vs dim scrapes."""
+    from unittest.mock import patch
+
+    from meridian.context import Mode, make_context
+    from meridian.library import Track
+    from meridian.queue_engine import classify
+
+    def t(i, *, conf: float, low_trust: bool):
+        return Track(
+            id=i,
+            path=f"/m/{i}.mp3",
+            title=f"t{i}",
+            artist=f"A{i}",
+            album=f"L{i}",
+            albumartist=f"A{i}",
+            genre="Metal",
+            duration_ms=1000,
+            year=None,
+            bpm=120.0,
+            valence=0.50,
+            energy=0.50,
+            mood_confidence=conf,
+            confidence_note="test",
+            low_trust=low_trust,
+            pinned=False,
+            loved=False,
+            play_count=2,
+            skip_count=0,
+            last_played=None,
+            added_at=0.0,
+            mtime=0.0,
+            analyzed=True,
+        )
+
+    sure = t(1, conf=0.88, low_trust=False)
+    scrape = t(2, conf=0.30, low_trust=True)
+    with patch("meridian.context.current_hour", return_value=13):
+        ctx = make_context(Mode.FOCUS, 0.5, 0.5, 0.28, 0.0)
+        ranked = classify([sure, scrape], ctx, set())
+    by_id = {r.track.id: r for r in ranked}
+    # Same distance to lens — sure pin should outrank the dim scrape.
+    score = lambda r: r.fit * 0.7 + r.importance * 0.3
+    assert score(by_id[1]) > score(by_id[2])
+    assert by_id[1].importance > by_id[2].importance
