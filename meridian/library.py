@@ -427,7 +427,10 @@ class Library:
                             WHEN pinned = 1 THEN low_trust
                             WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN low_trust
                             ELSE ? END,
-                        confidence_note = CASE WHEN pinned = 1 THEN confidence_note ELSE ? END,
+                        confidence_note = CASE
+                            WHEN pinned = 1 THEN confidence_note
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN confidence_note
+                            ELSE ? END,
                         onset_consistency = COALESCE(?, onset_consistency),
                         acoustic_flux = COALESCE(?, acoustic_flux),
                         brightness = COALESCE(?, brightness),
@@ -447,9 +450,9 @@ class Library:
                         track_id,
                     ),
                 )
+            if from_pcm:
+                self._analyze_pcm_ok_count += 1
             self.conn.commit()
-        if from_pcm:
-            self._analyze_pcm_ok_count += 1
 
     def had_pcm_acoustics(self, track_id: int) -> bool:
         """True when a prior waveform pass left brightness/flux (keep over seed wipe)."""
@@ -910,8 +913,8 @@ class Library:
         """Leave analyzed=0 but denylist this session so silent PCM miss can retry later."""
         tid = int(track_id)
         self._analyze_denylist.add(tid)
-        self._analyze_deferred_count += 1
         with self.lock:
+            self._analyze_deferred_count += 1
             row = self.conn.execute(
                 "SELECT pinned, confidence_note FROM tracks WHERE id = ?", (tid,)
             ).fetchone()

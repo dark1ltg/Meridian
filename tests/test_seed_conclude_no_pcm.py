@@ -193,7 +193,7 @@ def test_analyze_worker_keeps_prior_pcm_when_decode_misses(tmp_path: Path, qapp)
         assert t.brightness == 0.61
         assert t.acoustic_flux == 0.42
         assert "kept prior" in (t.confidence_note or "")
-        # Belt-and-suspenders: seed write must not NULL acoustics either.
+        # Belt-and-suspenders: seed write must not NULL acoustics or relabel PCM.
         lib.set_analyzed_mood(
             tid,
             0.1,
@@ -201,13 +201,15 @@ def test_analyze_worker_keeps_prior_pcm_when_decode_misses(tmp_path: Path, qapp)
             None,
             confidence=0.2,
             low_trust=True,
-            confidence_note="seed only",
+            confidence_note="tag:rock · seed only",
             from_pcm=False,
         )
         t2 = lib.get(tid)
         assert t2 is not None
         assert abs(t2.valence - 0.62) < 1e-9
         assert t2.brightness == 0.61
+        assert "pcm multi-window" in (t2.confidence_note or "")
+        assert "seed only" not in (t2.confidence_note or "")
     finally:
         lib.close()
 

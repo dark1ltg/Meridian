@@ -379,12 +379,34 @@ class AnalyzeWorker(QObject):
                 completed, total = queue.mark_done()
                 self.progress.emit(track.short_title, completed, total)
             if self._run_tidy and not self._abort:
-                self.library.smooth_album_moods()
-                self.library.smooth_artist_moods()
-                self.library.spread_album_acoustics()
-                self.library.rescale_moods_by_percentile()
+                run_library_tidy(self.library)
         finally:
             self.finished.emit()
+
+
+def run_library_tidy(library: Library) -> None:
+    """Album/artist smooth + acoustic spread + percentile rescale (no ffmpeg)."""
+    library.smooth_album_moods()
+    library.smooth_artist_moods()
+    library.spread_album_acoustics()
+    library.rescale_moods_by_percentile()
+
+
+class TidyWorker(QObject):
+    """Background tidy after the analyze pool finishes (keeps the GUI responsive)."""
+
+    finished = Signal(str)  # empty ok, else error message
+
+    def __init__(self, library: Library) -> None:
+        super().__init__()
+        self.library = library
+
+    def run(self) -> None:
+        try:
+            run_library_tidy(self.library)
+            self.finished.emit("")
+        except Exception as exc:
+            self.finished.emit(str(exc) or exc.__class__.__name__)
 
 
 def start_worker(worker: QObject, fn_name: str = "run") -> QThread:

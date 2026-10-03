@@ -390,6 +390,38 @@ def test_analyze_done_reports_deferred_not_success(qapp) -> None:
     assert "updated from local audio" not in statuses[-1].lower()
 
 
+def test_analyze_progress_ignores_backward_jumps(qapp) -> None:
+    w = MainWindow.__new__(MainWindow)
+    w._analyze_progress_shown = 0
+    w._analyze_map_tick = 0
+    w._last_analyze_map_refresh = 0.0
+    statuses: list[str] = []
+    w._set_job_status = lambda m: statuses.append(m)  # type: ignore[method-assign]
+    w.refresh_plan = lambda **_k: None  # type: ignore[method-assign]
+    MainWindow._on_analyze_progress(w, "A", 2, 10)
+    MainWindow._on_analyze_progress(w, "B", 1, 10)  # out of order
+    MainWindow._on_analyze_progress(w, "C", 3, 10)
+    assert len(statuses) == 2
+    assert "2/10" in statuses[0]
+    assert "3/10" in statuses[1]
+
+
+def test_start_scan_waits_while_analyze_busy(qapp) -> None:
+    w = MainWindow.__new__(MainWindow)
+    w._closing = False
+    w._lingering_workers = []
+    w._scan_thread = None
+    w._scan_worker = None
+    busy = {"n": 0}
+    w._analyze_busy = lambda: True  # type: ignore[method-assign]
+    jobs: list[str] = []
+    w._set_job_status = lambda m: jobs.append(m)  # type: ignore[method-assign]
+    w._start_scan_worker = lambda **_k: busy.__setitem__("n", busy["n"] + 1)  # type: ignore
+    MainWindow.start_scan(w)
+    assert busy["n"] == 0
+    assert jobs and "analyze" in jobs[-1].lower()
+
+
 def test_analyze_done_reports_all_seed_not_listen(qapp) -> None:
     """Sev 3: pcm_ok==0 and deferred==0 must not imply a waveform listen."""
     w = MainWindow.__new__(MainWindow)

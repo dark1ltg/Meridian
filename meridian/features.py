@@ -1384,8 +1384,11 @@ def _decode_pcm_with_fallback(
         seen.add(key)
         pcm = _decode_pcm(path, start_s=float(ss), duration_s=win_s)
         if pcm is not None and _pcm_signal_ok(pcm):
-            # Dual/long salvage is a real longer listen after multi-window honesty failed;
-            # mark fallback so we do not claim multi-window credit for the stub path.
+            # Longer salvage after multi-window honesty failed — still fallback-taxed.
+            # If we only ever had intro evidence, keep the intro edge tag so a pad
+            # head cannot look mid-trust after a ~28s re-listen of the same region.
+            if edge_fallback is not None:
+                return pcm, True, None, edge_fallback[1]
             return pcm, bool(index > 0 or dual_salvage), None, None
     # Longer salvage found nothing — weak-place the stashed intro stub if we have it.
     if edge_fallback is not None:

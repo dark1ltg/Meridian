@@ -45,7 +45,13 @@ from meridian.host_deps import (
 from meridian.library import Library
 from meridian.player import Player
 from meridian.queue_engine import Quadrant, QueuePlan, RenewalContext, build_plan
-from meridian.scanner import AnalyzeTrackQueue, AnalyzeWorker, ScanWorker, start_worker
+from meridian.scanner import (
+    AnalyzeTrackQueue,
+    AnalyzeWorker,
+    ScanWorker,
+    TidyWorker,
+    start_worker,
+)
 from meridian.ui.search import TrackSearch
 from meridian.ui.fit_list import FitList
 from meridian.ui.fonts import condensed
@@ -92,6 +98,28 @@ class _AnalyzeFinishBridge(QObject):
         self._window._analyze_done(self._gen, self._thread, self._worker)
 
 
+class _TidyFinishBridge(QObject):
+    """Queued tidy finished must be a real Slot — PySide drops Queued lambdas."""
+
+    def __init__(
+        self,
+        window: "MainWindow",
+        gen: int,
+        thread,
+        worker,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._window = window
+        self._gen = gen
+        self._thread = thread
+        self._worker = worker
+
+    @Slot(str)
+    def on_finished(self, error: str) -> None:
+        self._window._analyze_tidy_done(self._gen, error, self._thread, self._worker)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -125,6 +153,10 @@ class MainWindow(QMainWindow):
         self._analyze_finish_bridges: list[_AnalyzeFinishBridge] = []
         self._analyze_remaining = 0
         self._analyze_run_tidy = False
+        self._analyze_progress_shown = 0
+        self._tidy_thread = None
+        self._tidy_worker = None
+        self._tidy_finish_bridge: _TidyFinishBridge | None = None
         self._analyze_gen = 0
         self._analyze_finish_bridge: _AnalyzeFinishBridge | None = None
         # Timed-out workers kept alive (signals disconnected) until QThread ends.
@@ -239,6 +271,8 @@ class MainWindow(QMainWindow):
             self._host_ffmpeg_sticky = False
             return
         self._host_ffmpeg_sticky = True
+        # Next successful ffmpeg session may re-queue seed-only never-heard rows.
+        self.settings.setValue("analyze/retry_seed_after_ffmpeg", True)
         self._set_status(ffmpeg_missing_status())
         if self.settings.value("host/skip_ffmpeg_warning", False, type=bool):
             return
@@ -691,12 +725,29 @@ class MainWindow(QMainWindow):
         self.refresh_plan(rebuild_queue=False)
         self.start_analyze()
 
+    def _analyze_busy(self) -> bool:
+        """True while any analyze (or post-analyze tidy) thread is still running."""
+        pool = list(getattr(self, "_analyze_pool", []) or [])
+        if any(t is not None and t.isRunning() for t, _w in pool):
+            return True
+        thread = getattr(self, "_analyze_thread", None)
+        if thread is not None and thread.isRunning():
+            return True
+        tidy = getattr(self, "_tidy_thread", None)
+        if tidy is not None and tidy.isRunning():
+            return True
+        return False
+
     def start_scan(self) -> None:
         if self._closing:
             return
         if self._lingering_workers:
             # Do not start a second scan while a timed-out worker still holds the DB.
             self._set_job_status("Waiting for previous scan/analyze to finish…")
+            return
+        if self._analyze_busy():
+            # Dual analyze writers + scan thrash SQLite — wait (Rescan stops analyze).
+            self._set_job_status("Waiting for waveform analyze to finish…")
             return
         # Refuse while prior scan refs remain — even if the thread already quit —
         # so a queued finished slot can reap its own generation (AB2/H1).
@@ -824,25 +875,39 @@ class MainWindow(QMainWindow):
         return self._reap_worker_thread(thread, worker, wait_ms=wait_ms)
 
     def _stop_analyze(self, wait_ms: int = 20000) -> bool:
-        """Stop analyze. Returns True when every analyze thread is fully stopped."""
+        """Stop analyze (+ tidy). Returns True when every thread is fully stopped."""
         # Bump generation first so a late finished signal cannot restart analyze.
         # Abort kills in-flight ffmpeg so this wait stays bounded.
         self._analyze_gen += 1
         pool = list(self._analyze_pool)
         if not pool and (self._analyze_thread is not None or self._analyze_worker is not None):
             pool = [(self._analyze_thread, self._analyze_worker)]
+        tidy_pair = None
+        if getattr(self, "_tidy_thread", None) is not None or getattr(self, "_tidy_worker", None) is not None:
+            tidy_pair = (self._tidy_thread, self._tidy_worker)
         self._analyze_pool = []
         self._analyze_finish_bridges = []
         self._analyze_remaining = 0
         self._analyze_run_tidy = False
+        self._analyze_progress_shown = 0
         self._analyze_worker = None
         self._analyze_thread = None
+        self._tidy_thread = None
+        self._tidy_worker = None
+        self._tidy_finish_bridge = None
         for _thread, worker in pool:
             if worker is not None:
                 worker.abort()
+        # Shared deadline so dual workers do not stack 20s + 20s.
+        deadline = time() + max(0.0, float(wait_ms) / 1000.0)
         ok = True
         for thread, worker in pool:
-            if not self._reap_worker_thread(thread, worker, wait_ms=wait_ms):
+            left_ms = max(0, int((deadline - time()) * 1000.0))
+            if not self._reap_worker_thread(thread, worker, wait_ms=left_ms):
+                ok = False
+        if tidy_pair is not None:
+            left_ms = max(0, int((deadline - time()) * 1000.0))
+            if not self._reap_worker_thread(tidy_pair[0], tidy_pair[1], wait_ms=left_ms):
                 ok = False
         return ok
 
@@ -890,14 +955,17 @@ class MainWindow(QMainWindow):
                 self._reap_worker_thread(prev_thread, prev_worker, wait_ms=3000)
         if self.library.closed:
             return
-        # One wave per session: retry seed-only rows that never got waveform when
-        # ffmpeg is available again (avoids permanent tag-park after a bad listen day).
+        # One-shot recovery: only re-queue seed-only never-heard rows after a
+        # session that saw ffmpeg missing (not every launch).
         if not getattr(self, "_seed_retry_wave", False):
             self._seed_retry_wave = True
             from meridian.host_deps import host_ffmpeg_available
 
-            if host_ffmpeg_available():
+            if host_ffmpeg_available() and self.settings.value(
+                "analyze/retry_seed_after_ffmpeg", False, type=bool
+            ):
                 self.library.requeue_seed_only_without_pcm()
+                self.settings.setValue("analyze/retry_seed_after_ffmpeg", False)
         pending_ids = self.library.unanalyzed_ids()
         if not pending_ids:
             self._clear_job_status()
@@ -912,6 +980,7 @@ class MainWindow(QMainWindow):
         self._pending_analyze_after_linger = False
         self._analyze_map_tick = 0
         self._last_analyze_map_refresh = 0.0
+        self._analyze_progress_shown = 0
         self._analyze_gen += 1
         gen = self._analyze_gen
         from meridian.features import clear_decode_abort
@@ -953,6 +1022,11 @@ class MainWindow(QMainWindow):
 
     @Slot(str, int, int)
     def _on_analyze_progress(self, name: str, i: int, n: int) -> None:
+        # Dual workers can deliver Queued progress out of order — ignore backward jumps.
+        shown = int(getattr(self, "_analyze_progress_shown", 0) or 0)
+        if i < shown:
+            return
+        self._analyze_progress_shown = i
         self._set_job_status(f"Listening to waveform {i}/{n}: {name}")
         # Throttle map refresh so the sky opens during long analyzes without
         # rebaking on every track (and without waiting for the full tidy pass).
@@ -1001,13 +1075,52 @@ class MainWindow(QMainWindow):
             return
         if getattr(self, "_analyze_run_tidy", False):
             self._analyze_run_tidy = False
-            try:
-                self.library.smooth_album_moods()
-                self.library.smooth_artist_moods()
-                self.library.spread_album_acoustics()
-                self.library.rescale_moods_by_percentile()
-            except Exception:
-                pass
+            self._start_analyze_tidy(gen)
+            return
+        self._finish_analyze_session(gen)
+
+    def _start_analyze_tidy(self, gen: int) -> None:
+        """Run album tidy on a background thread so the GUI stays responsive."""
+        if self._closing or gen != self._analyze_gen:
+            return
+        self._set_job_status("Tidying mood map…")
+        worker = TidyWorker(self.library)
+        thread = start_worker(worker)
+        self._tidy_worker = worker
+        self._tidy_thread = thread
+        queued = Qt.ConnectionType.QueuedConnection
+        bridge = _TidyFinishBridge(self, gen, thread, worker, parent=self)
+        self._tidy_finish_bridge = bridge
+        worker.finished.connect(bridge.on_finished, queued)
+
+    def _analyze_tidy_done(
+        self,
+        gen: int,
+        error: str,
+        thread=None,
+        worker=None,
+    ) -> None:
+        if thread is None:
+            thread = self._tidy_thread
+        if worker is None:
+            worker = self._tidy_worker
+        if self._tidy_thread is thread:
+            self._tidy_thread = None
+        if self._tidy_worker is worker:
+            self._tidy_worker = None
+        self._tidy_finish_bridge = None
+        self._reap_worker_thread(thread, worker, wait_ms=3000)
+        if gen != self._analyze_gen:
+            return
+        if self._closing:
+            return
+        if error:
+            self._set_status(f"Mood map tidy failed: {error}")
+        self._finish_analyze_session(gen)
+
+    def _finish_analyze_session(self, gen: int) -> None:
+        if gen != self._analyze_gen or self._closing:
+            return
         # If scan added more tracks while we were analyzing, finish them.
         if self.library.unanalyzed_ids():
             self._set_job_status("More tracks to map…")

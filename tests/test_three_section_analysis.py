@@ -176,7 +176,7 @@ def test_enough_section_evidence_partial_rules() -> None:
 
 
 def test_decode_partial_intro_only_salvages_on_long_plan() -> None:
-    """Long-plan intro-only tries ~28s salvage (same as dual); stub if that fails."""
+    """Long-plan intro-only tries ~28s salvage but stays intro-only low-trust."""
     from meridian import features
 
     features.clear_decode_abort()
@@ -205,6 +205,7 @@ def test_decode_partial_intro_only_salvages_on_long_plan() -> None:
     assert pcm is not None
     assert merged is None
     assert fallback is True
+    assert edge_salvage == "intro"
     # Same ~28s salvage path as dual-plan intro-only.
     assert any(
         abs(dur - features.LONG_SINGLE_WINDOW_S) < 1e-6 and abs(ss) < 0.01
@@ -212,6 +213,9 @@ def test_decode_partial_intro_only_salvages_on_long_plan() -> None:
     )
     assert len(calls) >= 3  # attempted intro/mid/late (+ salvage)
     assert result.pcm_ok is True
+    assert result.low_trust is True
+    assert result.confidence <= features.CONFIDENCE_LOW - 0.08
+    assert "intro only" in (result.confidence_note or "")
     assert "PCM fallback" in (result.confidence_note or "")
 
 
@@ -460,6 +464,7 @@ def test_dual_plan_intro_only_salvages_long_single() -> None:
     assert pcm is not None
     assert merged is None  # salvage is single-window, not multi-window merge
     assert fallback is True
+    assert edge_salvage == "intro"  # keep low-trust even after ~28s salvage
     # Section attempts (12s) then a real longer salvage (~28s) from primary/0.
     assert any(abs(dur - features.LONG_SINGLE_WINDOW_S) < 1e-6 and abs(ss) < 0.01 for ss, dur in calls)
     assert any(abs(dur - features.SECTION_WINDOW_S) < 1e-6 for _ss, dur in calls)
@@ -764,6 +769,7 @@ def test_dual_plan_short_intro_only_salvages() -> None:
     assert pcm is not None
     assert merged is None
     assert fallback is True
+    assert edge_salvage == "intro"
     assert any(abs(dur - features.LONG_SINGLE_WINDOW_S) < 1e-6 and abs(ss) < 0.01 for ss, dur in calls)
 
 

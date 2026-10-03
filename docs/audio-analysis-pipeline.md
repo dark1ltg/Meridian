@@ -48,9 +48,11 @@ It asks your computer’s `ffmpeg` for those section windows. Meridian does **no
 
 - Seeks stay inside the known duration (unknown length → about **28 seconds** from the start, not a tiny stub).  
 - On long tracks, intro / mid / late are compared. A silent or cold-open intro does **not** veto a clear mid+late body. When sections disagree, Meridian keeps the **steadier** song-like taste and may inject contrast from a more active window — not a fake middle.  
-- If only the intro decoded and mid+late failed on a **long** plan, analyze **defers** instead of parking a lying intro-only mood. On **short/medium** dual plans, a failed second window with a usable first listen falls back to one longer (~28s) listen instead of giving up.  
+- If only the intro decoded and mid+late failed, analyze still **places** the track as weak/low-trust (`intro only`) so the map shows the full collection — after trying the same longer (~28s) salvage listen used on short/medium dual plans. Late-only / ends-only are also weak-placed (`end only` / `ends only`).  
+- If there is no usable audio **and** no genre/path/keyword evidence, analyze **defers** (`pcm pending`) for a later retry. Tags alone conclude as `seed only` (low-trust).  
 - If `ffmpeg` is missing, Meridian still plays music, but analyze leaves stars on genre/folder seeds instead of inventing a waveform placement. Startup shows a warning dialog and a sticky status tip (same idea as the missing-libx264 tip).  
-- Stopping analyze kills the active `ffmpeg` process so sequential seeks do not leave a stuck decoder.
+- Stopping analyze kills every in-flight `ffmpeg` process (one or two analyze workers on SSD/NVMe).  
+- Large libraries on flash storage may run **two** analyze workers silently (HDD stays at one).
 
 If **aubio** is installed, it also hears tempo / beat-ish clues. Without aubio, Meridian still works; it just has less rhythm info.
 
