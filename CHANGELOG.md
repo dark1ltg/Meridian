@@ -70,6 +70,7 @@ Version stays **1.3.6**. This refresh is about making first-run analyze actually
 - AppImage baseline remains Ubuntu 24.04 / glibc 2.38+.
 - Host **ffmpeg** required for mood analysis; system **libx264** for H.264 playback through Qt’s FFmpeg plugin (not bundled).
 - Release AppImage refreshed **2026-10-03** with the analyze / dual-worker / map-completeness work above.
+- **Bug fix:** AppImage AppStream stamp now updates only the newest release row (older history like 1.3.5 stays intact).
 
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-09)
