@@ -369,6 +369,7 @@ class Library:
         onset_consistency: float | None = None,
         acoustic_flux: float | None = None,
         brightness: float | None = None,
+        from_pcm: bool = True,
     ) -> None:
         with self.lock:
             self.conn.execute(
@@ -400,7 +401,8 @@ class Library:
                 ),
             )
             self.conn.commit()
-        self._analyze_pcm_ok_count += 1
+        if from_pcm:
+            self._analyze_pcm_ok_count += 1
 
     def mark_analyze_failed(self, track_id: int) -> None:
         """Mark a track analyzed so a poison file cannot loop the analyze worker forever.

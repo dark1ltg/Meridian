@@ -874,7 +874,7 @@ class MainWindow(QMainWindow):
             pcm_ok, deferred = self.library.analyze_session_stats()
             if deferred > 0 and pcm_ok == 0:
                 self._set_status(
-                    "Waveform decode deferred — mood map kept seed placement."
+                    "Some tracks need another listen — mood map kept what it could."
                 )
             else:
                 self._set_status("Nothing left to analyze this session.")
@@ -947,11 +947,14 @@ class MainWindow(QMainWindow):
         pcm_ok, deferred = self.library.analyze_session_stats()
         if pcm_ok == 0 and deferred > 0:
             self._set_status(
-                "Waveform decode deferred — mood map kept seed placement."
+                "Some tracks need another listen — mood map kept what it could."
             )
+        elif pcm_ok == 0:
+            # Tag/path concluded with no waveform this pass.
+            self._set_status("Mood map updated.")
         elif deferred > 0:
             self._set_status(
-                f"Mood map updated from local audio ({deferred} deferred)."
+                f"Mood map updated from local audio ({deferred} still pending)."
             )
         else:
             self._set_status("Mood map updated from local audio.")

@@ -316,6 +316,8 @@ class MoodResult:
     acoustic_flux: float | None = None
     brightness: float | None = None
     pcm_ok: bool = False
+    # Genre/path/keyword evidence usable when waveform decode finds nothing.
+    seed_evidence: bool = False
 
 def _text(tag) -> str:
     if tag is None:
@@ -1767,6 +1769,12 @@ def analyze_audio(
         }.get(edge_salvage, "partial listen")
         if edge_note not in note:
             note = f"{note} · {edge_note}" if note else edge_note
+    # Tag/path/keyword evidence — enough to conclude without waveform.
+    seed_evidence = bool(seed.clamp_match or seed.keyword_hit)
+    if not pcm_ok and seed_evidence:
+        confidence = min(float(confidence), CONFIDENCE_LOW - 0.01)
+        if "seed only" not in note:
+            note = f"{note} · seed only" if note else "seed only"
     return MoodResult(
         valence=float(valence),
         energy=float(energy),
@@ -1780,4 +1788,5 @@ def analyze_audio(
         acoustic_flux=float(getattr(profile, "flux", 0.0)) if profile else None,
         brightness=float(getattr(profile, "brightness", 0.5)) if profile else None,
         pcm_ok=bool(pcm_ok),
+        seed_evidence=seed_evidence,
     )

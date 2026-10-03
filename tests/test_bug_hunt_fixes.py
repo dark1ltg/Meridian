@@ -383,7 +383,7 @@ def test_analyze_done_reports_deferred_not_success(qapp) -> None:
     w._analyze_worker = worker
     MainWindow._analyze_done(w, 1, thread, worker)
     assert statuses
-    assert "deferred" in statuses[-1].lower()
+    assert "another listen" in statuses[-1].lower() or "pending" in statuses[-1].lower()
     assert "updated from local audio" not in statuses[-1].lower()
 
 

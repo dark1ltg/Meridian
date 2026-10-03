@@ -291,8 +291,24 @@ class AnalyzeWorker(QObject):
                     if self._abort:
                         break
                     if not result.pcm_ok:
-                        # Keep seed/prior coords; retry next session (session denylist).
-                        self.library.defer_analyze(track.id)
+                        # No waveform — conclude on tags/path if we have them; defer
+                        # only when there is no audio and no usable tagging evidence.
+                        if result.seed_evidence:
+                            self.library.set_analyzed_mood(
+                                track.id,
+                                result.valence,
+                                result.energy,
+                                result.bpm,
+                                confidence=result.confidence,
+                                low_trust=result.low_trust,
+                                confidence_note=result.confidence_note,
+                                onset_consistency=result.onset_consistency,
+                                acoustic_flux=result.acoustic_flux,
+                                brightness=result.brightness,
+                                from_pcm=False,
+                            )
+                        else:
+                            self.library.defer_analyze(track.id)
                         continue
                     self.library.set_analyzed_mood(
                         track.id,
