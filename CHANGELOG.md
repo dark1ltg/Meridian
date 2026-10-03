@@ -10,10 +10,19 @@ Renew Queue: an explicit new recommendation pass from the current listen matrix,
 - Tidy still pulls low-trust tracks toward album/artist mates (tags + whatever listen landed)
 - Confidence may bump a little inside the unsure band, but **stays under 0.45** — no mid-trust wash for seed-only / edge-salvage pins
 
+### Local: seed/edge honesty (bug-hunt 1–4, 6–8)
+- Seed-conclude never wipes prior PCM coords/acoustics; prior waveform → defer retry (`kept prior`)
+- One session wave re-queues `seed only` rows with no acoustics when ffmpeg is available
+- Edge salvage (intro/end/ends) places but caps confidence lower (~0.37) so they stay obviously dim
+- Mid-only body: full PCM credit, not `PCM fallback · multi-window`
+- Long-plan intro-only tries the same ~28s salvage as dual-plan before parking a 12s stub
+- Status: all-seed pass says tags / no waveform listen (not bare “Mood map updated”)
+
 ### Local: defer only with no audio and no tags
 - If any section has real audio → place (weak/low-trust when partial)
 - If no waveform but genre/path/keyword tags exist → **conclude** on that seed (`seed only`, low-trust), not defer
 - **Defer only** when every listen fails and there is no usable tagging evidence at all
+- (Supersedes older changelog lines that said intro/late/ends **defer** — those now weak-place)
 
 ### Local: scan→analyze handoff (QueuedConnection lambda drop)
 - PySide 6.11 drops `QueuedConnection` to lambdas/partials — first-run scan never called `start_analyze`, leaving seed-only moods
@@ -30,25 +39,23 @@ Renew Queue: an explicit new recommendation pass from the current listen matrix,
 ### Local: three-section audio analysis (intro / mid / late)
 - Long tracks: three **12s** windows (intro / mid / late, ~36s budget) with mid-heavy blend (~20/50/30)
 - Short tracks: **1–2** windows only (no triple-sampling the same audio)
-- Partial decode: intro-only when mid+late failed **defers** instead of parking a lying mood
+- Partial decode: intro/late/ends with no mid → **weak low-trust place** (policy: full collection over defer)
 - Cold-open intro cannot veto a clear mid+late body; dual/triple disagreement keeps stabler + inject
 - Safe seeks (unknown/short duration never past EOF); abort clears/kills active ffmpeg across sequential seeks
 - Confidence note can mention multi-window; merge weights stay deterministic (Rescan jump dampening; pins unchanged)
 
 ### Local: three-section bug-hunt fixes (scores 2–7)
 - Cold-open zero-weight intro no longer poisons merge `unstable` / `variation` (body keeps real confidence)
-- Dual-plan (short/medium): intro-only when a later window was planned **defers** (no lying pad success)
+- Dual-plan (short/medium): intro-only salvages ~28s from 0 / primary (then weak place if needed)
 - Silent intro + solid mid/late is full PCM credit (not weak-fallback taxed)
-- Long-plan late-only (fade/applause) **defers** — require mid/body evidence
+- Long-plan late-only / ends-only → weak low-trust place (not genre defer)
 - ~36s three-window budget: **accepted cost**; skip re-ffmpeg of seeks that already returned no-signal audio
-- Tests cover cold-open health, dual intro-only defer, silent-intro full credit, late-only defer
 
 ### Local: three-section re-hunt fixes (scores 2–5)
 - Shrunk outlier/flashy intro keeps a tiny coord nudge but is excluded from merge `unstable` / `variation` (body confidence)
-- Long-plan ends-only (`intro`+`late`, no mid) **defers** — no pad+fade park when mid was planned
-- Short dual-plan late-only **defers** (outro park; consistent with long-plan late-only)
-- Hard decode misses skip same-seek re-ffmpeg; mid-only (single survivor) keeps the built section profile / multi-window credit path
-- Tests cover outlier health, ends-only defer, dual late-only defer, hard-miss reseek skip, mid-only profile handle
+- Long-plan ends-only (`intro`+`late`, no mid) → weak `ends only` place
+- Short dual-plan late-only → weak `end only` place
+- Hard decode misses skip same-seek re-ffmpeg; mid-only body gets full PCM credit (not multi-window claim)
 
 ### 2026-10-02 refresh (bug-hunt: queue advance / analyze honesty)
 - Dead next (missing/denied): keep the still-playing track instead of `stop`+`play_track` hard-restart from 0

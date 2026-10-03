@@ -291,9 +291,16 @@ class AnalyzeWorker(QObject):
                     if self._abort:
                         break
                     if not result.pcm_ok:
-                        # No waveform — conclude on tags/path if we have them; defer
-                        # only when there is no audio and no usable tagging evidence.
-                        if result.seed_evidence:
+                        # No waveform this pass.
+                        # Prior PCM acoustics → keep that placement and defer retry
+                        # (do not downgrade a good listen to a tag sticky-note).
+                        if self.library.had_pcm_acoustics(track.id):
+                            self.library.defer_analyze(
+                                track.id, note="pcm pending · kept prior"
+                            )
+                        elif result.seed_evidence:
+                            # First-time / never-heard: conclude on tags so the map
+                            # still shows the full collection.
                             self.library.set_analyzed_mood(
                                 track.id,
                                 result.valence,

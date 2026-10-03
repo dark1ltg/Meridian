@@ -387,6 +387,40 @@ def test_analyze_done_reports_deferred_not_success(qapp) -> None:
     assert "updated from local audio" not in statuses[-1].lower()
 
 
+def test_analyze_done_reports_all_seed_not_listen(qapp) -> None:
+    """Sev 3: pcm_ok==0 and deferred==0 must not imply a waveform listen."""
+    w = MainWindow.__new__(MainWindow)
+    w._closing = False
+    w._analyze_gen = 1
+    w._analyze_thread = object()
+    w._analyze_worker = object()
+    w._lingering_workers = []
+    statuses: list[str] = []
+    w._clear_job_status = lambda: None  # type: ignore[method-assign]
+    w._set_status = lambda m: statuses.append(m)  # type: ignore[method-assign]
+    w._set_job_status = lambda m: None  # type: ignore[method-assign]
+    w.refresh_plan = lambda **_k: None  # type: ignore[method-assign]
+    w.start_analyze = lambda: None  # type: ignore[method-assign]
+    w._reap_worker_thread = lambda *_a, **_k: True  # type: ignore[method-assign]
+
+    class FakeLib:
+        def unanalyzed_ids(self):
+            return []
+
+        def analyze_session_stats(self):
+            return 0, 0
+
+    w.library = FakeLib()  # type: ignore[assignment]
+    thread, worker = object(), object()
+    w._analyze_thread = thread
+    w._analyze_worker = worker
+    MainWindow._analyze_done(w, 1, thread, worker)
+    assert statuses
+    assert "tags" in statuses[-1].lower()
+    assert "waveform" in statuses[-1].lower() or "no waveform" in statuses[-1].lower()
+    assert "updated from local audio" not in statuses[-1].lower()
+
+
 def test_defer_analyze_updates_session_stats(tmp_path: Path) -> None:
     lib = Library(tmp_path / "defer-stats.sqlite")
     try:

@@ -111,6 +111,163 @@ def test_analyze_worker_concludes_seed_does_not_defer(tmp_path: Path, qapp) -> N
         lib.close()
 
 
+def test_analyze_worker_keeps_prior_pcm_when_decode_misses(tmp_path: Path, qapp) -> None:
+    """Sev 8/7: prior waveform placement must not be wiped by seed-conclude."""
+    from meridian.library import Library
+    from meridian.scanner import AnalyzeWorker
+    from meridian.features import MoodResult
+
+    lib = Library(tmp_path / "keep-prior.sqlite")
+    try:
+        lib.add_folder(str(tmp_path))
+        tid = lib.upsert_track(
+            {
+                "path": str(tmp_path / "a.mp3"),
+                "title": "A",
+                "artist": "Art",
+                "album": "Al",
+                "genre": "Rock",
+                "duration_ms": 180_000,
+                "year": None,
+                "bpm": 120.0,
+                "valence": 0.4,
+                "energy": 0.4,
+                "mood_confidence": 0.3,
+                "confidence_note": "tag:rock",
+                "low_trust": 1,
+                "added_at": 0,
+                "mtime": 1,
+                "analyzed": 0,
+            }
+        )
+        lib.set_analyzed_mood(
+            tid,
+            0.62,
+            0.71,
+            120.0,
+            confidence=0.82,
+            low_trust=False,
+            confidence_note="pcm multi-window",
+            onset_consistency=0.85,
+            acoustic_flux=0.42,
+            brightness=0.61,
+            from_pcm=True,
+        )
+        lib.conn.execute("UPDATE tracks SET analyzed = 0 WHERE id = ?", (tid,))
+        lib.conn.commit()
+        lib._analyze_denylist.discard(tid)
+
+        seed = MoodResult(
+            valence=0.55,
+            energy=0.55,
+            bpm=None,
+            confidence=0.44,
+            low_trust=True,
+            confidence_note="tag:rock · seed only",
+            pcm_ok=False,
+            seed_evidence=True,
+        )
+        with patch(
+            "meridian.scanner.read_tags",
+            return_value={
+                "genre": "Rock",
+                "title": "A",
+                "artist": "Art",
+                "album": "Al",
+                "albumartist": "",
+                "composer": "",
+                "year": None,
+                "bpm": None,
+                "duration_ms": 180_000,
+                "extra_text": "",
+                "replaygain_db": None,
+            },
+        ):
+            with patch("meridian.scanner.analyze_audio", return_value=seed):
+                AnalyzeWorker(lib).run()
+        t = lib.get(tid)
+        assert t is not None
+        assert t.analyzed is False  # deferred for retry
+        assert abs(t.valence - 0.62) < 1e-9
+        assert abs(t.energy - 0.71) < 1e-9
+        assert t.brightness == 0.61
+        assert t.acoustic_flux == 0.42
+        assert "kept prior" in (t.confidence_note or "")
+        # Belt-and-suspenders: seed write must not NULL acoustics either.
+        lib.set_analyzed_mood(
+            tid,
+            0.1,
+            0.1,
+            None,
+            confidence=0.2,
+            low_trust=True,
+            confidence_note="seed only",
+            from_pcm=False,
+        )
+        t2 = lib.get(tid)
+        assert t2 is not None
+        assert abs(t2.valence - 0.62) < 1e-9
+        assert t2.brightness == 0.61
+    finally:
+        lib.close()
+
+
+def test_requeue_seed_only_without_pcm(tmp_path: Path) -> None:
+    from meridian.library import Library
+
+    lib = Library(tmp_path / "requeue-seed.sqlite")
+    try:
+        lib.add_folder(str(tmp_path))
+        seed_id = lib.upsert_track(
+            {
+                "path": str(tmp_path / "seed.mp3"),
+                "title": "S",
+                "artist": "A",
+                "album": "L",
+                "genre": "Rock",
+                "duration_ms": 1000,
+                "year": None,
+                "bpm": None,
+                "valence": 0.5,
+                "energy": 0.5,
+                "mood_confidence": 0.44,
+                "confidence_note": "tag:rock · seed only",
+                "low_trust": 1,
+                "added_at": 0,
+                "mtime": 1,
+                "analyzed": 1,
+            }
+        )
+        pcm_id = lib.upsert_track(
+            {
+                "path": str(tmp_path / "pcm.mp3"),
+                "title": "P",
+                "artist": "A",
+                "album": "L",
+                "genre": "Rock",
+                "duration_ms": 1000,
+                "year": None,
+                "bpm": None,
+                "valence": 0.6,
+                "energy": 0.6,
+                "mood_confidence": 0.8,
+                "confidence_note": "pcm · seed only",  # note alone must not requeue if acoustics exist
+                "low_trust": 0,
+                "added_at": 0,
+                "mtime": 1,
+                "analyzed": 1,
+                "brightness": 0.5,
+                "acoustic_flux": 0.3,
+            }
+        )
+        n = lib.requeue_seed_only_without_pcm()
+        assert n == 1
+        assert lib.get(seed_id).analyzed is False
+        assert lib.get(pcm_id).analyzed is True
+    finally:
+        lib.close()
+
+
 def test_analyze_worker_defers_without_audio_or_tags(tmp_path: Path, qapp) -> None:
     from meridian.library import Library
     from meridian.scanner import AnalyzeWorker

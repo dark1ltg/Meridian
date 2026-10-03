@@ -372,37 +372,118 @@ class Library:
         from_pcm: bool = True,
     ) -> None:
         with self.lock:
-            self.conn.execute(
-                """
-                UPDATE tracks
-                SET valence = CASE WHEN pinned = 1 THEN valence ELSE ? END,
-                    energy = CASE WHEN pinned = 1 THEN energy ELSE ? END,
-                    bpm = CASE WHEN pinned = 1 THEN bpm ELSE ? END,
-                    mood_confidence = CASE WHEN pinned = 1 THEN mood_confidence ELSE ? END,
-                    low_trust = CASE WHEN pinned = 1 THEN low_trust ELSE ? END,
-                    confidence_note = CASE WHEN pinned = 1 THEN confidence_note ELSE ? END,
-                    onset_consistency = ?,
-                    acoustic_flux = ?,
-                    brightness = ?,
-                    analyzed = 1
-                WHERE id = ?
-                """,
-                (
-                    valence,
-                    energy,
-                    bpm,
-                    float(confidence),
-                    int(low_trust),
-                    confidence_note or "",
-                    onset_consistency,
-                    acoustic_flux,
-                    brightness,
-                    track_id,
-                ),
-            )
+            if from_pcm:
+                self.conn.execute(
+                    """
+                    UPDATE tracks
+                    SET valence = CASE WHEN pinned = 1 THEN valence ELSE ? END,
+                        energy = CASE WHEN pinned = 1 THEN energy ELSE ? END,
+                        bpm = CASE WHEN pinned = 1 THEN bpm ELSE ? END,
+                        mood_confidence = CASE WHEN pinned = 1 THEN mood_confidence ELSE ? END,
+                        low_trust = CASE WHEN pinned = 1 THEN low_trust ELSE ? END,
+                        confidence_note = CASE WHEN pinned = 1 THEN confidence_note ELSE ? END,
+                        onset_consistency = ?,
+                        acoustic_flux = ?,
+                        brightness = ?,
+                        analyzed = 1
+                    WHERE id = ?
+                    """,
+                    (
+                        valence,
+                        energy,
+                        bpm,
+                        float(confidence),
+                        int(low_trust),
+                        confidence_note or "",
+                        onset_consistency,
+                        acoustic_flux,
+                        brightness,
+                        track_id,
+                    ),
+                )
+            else:
+                # Seed-only conclude: never NULL out prior waveform acoustics, and do
+                # not overwrite a prior PCM placement with a weaker tag/path guess.
+                self.conn.execute(
+                    """
+                    UPDATE tracks
+                    SET valence = CASE
+                            WHEN pinned = 1 THEN valence
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN valence
+                            ELSE ? END,
+                        energy = CASE
+                            WHEN pinned = 1 THEN energy
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN energy
+                            ELSE ? END,
+                        bpm = CASE
+                            WHEN pinned = 1 THEN bpm
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN bpm
+                            ELSE ? END,
+                        mood_confidence = CASE
+                            WHEN pinned = 1 THEN mood_confidence
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN mood_confidence
+                            ELSE ? END,
+                        low_trust = CASE
+                            WHEN pinned = 1 THEN low_trust
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN low_trust
+                            ELSE ? END,
+                        confidence_note = CASE WHEN pinned = 1 THEN confidence_note ELSE ? END,
+                        onset_consistency = COALESCE(?, onset_consistency),
+                        acoustic_flux = COALESCE(?, acoustic_flux),
+                        brightness = COALESCE(?, brightness),
+                        analyzed = 1
+                    WHERE id = ?
+                    """,
+                    (
+                        valence,
+                        energy,
+                        bpm,
+                        float(confidence),
+                        int(low_trust),
+                        confidence_note or "",
+                        onset_consistency,
+                        acoustic_flux,
+                        brightness,
+                        track_id,
+                    ),
+                )
             self.conn.commit()
         if from_pcm:
             self._analyze_pcm_ok_count += 1
+
+    def had_pcm_acoustics(self, track_id: int) -> bool:
+        """True when a prior waveform pass left brightness/flux (keep over seed wipe)."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT brightness, acoustic_flux FROM tracks WHERE id = ?",
+                (int(track_id),),
+            ).fetchone()
+        if not row:
+            return False
+        return row["brightness"] is not None or row["acoustic_flux"] is not None
+
+    def requeue_seed_only_without_pcm(self) -> int:
+        """One-shot: re-queue seed-only rows that never got waveform (ffmpeg may be back)."""
+        with self.lock:
+            rows = self.conn.execute(
+                """
+                SELECT id FROM tracks
+                WHERE analyzed = 1 AND pinned = 0
+                  AND brightness IS NULL AND acoustic_flux IS NULL
+                  AND instr(lower(COALESCE(confidence_note, '')), 'seed only') > 0
+                """
+            ).fetchall()
+            ids = [int(r["id"]) for r in rows]
+            if not ids:
+                return 0
+            self.conn.executemany(
+                "UPDATE tracks SET analyzed = 0 WHERE id = ? AND pinned = 0",
+                [(i,) for i in ids],
+            )
+            self.conn.commit()
+        for tid in ids:
+            self._analyze_denylist.discard(tid)
+        return len(ids)
 
     def mark_analyze_failed(self, track_id: int) -> None:
         """Mark a track analyzed so a poison file cannot loop the analyze worker forever.

@@ -1267,8 +1267,10 @@ def _decode_pcm_with_fallback(
     # Seeks already tried: no-signal (energy gate) or hard decode miss — do not
     # blindly re-ffmpeg the same offsets in the silence-fallback pass (rehunt score 2).
     skip_reseek_starts: set[float] = set()
-    # Dual-plan salvage: first window ok but dual evidence failed → long single listen.
+    # Dual/long-plan salvage: section evidence failed → ~28s single listen.
     dual_salvage = False
+    # If longer salvage fails, weak-place this stashed intro stub.
+    edge_fallback: tuple[np.ndarray, str] | None = None
 
     # Multi-section path (2 or 3 planned windows).
     if len(plan) >= 2:
@@ -1302,8 +1304,11 @@ def _decode_pcm_with_fallback(
             # not a weak-fallback tax (score-5 asymmetry vs cold-open pad that passes signal).
             if "mid" in ok_roles and "late" in ok_roles:
                 partial = False
-            # Single survivor that passed honesty: keep the built section profile so
-            # analyze retains the merge-handle / multi-window credit path (rehunt score 2).
+            # Mid-only body is honest placement: full PCM credit, but not multi-window
+            # (single section — rebuild cues from PCM so we do not claim a merge).
+            if len(role_profiles) == 1 and "mid" in ok_roles:
+                return role_pcm[rep_role], False, None, None
+            # Other single survivors keep the built profile with a weak-fallback tax.
             if len(role_profiles) == 1:
                 sole = next(iter(role_profiles.values()))
                 return role_pcm[rep_role], True, sole, None
@@ -1320,8 +1325,13 @@ def _decode_pcm_with_fallback(
                 # Allow a longer re-listen at the primary start (prior 12s stub is spent
                 # as a section window, not as the salvage length).
                 skip_reseek_starts.discard(round(float(plan[0][1]), 2))
+                if first_role == "intro" and "intro" in role_pcm:
+                    edge_fallback = (role_pcm["intro"], "intro")
             elif ok_roles == {"intro"} and "intro" in role_pcm:
-                return role_pcm["intro"], True, None, "intro"
+                # Long-plan intro-only: same ~28s salvage as dual, then weak intro stub.
+                dual_salvage = True
+                skip_reseek_starts.discard(round(float(plan[0][1]), 2))
+                edge_fallback = (role_pcm["intro"], "intro")
             elif ok_roles == {"late"} and "late" in role_pcm:
                 return role_pcm["late"], True, None, "late"
             elif ok_roles == {"intro", "late"} and "intro" in role_pcm and "late" in role_pcm:
@@ -1348,7 +1358,7 @@ def _decode_pcm_with_fallback(
     # Single-window / silence-fallback / dual-salvage path.
     dur_s = _duration_s(duration_ms)
     if dur_s <= 0.0 or dual_salvage:
-        # Unknown duration or dual intro-only salvage: prior ~28s single listen from 0.
+        # Unknown duration or intro-only salvage: prior ~28s single listen from 0.
         win_s = LONG_SINGLE_WINDOW_S
     elif dur_s < 40.0:
         win_s = min(LONG_SINGLE_WINDOW_S, max(SECTION_WINDOW_S, dur_s))
@@ -1376,9 +1386,13 @@ def _decode_pcm_with_fallback(
         seen.add(key)
         pcm = _decode_pcm(path, start_s=float(ss), duration_s=win_s)
         if pcm is not None and _pcm_signal_ok(pcm):
-            # Dual salvage is a real longer listen after multi-window honesty failed;
+            # Dual/long salvage is a real longer listen after multi-window honesty failed;
             # mark fallback so we do not claim multi-window credit for the stub path.
             return pcm, bool(index > 0 or dual_salvage), None, None
+    # Longer salvage found nothing — weak-place the stashed intro stub if we have it.
+    if edge_fallback is not None:
+        pcm_fb, tag_fb = edge_fallback
+        return pcm_fb, True, None, tag_fb
     return None, False, None, None
 
 
@@ -1758,9 +1772,9 @@ def analyze_audio(
         multi_window=multi_window,
     )
     if edge_salvage:
-        # Keep weak salvage in the low-trust band (genre seed alone is worse, but a
-        # partial listen must not look like a full honest multi-window PCM place).
-        confidence = min(float(confidence), CONFIDENCE_LOW - 0.01)
+        # Keep edge salvage clearly weaker than seed-only / mid-body (dimmer on map).
+        # Still places so the collection is complete — just obviously unsure.
+        confidence = min(float(confidence), CONFIDENCE_LOW - 0.08)
         edge_note = {
             "intro": "intro only",
             "late": "end only",

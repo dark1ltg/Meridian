@@ -176,7 +176,7 @@ def test_enough_section_evidence_partial_rules() -> None:
 
 
 def test_decode_partial_intro_only_salvages_on_long_plan() -> None:
-    """Long-plan intro-only (mid/late dead) salvages head PCM as weak placement."""
+    """Long-plan intro-only tries ~28s salvage (same as dual); stub if that fails."""
     from meridian import features
 
     features.clear_decode_abort()
@@ -184,9 +184,9 @@ def test_decode_partial_intro_only_salvages_on_long_plan() -> None:
 
     def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
         calls.append((float(start_s), float(duration_s)))
-        # Only the first (intro @ 0) returns usable audio.
+        # Section intro @ 0 works; longer salvage at 0 also works (dual-style).
         if abs(start_s) < 0.01:
-            return np.ones(11025 * 4, dtype=np.float32) * 0.05
+            return np.ones(11025 * int(max(4.0, duration_s)), dtype=np.float32) * 0.05
         return None
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
@@ -205,13 +205,47 @@ def test_decode_partial_intro_only_salvages_on_long_plan() -> None:
     assert pcm is not None
     assert merged is None
     assert fallback is True
-    assert edge_salvage == "intro"
-    assert len(calls) >= 3  # attempted intro/mid/late
+    # Same ~28s salvage path as dual-plan intro-only.
+    assert any(
+        abs(dur - features.LONG_SINGLE_WINDOW_S) < 1e-6 and abs(ss) < 0.01
+        for ss, dur in calls
+    )
+    assert len(calls) >= 3  # attempted intro/mid/late (+ salvage)
     assert result.pcm_ok is True
-    assert result.low_trust is True
-    assert result.confidence < features.CONFIDENCE_LOW
-    assert "intro only" in (result.confidence_note or "")
     assert "PCM fallback" in (result.confidence_note or "")
+
+
+def test_decode_long_intro_only_falls_back_to_stub_when_salvage_fails() -> None:
+    """If ~28s salvage finds nothing, keep the 12s intro stub as weak place."""
+    from meridian import features
+
+    features.clear_decode_abort()
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        # Only the short section intro works; longer salvage at 0 fails.
+        if abs(start_s) < 0.01 and abs(duration_s - features.SECTION_WINDOW_S) < 0.5:
+            return np.ones(11025 * 4, dtype=np.float32) * 0.05
+        return None
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
+            pcm, fallback, merged, edge_salvage = features._decode_pcm_with_fallback(
+                "/long.wav", duration_ms=210_000
+            )
+            result = features.analyze_audio(
+                "/long.wav",
+                "game",
+                "pad track",
+                "",
+                None,
+                duration_ms=210_000,
+            )
+    assert pcm is not None
+    assert fallback is True
+    assert edge_salvage == "intro"
+    assert result.low_trust is True
+    assert result.confidence <= features.CONFIDENCE_LOW - 0.08
+    assert "intro only" in (result.confidence_note or "")
 
 
 def test_decode_short_track_does_not_triple_sample() -> None:
@@ -652,6 +686,7 @@ def test_dual_plan_late_only_salvages() -> None:
     assert edge_salvage == "late"
     assert result.pcm_ok is True
     assert result.low_trust is True
+    assert result.confidence <= features.CONFIDENCE_LOW - 0.08
     assert "end only" in (result.confidence_note or "")
 
 
@@ -731,20 +766,13 @@ def test_dual_plan_short_intro_only_salvages() -> None:
     assert any(abs(dur - features.LONG_SINGLE_WINDOW_S) < 1e-6 and abs(ss) < 0.01 for ss, dur in calls)
 
 
-def test_mid_only_keeps_section_profile_handle() -> None:
-    """Rehunt score 2: mid-only survivor keeps built profile (multi-window credit path)."""
+def test_mid_only_full_pcm_not_multi_window() -> None:
+    """Mid-only body: full PCM credit, not fallback+multi-window double signal."""
     from meridian import features
 
     features.clear_decode_abort()
     plan = features._analysis_window_plan(210_000)
     mid_start = plan[1][1]
-    mid_prof = _prof(
-        valence=0.55,
-        energy=0.60,
-        onset_consistency=0.88,
-        variation=0.07,
-        unstable=False,
-    )
 
     def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
         if abs(start_s - mid_start) < 0.05:
@@ -753,23 +781,23 @@ def test_mid_only_keeps_section_profile_handle() -> None:
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
-            with patch("meridian.acoustic.build_profile", return_value=mid_prof):
-                pcm, partial, merged, edge_salvage = features._decode_pcm_with_fallback(
-                    "/long.wav", duration_ms=210_000
-                )
+            pcm, partial, merged, edge_salvage = features._decode_pcm_with_fallback(
+                "/long.wav", duration_ms=210_000
+            )
+            result = features.analyze_audio(
+                "/music/Rock/mid.mp3",
+                "rock",
+                "Mid Only",
+                "Band",
+                120,
+                duration_ms=210_000,
+            )
     assert pcm is not None
-    assert partial is True
-    assert merged is not None
-    assert merged.valence == mid_prof.valence
-    assert merged.energy == mid_prof.energy
-    # analyze_audio sets multi_window from merged_profile is not None
-    conf, note = confidence_from_evidence(
-        tag_key="rock",
-        pcm_ok=True,
-        pcm_fallback=True,
-        multi_window=True,
-        variation=merged.variation,
-        onset_consistency=merged.onset_consistency,
-    )
-    assert "multi-window" in note
-    assert conf > 0.0
+    assert partial is False
+    assert merged is None
+    assert edge_salvage is None
+    assert result.pcm_ok is True
+    assert result.low_trust is False
+    assert "PCM fallback" not in (result.confidence_note or "")
+    assert "multi-window" not in (result.confidence_note or "")
+    assert "PCM" in (result.confidence_note or "")

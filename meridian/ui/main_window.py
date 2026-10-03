@@ -869,6 +869,14 @@ class MainWindow(QMainWindow):
             self._reap_worker_thread(prev_thread, prev_worker, wait_ms=3000)
         if self.library.closed:
             return
+        # One wave per session: retry seed-only rows that never got waveform when
+        # ffmpeg is available again (avoids permanent tag-park after a bad listen day).
+        if not getattr(self, "_seed_retry_wave", False):
+            self._seed_retry_wave = True
+            from meridian.host_deps import host_ffmpeg_available
+
+            if host_ffmpeg_available():
+                self.library.requeue_seed_only_without_pcm()
         if not self.library.unanalyzed_ids():
             self._clear_job_status()
             pcm_ok, deferred = self.library.analyze_session_stats()
@@ -950,8 +958,10 @@ class MainWindow(QMainWindow):
                 "Some tracks need another listen — mood map kept what it could."
             )
         elif pcm_ok == 0:
-            # Tag/path concluded with no waveform this pass.
-            self._set_status("Mood map updated.")
+            # Tag/path concluded with no waveform this pass — do not imply a listen.
+            self._set_status(
+                "Mood map updated from tags — no waveform listen this pass."
+            )
         elif deferred > 0:
             self._set_status(
                 f"Mood map updated from local audio ({deferred} still pending)."
