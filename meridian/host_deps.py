@@ -105,39 +105,9 @@ def ffmpeg_missing_status() -> str:
     return "Mood analysis needs ffmpeg on this system (e.g. pacman -S ffmpeg), then restart."
 
 
-def path_is_rotational(path: str | Path) -> bool | None:
-    """True when *path* lives on a rotational disk (HDD), False on SSD/NVMe.
-
-    Returns ``None`` when the device cannot be classified (non-Linux, missing
-    sysfs, unreachable path). Used only for silent analyze-worker sizing.
-    """
-    try:
-        target = Path(path).expanduser()
-        # Prefer an existing ancestor so library roots still resolve.
-        probe = target
-        for _ in range(8):
-            try:
-                if probe.exists():
-                    st = probe.stat()
-                    break
-            except OSError:
-                return None
-            if probe.parent == probe:
-                return None
-            probe = probe.parent
-        else:
-            return None
-    except OSError:
-        return None
-    try:
-        maj, minor = os.major(st.st_dev), os.minor(st.st_dev)
-    except (AttributeError, OverflowError, ValueError):
-        return None
-    cur = Path(f"/sys/dev/block/{maj}:{minor}")
-    try:
-        cur = cur.resolve()
-    except OSError:
-        return None
+def _rotational_from_sysfs(sys_node: Path) -> bool | None:
+    """Walk *sys_node* (and parents) for ``queue/rotational``."""
+    cur = sys_node
     for _ in range(8):
         rot = cur / "queue" / "rotational"
         if rot.is_file():
@@ -149,6 +119,87 @@ def path_is_rotational(path: str | Path) -> bool | None:
         if parent == cur:
             break
         cur = parent
+    return None
+
+
+def _block_sysfs_from_devnode(dev: str) -> Path | None:
+    """Map ``/dev/nvme0n1p2`` → ``/sys/class/block/nvme0n1p2`` when present."""
+    name = Path(dev).name
+    if not name:
+        return None
+    candidate = Path("/sys/class/block") / name
+    return candidate if candidate.exists() else None
+
+
+def _findmnt_source(path: Path) -> str | None:
+    """Best-effort mount SOURCE for *path* (handles btrfs ``dev[@subvol]``)."""
+    import subprocess
+
+    try:
+        out = subprocess.check_output(
+            ["findmnt", "-n", "-o", "SOURCE", "-T", str(path)],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not out:
+        return None
+    # btrfs: /dev/nvme0n1p2[/@home] → /dev/nvme0n1p2
+    if "[" in out:
+        out = out.split("[", 1)[0]
+    return out or None
+
+
+def path_is_rotational(path: str | Path) -> bool | None:
+    """True when *path* lives on a rotational disk (HDD), False on SSD/NVMe.
+
+    Returns ``None`` when the device cannot be classified (non-Linux, missing
+    sysfs, unreachable path). Used only for silent analyze-worker sizing.
+    """
+    try:
+        target = Path(path).expanduser()
+        # Prefer an existing ancestor so library roots still resolve.
+        probe = target
+        st = None
+        for _ in range(8):
+            try:
+                if probe.exists():
+                    st = probe.stat()
+                    break
+            except OSError:
+                return None
+            if probe.parent == probe:
+                return None
+            probe = probe.parent
+        if st is None:
+            return None
+    except OSError:
+        return None
+
+    # Fast path: maj:min → /sys/dev/block (fails on some btrfs subvol devices).
+    try:
+        maj, minor = os.major(st.st_dev), os.minor(st.st_dev)
+        cur = Path(f"/sys/dev/block/{maj}:{minor}")
+        if cur.exists():
+            try:
+                flag = _rotational_from_sysfs(cur.resolve())
+            except OSError:
+                flag = None
+            if flag is not None:
+                return flag
+    except (AttributeError, OverflowError, ValueError, OSError):
+        pass
+
+    # Fallback: findmnt SOURCE → /sys/class/block/<name>/queue/rotational.
+    source = _findmnt_source(probe)
+    if source:
+        block = _block_sysfs_from_devnode(source)
+        if block is not None:
+            flag = _rotational_from_sysfs(block)
+            if flag is not None:
+                return flag
     return None
 
 
