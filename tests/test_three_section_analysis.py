@@ -175,8 +175,8 @@ def test_enough_section_evidence_partial_rules() -> None:
     assert _enough_section_evidence(plan_short, {"intro", "late"})
 
 
-def test_decode_partial_intro_only_defers_on_long_plan() -> None:
-    """Severity 8: intro-only on a 3-window plan must not succeed as pcm_ok."""
+def test_decode_partial_intro_only_salvages_on_long_plan() -> None:
+    """Long-plan intro-only (mid/late dead) salvages head PCM as weak placement."""
     from meridian import features
 
     features.clear_decode_abort()
@@ -191,12 +191,27 @@ def test_decode_partial_intro_only_defers_on_long_plan() -> None:
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
-            pcm, fallback, merged = features._decode_pcm_with_fallback(
+            pcm, fallback, merged, intro_only = features._decode_pcm_with_fallback(
                 "/long.wav", duration_ms=210_000
             )
-    assert pcm is None
+            result = features.analyze_audio(
+                "/long.wav",
+                "game",
+                "pad track",
+                "",
+                None,
+                duration_ms=210_000,
+            )
+    assert pcm is not None
     assert merged is None
+    assert fallback is True
+    assert intro_only is True
     assert len(calls) >= 3  # attempted intro/mid/late
+    assert result.pcm_ok is True
+    assert result.low_trust is True
+    assert result.confidence < features.CONFIDENCE_LOW
+    assert "intro only" in (result.confidence_note or "")
+    assert "PCM fallback" in (result.confidence_note or "")
 
 
 def test_decode_short_track_does_not_triple_sample() -> None:
@@ -212,7 +227,7 @@ def test_decode_short_track_does_not_triple_sample() -> None:
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", return_value=True):
             with patch("meridian.acoustic.build_profile", return_value=_prof(valence=0.5, energy=0.5)):
-                pcm, _fb, merged = features._decode_pcm_with_fallback(
+                pcm, _fb, merged, intro_only = features._decode_pcm_with_fallback(
                     "/short.wav", duration_ms=15_000
                 )
     assert pcm is not None
@@ -242,7 +257,7 @@ def test_decode_long_track_three_windows_mid_heavy_merge() -> None:
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", return_value=True):
             with patch("meridian.acoustic.build_profile", side_effect=built):
-                pcm, partial, merged = features._decode_pcm_with_fallback(
+                pcm, partial, merged, intro_only = features._decode_pcm_with_fallback(
                     "/long.wav", duration_ms=210_000
                 )
     assert pcm is not None
@@ -404,7 +419,7 @@ def test_dual_plan_intro_only_salvages_long_single() -> None:
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
-            pcm, fallback, merged = features._decode_pcm_with_fallback(
+            pcm, fallback, merged, intro_only = features._decode_pcm_with_fallback(
                 "/medium.wav", duration_ms=45_000
             )
     assert pcm is not None
@@ -437,7 +452,7 @@ def test_silent_intro_mid_late_not_weak_fallback() -> None:
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", side_effect=fake_signal_ok):
             with patch("meridian.acoustic.build_profile", side_effect=built):
-                pcm, partial, merged = features._decode_pcm_with_fallback(
+                pcm, partial, merged, intro_only = features._decode_pcm_with_fallback(
                     "/long.wav", duration_ms=210_000
                 )
     assert pcm is not None
@@ -481,7 +496,7 @@ def test_late_only_long_plan_defers() -> None:
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
-            pcm, _fb, merged = features._decode_pcm_with_fallback(
+            pcm, _fb, merged, intro_only = features._decode_pcm_with_fallback(
                 "/long.wav", duration_ms=210_000
             )
     assert pcm is None
@@ -568,7 +583,7 @@ def test_ends_only_intro_late_defers_on_long_plan() -> None:
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
-            pcm, _fb, merged = features._decode_pcm_with_fallback(
+            pcm, _fb, merged, intro_only = features._decode_pcm_with_fallback(
                 "/long.wav", duration_ms=210_000
             )
     assert pcm is None
@@ -591,7 +606,7 @@ def test_dual_plan_late_only_defers() -> None:
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
-            pcm, _fb, merged = features._decode_pcm_with_fallback(
+            pcm, _fb, merged, intro_only = features._decode_pcm_with_fallback(
                 "/short-dual.wav", duration_ms=35_000
             )
     assert pcm is None
@@ -611,7 +626,7 @@ def test_hard_decode_miss_skips_same_seek_reffmpeg() -> None:
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", return_value=True):
-            pcm, _fb, merged = features._decode_pcm_with_fallback(
+            pcm, _fb, merged, intro_only = features._decode_pcm_with_fallback(
                 "/broken.wav", duration_ms=210_000
             )
     assert pcm is None
@@ -637,7 +652,7 @@ def test_unknown_duration_decodes_long_single_window() -> None:
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", return_value=True):
-            pcm, fallback, merged = features._decode_pcm_with_fallback(
+            pcm, fallback, merged, intro_only = features._decode_pcm_with_fallback(
                 "/unknown.wav", duration_ms=0
             )
     assert pcm is not None
@@ -665,7 +680,7 @@ def test_dual_plan_short_intro_only_salvages() -> None:
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
-            pcm, fallback, merged = features._decode_pcm_with_fallback(
+            pcm, fallback, merged, intro_only = features._decode_pcm_with_fallback(
                 "/short-dual.wav", duration_ms=35_000
             )
     assert pcm is not None
@@ -697,7 +712,7 @@ def test_mid_only_keeps_section_profile_handle() -> None:
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
             with patch("meridian.acoustic.build_profile", return_value=mid_prof):
-                pcm, partial, merged = features._decode_pcm_with_fallback(
+                pcm, partial, merged, intro_only = features._decode_pcm_with_fallback(
                     "/long.wav", duration_ms=210_000
                 )
     assert pcm is not None

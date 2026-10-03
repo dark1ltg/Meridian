@@ -115,7 +115,7 @@ def test_soft_pcm_bpm_stays_clamped() -> None:
     pcm = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
     seed = genre_seed("metal", "x", "y", path="/tmp/x.flac")
     assert seed.clamp_match
-    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None)):
+    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None, False)):
         result = analyze_audio("/tmp/x.flac", "metal", "x", "y", 180.0)
     assert abs(result.energy - seed.energy) <= EVIDENCE_SOFT_ENERGY_MAX + 1e-9
 
@@ -160,7 +160,7 @@ def test_zero_tag_bpm_not_trusted() -> None:
     assert seed.clamp_match
     # Extreme PCM energy — soft envelope would hold within ±SOFT; zero BPM must not.
     cues = (0.05, 0.05, None, False, None)
-    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None)):
+    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None, False)):
         with patch("meridian.features._pcm_mood_cues", return_value=cues):
             soft = analyze_audio("/tmp/x.flac", "metal", "x", "y", 180.0)
             zero = analyze_audio("/tmp/x.flac", "metal", "x", "y", 0.0)
@@ -179,7 +179,7 @@ def test_out_bpm_prefers_detected_over_zero_tag() -> None:
     sr = SAMPLERATE
     t = np.arange(sr * 3, dtype=np.float32) / sr
     pcm = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
-    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None)):
+    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None, False)):
         with patch(
             "meridian.features._pcm_mood_cues",
             return_value=(0.5, 0.5, 118.0, False, None),
@@ -322,7 +322,7 @@ def test_container_seed_skips_soft_pcm_lock() -> None:
     seed = genre_seed("soundtrack", "Boss Theme", "Composer", path="/music/OST/game/x.flac")
     assert seed.container_only
     assert seed.clamp_match
-    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None)):
+    with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None, False)):
         result = analyze_audio(
             "/music/OST/game/x.flac", "soundtrack", "Boss Theme", "Composer", 120.0
         )
@@ -390,7 +390,7 @@ def test_evidence_soft_widens_valence() -> None:
     pcm = np.zeros(SAMPLERATE, dtype=np.float32)
     with patch(
         "meridian.features._decode_pcm_with_fallback",
-        return_value=(pcm, False, profile),
+        return_value=(pcm, False, profile, False),
     ):
         result = analyze_audio("/tmp/x.flac", "metal", "x", "y", 180.0)
     moved = abs(result.valence - seed.valence)
@@ -447,7 +447,7 @@ def test_genre_conflict_reduces_metadata_not_max_pcm() -> None:
 
     with patch(
         "meridian.features._decode_pcm_with_fallback",
-        return_value=(pcm, False, stable),
+        return_value=(pcm, False, stable, False),
     ):
         conflicted = analyze_audio(path_conflict, "metal", "x", "y", 120.0)
         aligned = analyze_audio(path_aligned, "metal", "x", "y", 120.0)
@@ -460,7 +460,7 @@ def test_genre_conflict_reduces_metadata_not_max_pcm() -> None:
 
     with patch(
         "meridian.features._decode_pcm_with_fallback",
-        return_value=(pcm, False, unstable_p),
+        return_value=(pcm, False, unstable_p, False),
     ):
         conflicted_weak = analyze_audio(path_conflict, "metal", "x", "y", 120.0)
     # Unstable PCM must not inherit most of the freed metadata authority.

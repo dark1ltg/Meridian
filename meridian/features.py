@@ -1243,21 +1243,22 @@ def _enough_section_evidence(
 
 def _decode_pcm_with_fallback(
     path: str, duration_ms: int = 0
-) -> tuple[np.ndarray | None, bool, object | None]:
+) -> tuple[np.ndarray | None, bool, object | None, bool]:
     """Decode intro/mid/late 12s windows (~36s) when the track is long enough.
 
-    Returns (pcm_or_None, used_fallback_or_partial, merged_profile_or_None).
+    Returns
+    ``(pcm_or_None, used_fallback_or_partial, merged_profile_or_None, intro_only)``.
     Multi-window success returns a representative PCM buffer plus a merged profile.
-    Long-plan partials that lack body evidence defer (no edge-only park). Dual-plan
-    intro-only (first window ok, second failed) falls through to a ~28s single-window
-    salvage from 0 / primary — like pre-three-section — instead of hard-deferring.
-    Unknown duration uses that same ~28s listen from 0 (not a lone 12s stub).
+    Long-plan intro-only (mid+late dead) salvages the audible head as a weak PCM
+    placement instead of deferring forever. Ends-only / late-only still defer.
+    Dual-plan intro-only falls through to a ~28s single-window salvage from 0 /
+    primary. Unknown duration uses that same ~28s listen from 0.
     """
     from meridian.acoustic import build_profile
 
     plan = _analysis_window_plan(duration_ms)
     if not plan:
-        return None, False, None
+        return None, False, None, False
 
     # Seeks already tried: no-signal (energy gate) or hard decode miss — do not
     # blindly re-ffmpeg the same offsets in the silence-fallback pass (rehunt score 2).
@@ -1270,7 +1271,7 @@ def _decode_pcm_with_fallback(
         role_pcm: dict[str, np.ndarray] = {}
         for role, start_s in plan:
             if decode_abort_requested():
-                return None, False, None
+                return None, False, None, False
             pcm = _decode_pcm(path, start_s=float(start_s), duration_s=SECTION_WINDOW_S)
             key = round(float(start_s), 2)
             if pcm is not None and _pcm_signal_ok(pcm):
@@ -1281,7 +1282,7 @@ def _decode_pcm_with_fallback(
 
         ok_roles = set(role_pcm)
         if decode_abort_requested():
-            return None, False, None
+            return None, False, None, False
 
         if _enough_section_evidence(plan, ok_roles):
             role_profiles = {role: build_profile(pcm) for role, pcm in role_pcm.items()}
@@ -1301,9 +1302,9 @@ def _decode_pcm_with_fallback(
             # analyze retains the merge-handle / multi-window credit path (rehunt score 2).
             if len(role_profiles) == 1:
                 sole = next(iter(role_profiles.values()))
-                return role_pcm[rep_role], True, sole
+                return role_pcm[rep_role], True, sole, False
             merged = _merge_pcm_profiles(None, role_profiles=role_profiles)
-            return role_pcm[rep_role], partial, merged
+            return role_pcm[rep_role], partial, merged, False
 
         # Not enough honest multi-window evidence.
         if ok_roles:
@@ -1315,9 +1316,13 @@ def _decode_pcm_with_fallback(
                 # Allow a longer re-listen at the primary start (prior 12s stub is spent
                 # as a section window, not as the salvage length).
                 skip_reseek_starts.discard(round(float(plan[0][1]), 2))
+            elif len(plan) >= 3 and ok_roles == {"intro"} and "intro" in role_pcm:
+                # Long-plan intro-only (mid/late silent or missing): place from the
+                # audible head as weak PCM instead of deferring forever on seed.
+                return role_pcm["intro"], True, None, True
             else:
-                # Long-plan edge-only / dual late-only: defer (no silence-fallback park).
-                return None, False, None
+                # Ends-only / late-only / other edge parks: defer.
+                return None, False, None, False
 
     # Single-window / silence-fallback / dual-salvage path.
     dur_s = _duration_s(duration_ms)
@@ -1343,7 +1348,7 @@ def _decode_pcm_with_fallback(
     seen: set[float] = set()
     for index, ss in enumerate(starts):
         if decode_abort_requested():
-            return None, False, None
+            return None, False, None, False
         key = round(float(ss), 2)
         if key in seen or key in skip_reseek_starts:
             continue
@@ -1352,8 +1357,8 @@ def _decode_pcm_with_fallback(
         if pcm is not None and _pcm_signal_ok(pcm):
             # Dual salvage is a real longer listen after multi-window honesty failed;
             # mark fallback so we do not claim multi-window credit for the stub path.
-            return pcm, bool(index > 0 or dual_salvage), None
-    return None, False, None
+            return pcm, bool(index > 0 or dual_salvage), None, False
+    return None, False, None, False
 
 
 def _genre_pair_conflict(tag_key: str | None, path_key: str | None) -> bool:
@@ -1520,10 +1525,15 @@ def analyze_audio(
     profile = None
     soft_shift = SOFT_PCM_MAX_SHIFT
 
-    pcm, pcm_fallback, merged_profile = _decode_pcm_with_fallback(path, duration_ms=duration_ms)
+    pcm, pcm_fallback, merged_profile, intro_only = _decode_pcm_with_fallback(
+        path, duration_ms=duration_ms
+    )
     multi_window = False
     if pcm is not None:
         pcm_ok = True
+        # Intro-only long salvage is a weak listen — always tax as PCM fallback.
+        if intro_only:
+            pcm_fallback = True
         if merged_profile is not None:
             profile = merged_profile
             valence_pcm = float(profile.valence)
@@ -1724,6 +1734,12 @@ def analyze_audio(
         onset_consistency=float(getattr(profile, "onset_consistency", 0.5)) if profile else None,
         multi_window=multi_window,
     )
+    if intro_only:
+        # Keep intro-only salvage in the low-trust band (genre seed alone is worse,
+        # but a head-only listen must not look like a full multi-window PCM place).
+        confidence = min(float(confidence), CONFIDENCE_LOW - 0.01)
+        if "intro only" not in note:
+            note = f"{note} · intro only" if note else "intro only"
     return MoodResult(
         valence=float(valence),
         energy=float(energy),
