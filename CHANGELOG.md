@@ -6,10 +6,10 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds bug-hunt fixes (Rescan PCM keep, matrix click, zoom LOD, host ffmpeg warn), search select→play/queue inject, high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
 
-### Local: intro-only long-track salvage
-- When mid/late windows are silent/missing but the intro has real audio, **place** from that head listen (weak / low-trust) instead of deferring forever on genre seed
-- Ends-only (intro+late, no mid) and late-only still defer — honesty rules unchanged for pad/fade parks
-- Confidence note includes `intro only` · `PCM fallback`; stays in the low-trust band
+### Local: intro-only / end-only long-track salvage
+- When mid/late are dead but the **intro** has audio, or intro/mid are dead but the **end** has audio, **place** from that single edge (weak / low-trust) instead of deferring forever on genre seed
+- Ends-only (intro+late, no mid) still defers — pad+fade honesty unchanged
+- Confidence note includes `intro only` or `end only` · `PCM fallback`; stays in the low-trust band
 
 ### Local: scan→analyze handoff (QueuedConnection lambda drop)
 - PySide 6.11 drops `QueuedConnection` to lambdas/partials — first-run scan never called `start_analyze`, leaving seed-only moods
