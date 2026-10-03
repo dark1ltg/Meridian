@@ -516,11 +516,8 @@ def confidence_from_evidence(
         else:
             score += 0.50
             reasons.append("PCM only")
-        if multi_window and not pcm_fallback and not pcm_unstable:
-            # Stable note only — no score jitter (rescan must not reshuffle on wording).
-            reasons.append("multi-window")
-            score += 0.02
-        elif multi_window:
+        if multi_window:
+            # Note only — no score jitter (tidy/spread thresholds must not move on the flag).
             reasons.append("multi-window")
         if variation > 0.28:
             score -= float(np.clip((variation - 0.28) * 0.35, 0.0, 0.12))

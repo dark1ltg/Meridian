@@ -6,6 +6,13 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds bug-hunt fixes (Rescan PCM keep, matrix click, zoom LOD, host ffmpeg warn), search select→play/queue inject, high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
 
+### Local: three-section app-wide fixes (scores 2, 4, 6)
+- Dual short/medium plans: when the second window fails but the first succeeded, **salvage** with a ~28s single listen from 0 / primary (pre-three-section) instead of hard-deferring to seed
+- Unknown duration (`duration_ms==0`): decode ~28s from 0 (not a lone 12s mid stub)
+- `multi_window` confidence: keep the note, **remove** the +0.02 score nudge (tidy/spread thresholds unchanged by the flag alone)
+- Score **3** (~36s three-window wall) left accepted — no parallel/shorter 3×9 change
+- Tests cover dual intro-only salvage, unknown-duration 28s, multi-window note-without-nudge
+
 ### Local: three-section audio analysis (intro / mid / late)
 - Long tracks: three **12s** windows (intro / mid / late, ~36s budget) with mid-heavy blend (~20/50/30)
 - Short tracks: **1–2** windows only (no triple-sampling the same audio)

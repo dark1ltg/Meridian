@@ -315,6 +315,16 @@ def test_multi_window_confidence_note_stable() -> None:
     )
     assert score == score2
     assert note == note2
+    # Appwide score 2: flag alone must not nudge confidence thresholds.
+    score_plain, note_plain = confidence_from_evidence(
+        tag_key="rock",
+        pcm_ok=True,
+        multi_window=False,
+        variation=0.05,
+        onset_consistency=0.8,
+    )
+    assert score == score_plain
+    assert "multi-window" not in note_plain
 
 
 def test_cold_open_does_not_poison_confidence() -> None:
@@ -379,24 +389,30 @@ def test_cold_open_does_not_poison_confidence() -> None:
     assert "unstable spectrum" not in note
 
 
-def test_dual_plan_intro_only_does_not_succeed() -> None:
-    """Score 6/2: medium dual-plan with mid decode miss must defer, not park intro."""
+def test_dual_plan_intro_only_salvages_long_single() -> None:
+    """Appwide score 6: dual intro-only salvages ~28s from 0 (no hard-defer / no short park)."""
     from meridian import features
 
     features.clear_decode_abort()
+    calls: list[tuple[float, float]] = []
 
     def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        calls.append((float(start_s), float(duration_s)))
         if abs(start_s) < 0.01:
-            return np.ones(11025 * 4, dtype=np.float32) * 0.05
+            return np.ones(11025 * int(max(4.0, duration_s)), dtype=np.float32) * 0.05
         return None
 
     with patch.object(features, "_decode_pcm", side_effect=fake_decode):
         with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
-            pcm, _fb, merged = features._decode_pcm_with_fallback(
+            pcm, fallback, merged = features._decode_pcm_with_fallback(
                 "/medium.wav", duration_ms=45_000
             )
-    assert pcm is None
-    assert merged is None
+    assert pcm is not None
+    assert merged is None  # salvage is single-window, not multi-window merge
+    assert fallback is True
+    # Section attempts (12s) then a real longer salvage (~28s) from primary/0.
+    assert any(abs(dur - features.LONG_SINGLE_WINDOW_S) < 1e-6 and abs(ss) < 0.01 for ss, dur in calls)
+    assert any(abs(dur - features.SECTION_WINDOW_S) < 1e-6 for _ss, dur in calls)
 
 
 def test_silent_intro_mid_late_not_weak_fallback() -> None:
@@ -606,6 +622,56 @@ def test_hard_decode_miss_skips_same_seek_reffmpeg() -> None:
     plan = features._analysis_window_plan(210_000)
     for _role, ss in plan:
         assert calls.count(float(ss)) == 1
+
+
+def test_unknown_duration_decodes_long_single_window() -> None:
+    """Appwide score 4: duration_ms==0 listens ~28s from 0, not a lone 12s stub."""
+    from meridian import features
+
+    features.clear_decode_abort()
+    calls: list[tuple[float, float]] = []
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        calls.append((float(start_s), float(duration_s)))
+        return np.ones(11025 * int(max(4.0, duration_s)), dtype=np.float32) * 0.05
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", return_value=True):
+            pcm, fallback, merged = features._decode_pcm_with_fallback(
+                "/unknown.wav", duration_ms=0
+            )
+    assert pcm is not None
+    assert fallback is False
+    assert merged is None
+    assert len(calls) == 1
+    assert abs(calls[0][0]) < 0.01
+    assert abs(calls[0][1] - features.LONG_SINGLE_WINDOW_S) < 1e-6
+
+
+def test_dual_plan_short_intro_only_salvages() -> None:
+    """Appwide score 6: short intro+late plan with intro-only also salvages ~28s."""
+    from meridian import features
+
+    features.clear_decode_abort()
+    calls: list[tuple[float, float]] = []
+    plan = features._analysis_window_plan(35_000)
+    assert [r for r, _ in plan] == ["intro", "late"]
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        calls.append((float(start_s), float(duration_s)))
+        if abs(start_s) < 0.01:
+            return np.ones(11025 * int(max(4.0, duration_s)), dtype=np.float32) * 0.05
+        return None
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", side_effect=lambda pcm: pcm is not None):
+            pcm, fallback, merged = features._decode_pcm_with_fallback(
+                "/short-dual.wav", duration_ms=35_000
+            )
+    assert pcm is not None
+    assert merged is None
+    assert fallback is True
+    assert any(abs(dur - features.LONG_SINGLE_WINDOW_S) < 1e-6 and abs(ss) < 0.01 for ss, dur in calls)
 
 
 def test_mid_only_keeps_section_profile_handle() -> None:

@@ -906,6 +906,8 @@ def _coerce_bpm(bpm: float | None) -> float | None:
 
 # Per-window listen length for multi-section analysis.
 SECTION_WINDOW_S = 12.0
+# Prior single-window listen length (unknown duration + dual-plan salvage).
+LONG_SINGLE_WINDOW_S = 28.0
 # Minimum separation between section starts so we do not triple-sample the same audio.
 SECTION_MIN_GAP_S = 8.0
 # Mid-heavy blend for intro / mid / late when all three are usable.
@@ -941,7 +943,7 @@ def _analysis_window_plan(duration_ms: int) -> list[tuple[str, float]]:
     gap = SECTION_MIN_GAP_S
 
     if dur_s <= 0.0:
-        # Unknown duration: single listen from 0 — do not seek far past EOF.
+        # Unknown duration: single listen from 0 (decode uses LONG_SINGLE_WINDOW_S).
         return [("mid", 0.0)]
 
     if dur_s < 18.0:
@@ -1246,8 +1248,10 @@ def _decode_pcm_with_fallback(
 
     Returns (pcm_or_None, used_fallback_or_partial, merged_profile_or_None).
     Multi-window success returns a representative PCM buffer plus a merged profile.
-    Partial plans that lack enough body evidence return (None, …) so analyze defers
-    instead of parking an intro-only mood as a successful listen.
+    Long-plan partials that lack body evidence defer (no edge-only park). Dual-plan
+    intro-only (first window ok, second failed) falls through to a ~28s single-window
+    salvage from 0 / primary — like pre-three-section — instead of hard-deferring.
+    Unknown duration uses that same ~28s listen from 0 (not a lone 12s stub).
     """
     from meridian.acoustic import build_profile
 
@@ -1258,6 +1262,8 @@ def _decode_pcm_with_fallback(
     # Seeks already tried: no-signal (energy gate) or hard decode miss — do not
     # blindly re-ffmpeg the same offsets in the silence-fallback pass (rehunt score 2).
     skip_reseek_starts: set[float] = set()
+    # Dual-plan salvage: first window ok but dual evidence failed → long single listen.
+    dual_salvage = False
 
     # Multi-section path (2 or 3 planned windows).
     if len(plan) >= 2:
@@ -1299,15 +1305,34 @@ def _decode_pcm_with_fallback(
             merged = _merge_pcm_profiles(None, role_profiles=role_profiles)
             return role_pcm[rep_role], partial, merged
 
-        # Not enough honest multi-window evidence. Do not park edge-only moods
-        # (intro pad / late fade / ends-only / dual late-only) via silence fallback.
-        if len(plan) >= 2 and ok_roles:
-            return None, False, None
+        # Not enough honest multi-window evidence.
+        if ok_roles:
+            first_role = plan[0][0]
+            # Dual plan + usable first window (intro-only etc.): long single-window
+            # salvage (~28s) instead of hard-defer / parking the short intro alone.
+            if len(plan) == 2 and first_role in ok_roles:
+                dual_salvage = True
+                # Allow a longer re-listen at the primary start (prior 12s stub is spent
+                # as a section window, not as the salvage length).
+                skip_reseek_starts.discard(round(float(plan[0][1]), 2))
+            else:
+                # Long-plan edge-only / dual late-only: defer (no silence-fallback park).
+                return None, False, None
 
-    # Single-window / silence-fallback path.
+    # Single-window / silence-fallback / dual-salvage path.
     dur_s = _duration_s(duration_ms)
-    win_s = SECTION_WINDOW_S if dur_s <= 0.0 or dur_s >= 40.0 else min(24.0, max(SECTION_WINDOW_S, dur_s))
+    if dur_s <= 0.0 or dual_salvage:
+        # Unknown duration or dual intro-only salvage: prior ~28s single listen from 0.
+        win_s = LONG_SINGLE_WINDOW_S
+    elif dur_s < 40.0:
+        win_s = min(LONG_SINGLE_WINDOW_S, max(SECTION_WINDOW_S, dur_s))
+    else:
+        win_s = LONG_SINGLE_WINDOW_S
     starts = [float(ss) for _role, ss in plan]
+    if dual_salvage:
+        # Prefer primary / 0 first for the long salvage listen.
+        primary = float(plan[0][1])
+        starts = [primary] + [s for s in starts if abs(s - primary) > 1e-9]
     if dur_s > 0.0:
         mid_fb = _clamp_seek_s(dur_s * 0.35, dur_s, win_s)
         if mid_fb not in starts:
@@ -1325,7 +1350,9 @@ def _decode_pcm_with_fallback(
         seen.add(key)
         pcm = _decode_pcm(path, start_s=float(ss), duration_s=win_s)
         if pcm is not None and _pcm_signal_ok(pcm):
-            return pcm, index > 0, None
+            # Dual salvage is a real longer listen after multi-window honesty failed;
+            # mark fallback so we do not claim multi-window credit for the stub path.
+            return pcm, bool(index > 0 or dual_salvage), None
     return None, False, None
 
 

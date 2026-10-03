@@ -46,9 +46,9 @@ That gives a starting “neighborhood” — like “this is probably metal-ener
 
 It asks your computer’s `ffmpeg` for those section windows. Meridian does **not** ship `ffmpeg` inside the AppImage — it must be on the host `PATH`.
 
-- Seeks stay inside the known duration (unknown length → listen from the start only).  
+- Seeks stay inside the known duration (unknown length → about **28 seconds** from the start, not a tiny stub).  
 - On long tracks, intro / mid / late are compared. A silent or cold-open intro does **not** veto a clear mid+late body. When sections disagree, Meridian keeps the **steadier** song-like taste and may inject contrast from a more active window — not a fake middle.  
-- If only the intro decoded and mid+late failed, analyze **defers** instead of parking a lying intro-only mood.  
+- If only the intro decoded and mid+late failed on a **long** plan, analyze **defers** instead of parking a lying intro-only mood. On **short/medium** dual plans, a failed second window with a usable first listen falls back to one longer (~28s) listen instead of giving up.  
 - If `ffmpeg` is missing, Meridian still plays music, but analyze leaves stars on genre/folder seeds instead of inventing a waveform placement. Startup shows a warning dialog and a sticky status tip (same idea as the missing-libx264 tip).  
 - Stopping analyze kills the active `ffmpeg` process so sequential seeks do not leave a stuck decoder.
 
