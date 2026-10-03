@@ -7,6 +7,7 @@ import ctypes.util
 import os
 import shutil
 import sys
+from pathlib import Path
 
 # Common sonames across distros (Arch/CachyOS currently ships .165).
 _LIBX264_CANDIDATES = (
@@ -102,3 +103,72 @@ def ffmpeg_missing_message() -> str:
 
 def ffmpeg_missing_status() -> str:
     return "Mood analysis needs ffmpeg on this system (e.g. pacman -S ffmpeg), then restart."
+
+
+def path_is_rotational(path: str | Path) -> bool | None:
+    """True when *path* lives on a rotational disk (HDD), False on SSD/NVMe.
+
+    Returns ``None`` when the device cannot be classified (non-Linux, missing
+    sysfs, unreachable path). Used only for silent analyze-worker sizing.
+    """
+    try:
+        target = Path(path).expanduser()
+        # Prefer an existing ancestor so library roots still resolve.
+        probe = target
+        for _ in range(8):
+            try:
+                if probe.exists():
+                    st = probe.stat()
+                    break
+            except OSError:
+                return None
+            if probe.parent == probe:
+                return None
+            probe = probe.parent
+        else:
+            return None
+    except OSError:
+        return None
+    try:
+        maj, minor = os.major(st.st_dev), os.minor(st.st_dev)
+    except (AttributeError, OverflowError, ValueError):
+        return None
+    cur = Path(f"/sys/dev/block/{maj}:{minor}")
+    try:
+        cur = cur.resolve()
+    except OSError:
+        return None
+    for _ in range(8):
+        rot = cur / "queue" / "rotational"
+        if rot.is_file():
+            try:
+                return rot.read_text(encoding="ascii").strip() == "1"
+            except OSError:
+                return None
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    return None
+
+
+def preferred_analyze_workers(folders: list[str] | None = None) -> int:
+    """Silent worker count: SSD/NVMe → 2, HDD or unknown → 1.
+
+    Override with ``MERIDIAN_ANALYZE_WORKERS=1`` or ``2`` (tests / power users).
+    No UI — analyze just uses more ffmpeg listeners when the library is on flash.
+    Mixed libraries (any rotational folder) stay at 1 to avoid HDD thrash.
+    """
+    env = (os.environ.get("MERIDIAN_ANALYZE_WORKERS") or "").strip()
+    if env in {"1", "2"}:
+        return int(env)
+    folders = [str(f) for f in (folders or []) if f]
+    if not folders:
+        return 1
+    flags = [path_is_rotational(f) for f in folders]
+    known = [flag for flag in flags if flag is not None]
+    if not known:
+        return 1
+    if any(known):
+        return 1
+    return 2

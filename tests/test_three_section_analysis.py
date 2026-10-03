@@ -337,7 +337,8 @@ def test_abort_kills_active_proc_across_seeks() -> None:
     proc = FakeProc()
     assert features._register_decode_proc(proc) is True
     features.request_decode_abort()
-    assert features._decode_proc is None
+    assert proc not in features._decode_procs
+    assert not features._decode_procs
     assert killed == [proc]
     # A subsequent decode attempt must refuse while abort is set.
     with patch("meridian.features.shutil.which", return_value="/usr/bin/ffmpeg"):

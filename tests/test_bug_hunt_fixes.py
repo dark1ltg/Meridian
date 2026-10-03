@@ -361,6 +361,9 @@ def test_analyze_done_reports_deferred_not_success(qapp) -> None:
     w._analyze_gen = 1
     w._analyze_thread = object()
     w._analyze_worker = object()
+    w._analyze_pool = []
+    w._analyze_remaining = 0
+    w._analyze_run_tidy = False
     w._lingering_workers = []
     statuses: list[str] = []
     w._clear_job_status = lambda: None  # type: ignore[method-assign]
@@ -394,6 +397,9 @@ def test_analyze_done_reports_all_seed_not_listen(qapp) -> None:
     w._analyze_gen = 1
     w._analyze_thread = object()
     w._analyze_worker = object()
+    w._analyze_pool = []
+    w._analyze_remaining = 0
+    w._analyze_run_tidy = False
     w._lingering_workers = []
     statuses: list[str] = []
     w._clear_job_status = lambda: None  # type: ignore[method-assign]

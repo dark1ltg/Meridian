@@ -247,6 +247,12 @@ def test_start_analyze_reaps_finished_before_overwrite(qapp) -> None:
         def analyze_session_stats(self):
             return 0, 0
 
+        def requeue_seed_only_without_pcm(self):
+            return 0
+
+        def folders(self):
+            return []
+
     win = MainWindow.__new__(MainWindow)
     win._closing = False
     win._lingering_workers = []
@@ -254,6 +260,8 @@ def test_start_analyze_reaps_finished_before_overwrite(qapp) -> None:
     win._analyze_gen = 1
     win._analyze_map_tick = 0
     win._last_analyze_map_refresh = 0.0
+    win._analyze_pool = []
+    win._seed_retry_wave = True
     win.library = FakeLib()  # type: ignore[assignment]
     win._clear_job_status = lambda: None
     win._set_status = lambda *_a: None

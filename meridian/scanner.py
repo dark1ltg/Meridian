@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -16,6 +17,31 @@ from meridian.features import (
     _coerce_bpm,
 )
 from meridian.library import Library
+
+
+class AnalyzeTrackQueue:
+    """Shared FIFO of track ids for one or more AnalyzeWorkers (SSD dual listen)."""
+
+    def __init__(self, track_ids: list[int]) -> None:
+        self._ids = [int(i) for i in track_ids]
+        self._next = 0
+        self._done = 0
+        self._lock = threading.Lock()
+        self.total = len(self._ids)
+
+    def claim(self) -> int | None:
+        with self._lock:
+            if self._next >= len(self._ids):
+                return None
+            tid = self._ids[self._next]
+            self._next += 1
+            return tid
+
+    def mark_done(self) -> tuple[int, int]:
+        """Return ``(completed, total)`` after one track finishes."""
+        with self._lock:
+            self._done += 1
+            return self._done, self.total
 
 
 def _resolve(path: Path) -> Path | None:
@@ -247,9 +273,21 @@ class AnalyzeWorker(QObject):
     progress = Signal(str, int, int)
     finished = Signal()
 
-    def __init__(self, library: Library) -> None:
+    def __init__(
+        self,
+        library: Library,
+        *,
+        queue: AnalyzeTrackQueue | None = None,
+        run_tidy: bool = True,
+        reset_session: bool = True,
+        clear_abort: bool = True,
+    ) -> None:
         super().__init__()
         self.library = library
+        self._queue = queue
+        self._run_tidy = bool(run_tidy)
+        self._reset_session = bool(reset_session)
+        self._clear_abort = bool(clear_abort)
         self._abort = False
 
     def abort(self) -> None:
@@ -261,18 +299,23 @@ class AnalyzeWorker(QObject):
     def run(self) -> None:
         from meridian.features import clear_decode_abort
 
-        clear_decode_abort()
+        if self._clear_abort:
+            clear_decode_abort()
         try:
-            self.library.reset_analyze_session_stats()
-            ids = self.library.unanalyzed_ids()
-            total = len(ids)
-            for index, track_id in enumerate(ids, start=1):
-                if self._abort:
+            if self._reset_session:
+                self.library.reset_analyze_session_stats()
+            if self._queue is not None:
+                queue = self._queue
+            else:
+                queue = AnalyzeTrackQueue(self.library.unanalyzed_ids())
+            while not self._abort:
+                track_id = queue.claim()
+                if track_id is None:
                     break
                 track = self.library.get(track_id)
                 if not track:
+                    completed, total = queue.mark_done()
                     continue
-                self.progress.emit(track.short_title, index, total)
                 try:
                     tags = read_tags(track.path)
                     result = analyze_audio(
@@ -289,6 +332,7 @@ class AnalyzeWorker(QObject):
                         duration_ms=track.duration_ms or int(tags.get("duration_ms") or 0),
                     )
                     if self._abort:
+                        queue.mark_done()
                         break
                     if not result.pcm_ok:
                         # No waveform this pass.
@@ -316,24 +360,25 @@ class AnalyzeWorker(QObject):
                             )
                         else:
                             self.library.defer_analyze(track.id)
-                        continue
-                    self.library.set_analyzed_mood(
-                        track.id,
-                        result.valence,
-                        result.energy,
-                        result.bpm,
-                        confidence=result.confidence,
-                        low_trust=result.low_trust,
-                        confidence_note=result.confidence_note,
-                        onset_consistency=result.onset_consistency,
-                        acoustic_flux=result.acoustic_flux,
-                        brightness=result.brightness,
-                    )
+                    else:
+                        self.library.set_analyzed_mood(
+                            track.id,
+                            result.valence,
+                            result.energy,
+                            result.bpm,
+                            confidence=result.confidence,
+                            low_trust=result.low_trust,
+                            confidence_note=result.confidence_note,
+                            onset_consistency=result.onset_consistency,
+                            acoustic_flux=result.acoustic_flux,
+                            brightness=result.brightness,
+                        )
                 except Exception:
                     # Always denylist in-process; DB mark may fail under lock contention.
                     self.library.mark_analyze_failed(track.id)
-                    continue
-            if not self._abort:
+                completed, total = queue.mark_done()
+                self.progress.emit(track.short_title, completed, total)
+            if self._run_tidy and not self._abort:
                 self.library.smooth_album_moods()
                 self.library.smooth_artist_moods()
                 self.library.spread_album_acoustics()

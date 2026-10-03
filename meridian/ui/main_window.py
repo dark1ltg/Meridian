@@ -45,7 +45,7 @@ from meridian.host_deps import (
 from meridian.library import Library
 from meridian.player import Player
 from meridian.queue_engine import Quadrant, QueuePlan, RenewalContext, build_plan
-from meridian.scanner import AnalyzeWorker, ScanWorker, start_worker
+from meridian.scanner import AnalyzeTrackQueue, AnalyzeWorker, ScanWorker, start_worker
 from meridian.ui.search import TrackSearch
 from meridian.ui.fit_list import FitList
 from meridian.ui.fonts import condensed
@@ -119,6 +119,12 @@ class MainWindow(QMainWindow):
         self._scan_finish_bridge: _ScanFinishBridge | None = None
         self._analyze_thread = None
         self._analyze_worker = None
+        # Active analyze pool (1 on HDD, up to 2 on SSD/NVMe). Primary pair also
+        # mirrored in `_analyze_thread` / `_analyze_worker` for legacy stop/reap.
+        self._analyze_pool: list[tuple] = []
+        self._analyze_finish_bridges: list[_AnalyzeFinishBridge] = []
+        self._analyze_remaining = 0
+        self._analyze_run_tidy = False
         self._analyze_gen = 0
         self._analyze_finish_bridge: _AnalyzeFinishBridge | None = None
         # Timed-out workers kept alive (signals disconnected) until QThread ends.
@@ -818,17 +824,27 @@ class MainWindow(QMainWindow):
         return self._reap_worker_thread(thread, worker, wait_ms=wait_ms)
 
     def _stop_analyze(self, wait_ms: int = 20000) -> bool:
-        """Stop analyze. Returns True when the thread is fully stopped."""
+        """Stop analyze. Returns True when every analyze thread is fully stopped."""
         # Bump generation first so a late finished signal cannot restart analyze.
         # Abort kills in-flight ffmpeg so this wait stays bounded.
         self._analyze_gen += 1
-        worker = self._analyze_worker
-        thread = self._analyze_thread
+        pool = list(self._analyze_pool)
+        if not pool and (self._analyze_thread is not None or self._analyze_worker is not None):
+            pool = [(self._analyze_thread, self._analyze_worker)]
+        self._analyze_pool = []
+        self._analyze_finish_bridges = []
+        self._analyze_remaining = 0
+        self._analyze_run_tidy = False
         self._analyze_worker = None
         self._analyze_thread = None
-        if worker is not None:
-            worker.abort()
-        return self._reap_worker_thread(thread, worker, wait_ms=wait_ms)
+        for _thread, worker in pool:
+            if worker is not None:
+                worker.abort()
+        ok = True
+        for thread, worker in pool:
+            if not self._reap_worker_thread(thread, worker, wait_ms=wait_ms):
+                ok = False
+        return ok
 
     def _scan_done(self, added: int, gen: int | None = None) -> None:
         # Ignore stale finished after a newer scan started / cleanup bumped gen.
@@ -858,15 +874,20 @@ class MainWindow(QMainWindow):
             self._pending_analyze_after_linger = True
             self._set_job_status("Waiting for previous analyze to finish…")
             return
-        # Reap a finished-but-not-yet-disposed analyze before overwrite (AB3/H2).
-        prev_thread = self._analyze_thread
-        prev_worker = self._analyze_worker
-        if prev_thread is not None or prev_worker is not None:
-            if prev_thread is not None and prev_thread.isRunning():
+        # Reap finished-but-not-yet-disposed analyze pool before overwrite (AB3/H2).
+        prev_pool = list(getattr(self, "_analyze_pool", []) or [])
+        if not prev_pool and (
+            self._analyze_thread is not None or self._analyze_worker is not None
+        ):
+            prev_pool = [(self._analyze_thread, self._analyze_worker)]
+        if prev_pool:
+            if any(t is not None and t.isRunning() for t, _w in prev_pool):
                 return
+            self._analyze_pool = []
             self._analyze_thread = None
             self._analyze_worker = None
-            self._reap_worker_thread(prev_thread, prev_worker, wait_ms=3000)
+            for prev_thread, prev_worker in prev_pool:
+                self._reap_worker_thread(prev_thread, prev_worker, wait_ms=3000)
         if self.library.closed:
             return
         # One wave per session: retry seed-only rows that never got waveform when
@@ -877,7 +898,8 @@ class MainWindow(QMainWindow):
 
             if host_ffmpeg_available():
                 self.library.requeue_seed_only_without_pcm()
-        if not self.library.unanalyzed_ids():
+        pending_ids = self.library.unanalyzed_ids()
+        if not pending_ids:
             self._clear_job_status()
             pcm_ok, deferred = self.library.analyze_session_stats()
             if deferred > 0 and pcm_ok == 0:
@@ -892,18 +914,42 @@ class MainWindow(QMainWindow):
         self._last_analyze_map_refresh = 0.0
         self._analyze_gen += 1
         gen = self._analyze_gen
-        worker = AnalyzeWorker(self.library)
-        thread = start_worker(worker)
-        self._analyze_worker = worker
-        self._analyze_thread = thread
+        from meridian.features import clear_decode_abort
+        from meridian.host_deps import preferred_analyze_workers
+
+        clear_decode_abort()
+        self.library.reset_analyze_session_stats()
+        worker_n = preferred_analyze_workers(self.library.folders())
+        worker_n = max(1, min(2, int(worker_n)))
+        if len(pending_ids) < 2:
+            worker_n = 1
+        queue = AnalyzeTrackQueue(pending_ids)
         queued = Qt.ConnectionType.QueuedConnection
-        worker.progress.connect(self._on_analyze_progress, queued)
-        # Capture this generation's thread/worker so a gen-mismatch finish still
-        # disposes the superseded QThread instead of orphaning it (AB3/H2).
-        # Must be a @Slot bridge — Queued lambda never delivers on PySide 6.11.
-        bridge = _AnalyzeFinishBridge(self, gen, thread, worker, parent=self)
-        self._analyze_finish_bridge = bridge
-        worker.finished.connect(bridge.on_finished, queued)
+        pool: list[tuple] = []
+        bridges: list[_AnalyzeFinishBridge] = []
+        for index in range(worker_n):
+            worker = AnalyzeWorker(
+                self.library,
+                queue=queue,
+                run_tidy=False,
+                reset_session=False,
+                clear_abort=False,
+            )
+            thread = start_worker(worker)
+            pool.append((thread, worker))
+            worker.progress.connect(self._on_analyze_progress, queued)
+            # Must be a @Slot bridge — Queued lambda never delivers on PySide 6.11.
+            bridge = _AnalyzeFinishBridge(self, gen, thread, worker, parent=self)
+            bridges.append(bridge)
+            worker.finished.connect(bridge.on_finished, queued)
+        self._analyze_pool = pool
+        self._analyze_finish_bridges = bridges
+        self._analyze_remaining = len(pool)
+        self._analyze_run_tidy = True
+        # Legacy single-slot refs → primary worker (stop/reap / older tests).
+        self._analyze_thread = pool[0][0]
+        self._analyze_worker = pool[0][1]
+        self._analyze_finish_bridge = bridges[0]
 
     @Slot(str, int, int)
     def _on_analyze_progress(self, name: str, i: int, n: int) -> None:
@@ -924,17 +970,22 @@ class MainWindow(QMainWindow):
         thread=None,
         worker=None,
     ) -> None:
-        # Always dispose the finishing worker's objects; only the matching gen
-        # owns current refs and may restart analyze.
+        # Always dispose the finishing worker's objects; only when the whole pool
+        # for this gen is idle may we tidy / restart analyze.
         if thread is None:
             thread = self._analyze_thread
         if worker is None:
             worker = self._analyze_worker
+        pool = list(getattr(self, "_analyze_pool", []) or [])
+        if pool:
+            self._analyze_pool = [(t, w) for t, w in pool if t is not thread and w is not worker]
         if gen == self._analyze_gen:
             if self._analyze_thread is thread:
                 self._analyze_thread = None
             if self._analyze_worker is worker:
                 self._analyze_worker = None
+            if getattr(self, "_analyze_remaining", 0) > 0:
+                self._analyze_remaining -= 1
         elif self._analyze_thread is thread:
             # Should not happen if start_analyze reaped first; clear safely.
             self._analyze_thread = None
@@ -942,8 +993,21 @@ class MainWindow(QMainWindow):
         self._reap_worker_thread(thread, worker, wait_ms=3000)
         if gen != self._analyze_gen:
             return
+        # Wait for sibling workers in the SSD dual pool.
+        if getattr(self, "_analyze_remaining", 0) > 0:
+            return
+        self._analyze_finish_bridges = []
         if self._closing:
             return
+        if getattr(self, "_analyze_run_tidy", False):
+            self._analyze_run_tidy = False
+            try:
+                self.library.smooth_album_moods()
+                self.library.smooth_artist_moods()
+                self.library.spread_album_acoustics()
+                self.library.rescale_moods_by_percentile()
+            except Exception:
+                pass
         # If scan added more tracks while we were analyzing, finish them.
         if self.library.unanalyzed_ids():
             self._set_job_status("More tracks to map…")

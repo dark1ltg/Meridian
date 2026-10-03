@@ -233,23 +233,24 @@ CONFIDENCE_HIGH = 0.75
 # Test hook: increments whenever ffmpeg decode is attempted.
 _decode_pcm_calls = 0
 # Cooperative abort for AnalyzeWorker.stop / quit (kills in-flight ffmpeg).
+# Set of procs — dual analyze workers may each own an ffmpeg at once.
 _decode_abort = False
-_decode_proc: subprocess.Popen | None = None
+_decode_procs: set[subprocess.Popen] = set()
 _decode_proc_lock = threading.Lock()
 
 
 def request_decode_abort() -> None:
     """Stop any in-flight ffmpeg decode ASAP (analyze abort / quit).
 
-    Clears the active-proc slot under the lock so a sequential multi-seek
+    Clears every active-proc slot under the lock so a sequential multi-seek
     ``finally`` cannot resurrect a pointer to a process we already killed.
     """
-    global _decode_abort, _decode_proc
+    global _decode_abort
     _decode_abort = True
     with _decode_proc_lock:
-        proc = _decode_proc
-        _decode_proc = None
-    if proc is not None:
+        procs = list(_decode_procs)
+        _decode_procs.clear()
+    for proc in procs:
         try:
             proc.kill()
         except OSError:
@@ -266,21 +267,18 @@ def decode_abort_requested() -> bool:
 
 
 def _register_decode_proc(proc: subprocess.Popen) -> bool:
-    """Publish *proc* as the kill target. Return False if abort already won."""
-    global _decode_proc
+    """Publish *proc* as a kill target. Return False if abort already won."""
     with _decode_proc_lock:
         if _decode_abort:
             return False
-        _decode_proc = proc
+        _decode_procs.add(proc)
         return True
 
 
 def _clear_decode_proc(proc: subprocess.Popen) -> None:
-    """Drop *proc* from the active slot only if it is still the current owner."""
-    global _decode_proc
+    """Drop *proc* from the active set when its decode finishes."""
     with _decode_proc_lock:
-        if _decode_proc is proc:
-            _decode_proc = None
+        _decode_procs.discard(proc)
 
 
 @dataclass(frozen=True, slots=True)

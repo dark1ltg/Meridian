@@ -6,6 +6,12 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds bug-hunt fixes (Rescan PCM keep, matrix click, zoom LOD, host ffmpeg warn), search select→play/queue inject, high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
 
+### Local: silent dual analyze workers (SSD → 2, HDD → 1)
+- No UI — library folders on non-rotational disks (SSD/NVMe) run **two** AnalyzeWorkers sharing one track queue; HDD or unknown stays at **one**
+- Mixed libraries (any rotational folder) stay single-worker to avoid thrash
+- Decode abort tracks every in-flight ffmpeg (both workers); tidy runs once when the pool finishes
+- Override with `MERIDIAN_ANALYZE_WORKERS=1` or `2` if needed
+
 ### Local: album/artist smooth keeps rough places dim
 - Tidy still pulls low-trust tracks toward album/artist mates (tags + whatever listen landed)
 - Confidence may bump a little inside the unsure band, but **stays under 0.45** — no mid-trust wash for seed-only / edge-salvage pins
