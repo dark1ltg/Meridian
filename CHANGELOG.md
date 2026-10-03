@@ -6,6 +6,10 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 Renew Queue: an explicit new recommendation pass from the current listen matrix, without treating replaced songs as skips. This AppImage refresh keeps **1.3.6** and adds bug-hunt fixes (Rescan PCM keep, matrix click, zoom LOD, host ffmpeg warn), search select→play/queue inject, high-severity reliability fixes (score 7–10), mood-map import UX, and prior playback-credit / queue / map-pin hardening.
 
+### Local: album/artist smooth keeps rough places dim
+- Tidy still pulls low-trust tracks toward album/artist mates (tags + whatever listen landed)
+- Confidence may bump a little inside the unsure band, but **stays under 0.45** — no mid-trust wash for seed-only / edge-salvage pins
+
 ### Local: defer only with no audio and no tags
 - If any section has real audio → place (weak/low-trust when partial)
 - If no waveform but genre/path/keyword tags exist → **conclude** on that seed (`seed only`, low-trust), not defer

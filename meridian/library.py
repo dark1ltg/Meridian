@@ -512,7 +512,7 @@ class Library:
     ) -> int:
         from statistics import median
 
-        from meridian.features import confidence_low_trust
+        from meridian.features import CONFIDENCE_LOW, confidence_low_trust
 
         with self.lock:
             rows = self.conn.execute(group_sql).fetchall()
@@ -549,8 +549,14 @@ class Library:
                 if abs(v - v0) <= 1e-9 and abs(e - e0) <= 1e-9:
                     continue
                 conf0 = float(item["mood_confidence"] if item["mood_confidence"] is not None else 0.3)
-                # Snapping toward trusted neighbors raises confidence into mid band.
-                conf = min(0.62, max(conf0, 0.42) + 0.12)
+                # Tidy may bump confidence a bit when snapping toward neighbors — but
+                # never promote a sub-0.45 rough place (seed/edge salvage) into mid-trust.
+                # Position still clusters; the star stays dim / low-trust.
+                bumped = min(0.62, max(conf0, 0.42) + 0.12)
+                if conf0 < CONFIDENCE_LOW:
+                    conf = min(bumped, CONFIDENCE_LOW - 0.01)
+                else:
+                    conf = bumped
                 note = self._append_note(item["confidence_note"] if "confidence_note" in item.keys() else "", note_tag)
                 updates.append((v, e, conf, int(confidence_low_trust(conf)), note, int(item["id"])))
 
