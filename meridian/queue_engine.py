@@ -210,19 +210,23 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
             elif oc < 0.35:
                 importance -= 0.04
         # Prefer sure pins over dim scrapes at similar distance (Focus / NOW neighborhood).
-        conf = float(getattr(track, "mood_confidence", 0.5) or 0.5)
-        if track.low_trust:
+        # Keep the nudge light so it doesn't stack harshly with Focus onset_consistency;
+        # a closer dim neighbor must still be able to compete on combined score.
+        raw_conf = getattr(track, "mood_confidence", None)
+        conf = float(raw_conf) if raw_conf is not None else 0.5
+        if track.low_trust or conf <= 0.0:
+            # Exact 0.0 is rock-bottom / unsure — not medium (falsy `or 0.5` trap).
             importance -= 0.035
             fit *= 0.97
         else:
             # Subtle lift for fuller listens; stronger when confidence is clearly high.
             span = max(1e-6, 1.0 - CONFIDENCE_LOW)
-            conf_lift = 0.04 * max(0.0, min(1.0, (conf - CONFIDENCE_LOW) / span))
+            conf_lift = 0.025 * max(0.0, min(1.0, (conf - CONFIDENCE_LOW) / span))
             importance += conf_lift
             if conf >= CONFIDENCE_HIGH:
-                fit = min(1.0, fit + 0.015)
+                fit = min(1.0, fit + 0.01)
             if ctx.mode == Mode.FOCUS and conf >= CONFIDENCE_HIGH:
-                importance += 0.02
+                importance += 0.01
         importance = min(1.0, max(0.0, importance)) * (1.0 - 0.45 * skip_ratio)
         # High skip pressure softens NOW stickiness (favor exploring the ring).
         urgency = fit * (1.0 - 0.18 * pressure)

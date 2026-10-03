@@ -914,9 +914,12 @@ LONG_SINGLE_WINDOW_S = 28.0
 SECTION_MIN_GAP_S = 8.0
 # Mid-heavy blend for intro / mid / late when all three are usable.
 SECTION_BLEND_WEIGHTS = {"intro": 0.20, "mid": 0.50, "late": 0.30}
-# When mid+late agree closely, trust the body — intro cannot yank the pin.
-SECTION_BODY_AGREE_WEIGHTS = {"intro": 0.10, "mid": 0.56, "late": 0.34}
+# When mid+late agree closely *and* intro is meaningfully offset (not a mild
+# build-up), soft-bias the body — still leave intro more say than cold-open/outlier.
+SECTION_BODY_AGREE_WEIGHTS = {"intro": 0.15, "mid": 0.53, "late": 0.32}
 SECTION_BODY_AGREE_MAX = 0.12
+# Below this, a normal intro keeps default 20/50/30 even if mid+late sit close.
+SECTION_BODY_AGREE_INTRO_MIN = 0.16
 # Shrunk outlier intro keeps a tiny coord nudge but must not poison merge health
 # (unstable / variation) — same spirit as zero-weight cold-open (rehunt score 5).
 SECTION_OUTLIER_INTRO_WEIGHT = 0.08
@@ -1194,8 +1197,9 @@ def _merge_section_profiles(role_profiles: dict[str, object]):
         weights["intro"] = SECTION_OUTLIER_INTRO_WEIGHT
         weights["mid"] = 0.55
         weights["late"] = 0.37
-    elif mid_late_close:
-        # Path-to-9: mid+late agree closely → trust body; intro can't yank the pin.
+    elif mid_late_close and intro_vs_body > SECTION_BODY_AGREE_INTRO_MIN:
+        # Path-to-9: mid+late agree closely + intro clearly offset → soft body bias.
+        # Mild/normal intros keep default blend so build-ups aren't half-muted.
         weights = dict(SECTION_BODY_AGREE_WEIGHTS)
 
     # Strong mid vs late disagreement: prefer stabler body, inject from active loser.
@@ -1618,7 +1622,10 @@ def analyze_audio(
         if onset_c > 0.70 and disagree > 0.12:
             widened = min(0.13, SOFT_PCM_MAX_SHIFT * 1.45)
             soft_shift_v = widened
-            soft_shift_e = widened
+            # Kinetic widen needs a truly solid onset — mid-shaky must not out-shove
+            # a clean listen on good tags (path-to-9 hunt score 5).
+            if variation < 0.22 and not unstable:
+                soft_shift_e = widened
             pcm_w_v, pcm_w_e = 0.55, 0.62
             clamp_shift = min(PCM_STRONG_ONSET_MAX, PCM_MAX_SHIFT * 1.25)
         elif unstable or onset_c < 0.35:
@@ -1679,9 +1686,17 @@ def analyze_audio(
             else:
                 pcm_claim = 0.85
             transfer = conflict_amt * pcm_claim
-            # Soft residual: open the envelope a little with freed metadata weight.
-            soft_shift_v = min(0.12, soft_shift_v + transfer * 0.045)
-            soft_shift_e = min(0.11, soft_shift_e + transfer * 0.035)
+            # Soft residual: open the envelope with freed metadata weight.
+            # Never claw back room evidence/structure already opened; only widen
+            # up to the evidence-soft ceilings.
+            soft_shift_v = max(
+                soft_shift_v,
+                min(EVIDENCE_SOFT_VALENCE_MAX, soft_shift_v + transfer * 0.045),
+            )
+            soft_shift_e = max(
+                soft_shift_e,
+                min(EVIDENCE_SOFT_ENERGY_MAX, soft_shift_e + transfer * 0.035),
+            )
             # Clamp blend: move weight from seed → PCM (capped; not untagged-level).
             pcm_w_v = min(0.58, pcm_w_v + transfer * 0.18)
             pcm_w_e = min(0.72, pcm_w_e + transfer * 0.18)
