@@ -106,8 +106,15 @@ def ffmpeg_missing_status() -> str:
 
 
 def _rotational_from_sysfs(sys_node: Path) -> bool | None:
-    """Walk *sys_node* (and parents) for ``queue/rotational``."""
-    cur = sys_node
+    """Walk *sys_node* (and parents) for ``queue/rotational``.
+
+    Resolves sysfs symlinks first so partitions like ``nvme0n1p2`` climb to the
+    parent disk node that actually owns ``queue/rotational``.
+    """
+    try:
+        cur = sys_node.resolve()
+    except OSError:
+        cur = sys_node
     for _ in range(8):
         rot = cur / "queue" / "rotational"
         if rot.is_file():

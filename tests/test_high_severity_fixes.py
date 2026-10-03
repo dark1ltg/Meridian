@@ -213,6 +213,9 @@ def test_analyze_done_disposes_stale_generation(qapp) -> None:
     win._analyze_gen = 5
     win._analyze_thread = object()  # newer analyze
     win._analyze_worker = object()
+    win._analyze_pool = []
+    win._analyze_remaining = 0
+    win._analyze_run_tidy = False
     win._clear_job_status = lambda: None
     win._set_status = lambda *_a: None
     win._set_job_status = lambda *_a: None
