@@ -405,7 +405,7 @@ class Library:
                         onset_consistency = ?,
                         acoustic_flux = ?,
                         brightness = ?,
-                        shape_note = ?,
+                        shape_note = COALESCE(?, shape_note),
                         timbre_flag = ?,
                         timbre_source = ?,
                         steer_weight = ?,
@@ -465,7 +465,9 @@ class Library:
                         shape_note = COALESCE(?, shape_note),
                         timbre_flag = COALESCE(?, timbre_flag),
                         timbre_source = COALESCE(?, timbre_source),
-                        steer_weight = COALESCE(?, steer_weight),
+                        steer_weight = CASE
+                            WHEN brightness IS NOT NULL OR acoustic_flux IS NOT NULL THEN steer_weight
+                            ELSE COALESCE(?, steer_weight) END,
                         analyzed = 1
                     WHERE id = ?
                     """,

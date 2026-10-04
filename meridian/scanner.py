@@ -359,6 +359,9 @@ class AnalyzeWorker(QObject):
                                 shape_note=result.shape_note,
                                 timbre_flag=result.timbre_flag,
                                 timbre_source=result.timbre_source,
+                                # Seed conclude: only stamp steer when there is no
+                                # prior PCM (library CASE also guards). Never pass a
+                                # weak 0.05 over a real listen via COALESCE alone.
                                 steer_weight=result.steer_weight,
                                 from_pcm=False,
                             )
