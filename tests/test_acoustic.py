@@ -608,3 +608,45 @@ def test_conflict_soft_keeps_evidence_kinetic_room() -> None:
     assert moved_e <= max(EVIDENCE_SOFT_ENERGY_MAX, min(0.13, SOFT_PCM_MAX_SHIFT * 1.45)) + 1e-9
     assert moved_v >= min(EVIDENCE_SOFT_VALENCE_MAX, abs(profile.valence - seed.valence)) - 1e-6
     assert moved_v <= EVIDENCE_SOFT_VALENCE_MAX + 1e-9
+
+
+def test_loudness_normalization_equalizes_static_masters() -> None:
+    """Upgrade 3: hot vs quiet static tones must not diverge on Kinetic via RMS."""
+    from meridian.acoustic import build_profile, normalize_analysis_loudness
+
+    sr = SAMPLERATE
+    t = np.arange(sr * 4, dtype=np.float32) / sr
+    tone = np.sin(2 * np.pi * 220 * t).astype(np.float32)
+    quiet = (0.05 * tone).astype(np.float32)
+    hot = (0.85 * tone).astype(np.float32)
+    nq, rq = normalize_analysis_loudness(quiet)
+    nh, rh = normalize_analysis_loudness(hot)
+    assert rh > rq * 5
+    # After norm, RMS lands near the shared target.
+    rms_q = float(np.sqrt(np.mean(np.square(nq))))
+    rms_h = float(np.sqrt(np.mean(np.square(nh))))
+    assert abs(rms_q - rms_h) < 0.02
+    pq = build_profile(quiet)
+    ph = build_profile(hot)
+    assert abs(pq.energy - ph.energy) < 0.05
+    assert pq.tonal > 0.5 and ph.tonal > 0.5
+
+
+def test_timbre_flag_persists_tonal_vs_noisy() -> None:
+    """Upgrade 4: tonal tone vs noise get distinct timbre leftovers."""
+    from meridian.acoustic import build_profile
+    from meridian.features import _timbre_flag_from_tonal
+
+    sr = SAMPLERATE
+    t = np.arange(sr * 4, dtype=np.float32) / sr
+    tonal_pcm = (0.4 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    rng = np.random.default_rng(0)
+    noisy_pcm = (rng.standard_normal(sr * 4).astype(np.float32) * 0.35)
+    pt = build_profile(tonal_pcm)
+    pn = build_profile(noisy_pcm)
+    assert pt.tonal > pn.tonal + 0.12
+    assert _timbre_flag_from_tonal(pt.tonal) == "tonal"
+    # White noise may land mid-band after norm; flag only when clearly noisy.
+    flag_n = _timbre_flag_from_tonal(pn.tonal)
+    assert flag_n in (None, "noisy")
+    assert flag_n != "tonal"

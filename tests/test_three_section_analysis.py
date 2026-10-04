@@ -335,10 +335,11 @@ def test_decode_long_track_three_windows_mid_heavy_merge() -> None:
 
     features.clear_decode_abort()
     starts: list[float] = []
+    durations: list[float] = []
 
     def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
         starts.append(float(start_s))
-        assert abs(duration_s - 12.0) < 1e-6
+        durations.append(float(duration_s))
         return np.ones(11025 * 4, dtype=np.float32) * 0.05
 
     built = [
@@ -356,7 +357,10 @@ def test_decode_long_track_three_windows_mid_heavy_merge() -> None:
     assert pcm is not None
     assert merged is not None
     assert partial is False
-    assert len(starts) == 3
+    # Short head probe at 0, then three 12s section windows.
+    assert len(starts) == 4
+    assert abs(durations[0] - features.PROBE_HEAD_S) < 1e-6
+    assert all(abs(d - 12.0) < 1e-6 for d in durations[1:])
     assert abs(merged.valence - 0.5) < abs(merged.valence - 0.2)
     assert abs(merged.valence - 0.5) < abs(merged.valence - 0.8)
 
@@ -534,12 +538,16 @@ def test_silent_intro_mid_late_not_weak_fallback() -> None:
         _prof(valence=0.55, energy=0.60, onset_consistency=0.85, variation=0.08),
         _prof(valence=0.58, energy=0.62, onset_consistency=0.82, variation=0.09),
     ]
+    plan = features._analysis_window_plan(210_000)
+    mid_start = plan[1][1]
+    late_start = plan[2][1]
 
     def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
-        # Intro @ 0 is silence (signal gate fails); mid/late return audio.
-        if abs(start_s) < 0.01:
-            return np.zeros(11025 * 4, dtype=np.float32)
-        return np.ones(11025 * 4, dtype=np.float32) * 0.05
+        # Head / intro region is silence (probe + intro@0); mid/late return audio.
+        # Keep early probes quiet so audible-span does not rebase the whole plan.
+        if abs(start_s - mid_start) < 0.5 or abs(start_s - late_start) < 0.5:
+            return np.ones(11025 * 4, dtype=np.float32) * 0.05
+        return np.zeros(11025 * 4, dtype=np.float32)
 
     def fake_signal_ok(pcm: np.ndarray) -> bool:
         return float(np.sqrt(np.mean(np.square(pcm)))) > 1e-4
@@ -769,12 +777,16 @@ def test_hard_decode_miss_skips_same_seek_reffmpeg() -> None:
             )
     assert pcm is None
     assert merged is None
-    # 3 section seeks + at most one distinct mid_fb — not 3+3+mid_fb (=7).
-    assert len(calls) <= 4
-    # Section starts appear once each.
+    # Head probe miss at 0 + 3 section seeks + optional mid_fb. Intro@0 may
+    # retry after a short-probe miss (full 12s) — still no silence-fallback loop.
+    assert len(calls) <= 5
+    # Section starts appear once each (0 may also appear as the probe).
     plan = features._analysis_window_plan(210_000)
     for _role, ss in plan:
-        assert calls.count(float(ss)) == 1
+        if abs(float(ss)) < 0.01:
+            assert calls.count(float(ss)) <= 2
+        else:
+            assert calls.count(float(ss)) == 1
 
 
 def test_unknown_duration_decodes_long_single_window() -> None:
@@ -863,3 +875,137 @@ def test_mid_only_full_pcm_not_multi_window() -> None:
     assert "PCM fallback" not in (result.confidence_note or "")
     assert "multi-window" not in (result.confidence_note or "")
     assert "PCM" in (result.confidence_note or "")
+
+
+def test_audible_span_shifts_plan_off_silent_head() -> None:
+    """Upgrade 2: quiet intro probe rebases intro/mid/late onto the audible span."""
+    from meridian import features
+
+    features.clear_decode_abort()
+    starts: list[tuple[float, float]] = []
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        starts.append((float(start_s), float(duration_s)))
+        # Silence for the first ~8s; audio afterward.
+        if start_s < 8.0:
+            return np.zeros(11025 * 4, dtype=np.float32)
+        return np.ones(11025 * 4, dtype=np.float32) * 0.05
+
+    def fake_signal_ok(pcm: np.ndarray) -> bool:
+        return float(np.sqrt(np.mean(np.square(pcm)))) > 1e-4
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(features, "_pcm_signal_ok", side_effect=fake_signal_ok):
+            with patch(
+                "meridian.acoustic.build_profile",
+                side_effect=lambda pcm: _prof(valence=0.5, energy=0.55),
+            ):
+                pcm, partial, merged, edge = features._decode_pcm_with_fallback(
+                    "/game-cue.wav", duration_ms=210_000
+                )
+    assert pcm is not None
+    assert merged is not None
+    assert edge is None
+    # Section windows should start on/after the first audible probe (~9s step).
+    section = [(s, d) for s, d in starts if abs(d - 12.0) < 0.5]
+    assert len(section) == 3
+    assert section[0][0] >= 8.0 - 1e-6
+    assert section[1][0] > section[0][0]
+    assert section[2][0] > section[1][0]
+
+
+def test_shape_note_from_roles_vocabulary() -> None:
+    """Upgrade 1: clear arcs → build/drop/bookend; mild → steady."""
+    from meridian.features import shape_note_from_roles
+
+    assert (
+        shape_note_from_roles(
+            {
+                "intro": _prof(valence=0.4, energy=0.30),
+                "mid": _prof(valence=0.5, energy=0.70),
+                "late": _prof(valence=0.5, energy=0.65),
+            }
+        )
+        == "drop"
+    )
+    assert (
+        shape_note_from_roles(
+            {
+                "intro": _prof(valence=0.4, energy=0.30),
+                "mid": _prof(valence=0.5, energy=0.50),
+                "late": _prof(valence=0.55, energy=0.75),
+            }
+        )
+        == "build"
+    )
+    assert (
+        shape_note_from_roles(
+            {
+                "intro": _prof(valence=0.5, energy=0.70),
+                "mid": _prof(valence=0.5, energy=0.35),
+                "late": _prof(valence=0.5, energy=0.72),
+            }
+        )
+        == "bookend"
+    )
+    assert (
+        shape_note_from_roles(
+            {
+                "intro": _prof(valence=0.50, energy=0.50),
+                "mid": _prof(valence=0.51, energy=0.51),
+                "late": _prof(valence=0.52, energy=0.52),
+            }
+        )
+        == "steady"
+    )
+    assert shape_note_from_roles({"mid": _prof(valence=0.5, energy=0.5)}) is None
+
+
+def test_steer_weight_seed_and_intro_near_zero() -> None:
+    """Upgrade 5: seed-only / intro-only are not safe to steer."""
+    from meridian.features import steer_weight_from_listen
+
+    assert (
+        steer_weight_from_listen(
+            pcm_ok=False,
+            multi_window=False,
+            pcm_fallback=False,
+            pcm_unstable=False,
+            edge_salvage=None,
+            seed_evidence=True,
+        )
+        <= 0.08
+    )
+    assert (
+        steer_weight_from_listen(
+            pcm_ok=True,
+            multi_window=False,
+            pcm_fallback=True,
+            pcm_unstable=False,
+            edge_salvage="intro",
+            seed_evidence=True,
+        )
+        <= 0.08
+    )
+    assert (
+        steer_weight_from_listen(
+            pcm_ok=True,
+            multi_window=True,
+            pcm_fallback=False,
+            pcm_unstable=False,
+            edge_salvage=None,
+            seed_evidence=True,
+            variation=0.1,
+        )
+        >= 0.9
+    )
+
+
+def test_merge_attaches_shape_note() -> None:
+    from meridian.features import _merge_pcm_profiles
+
+    intro = _prof(valence=0.4, energy=0.30)
+    mid = _prof(valence=0.5, energy=0.70)
+    late = _prof(valence=0.5, energy=0.66)
+    merged = _merge_pcm_profiles(None, role_profiles={"intro": intro, "mid": mid, "late": late})
+    assert merged.shape_note == "drop"
