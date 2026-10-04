@@ -315,6 +315,11 @@ class MoodResult:
     onset_consistency: float | None = None
     acoustic_flux: float | None = None
     brightness: float | None = None
+    # Shape / timbre / steer leftovers — queue hints, not map axes.
+    shape_note: str | None = None
+    timbre_flag: str | None = None  # "tonal" | "noisy"
+    timbre_source: str | None = None  # "vocal" | "instrumental"
+    steer_weight: float | None = None
     pcm_ok: bool = False
     # Genre/path/keyword evidence usable when waveform decode finds nothing.
     seed_evidence: bool = False
@@ -924,6 +929,17 @@ SECTION_BODY_AGREE_INTRO_MIN = 0.16
 # (unstable / variation) — same spirit as zero-weight cold-open (rehunt score 5).
 SECTION_OUTLIER_INTRO_WEIGHT = 0.08
 SECTION_HEALTH_WEIGHT_MIN = 0.10
+# Audible-span probe: short head check so silent intros do not burn a full 12s.
+PROBE_HEAD_S = 1.5
+PROBE_STEP_S = 3.0
+# Cap how far we hunt for the first audible sample (keeps total listen budget small).
+AUDIBLE_SEARCH_MAX_S = 21.0
+# Shape note: only label when windows disagree / agree clearly enough.
+SHAPE_DISAGREE_CLEAR = 0.14
+SHAPE_ENERGY_SPAN_CLEAR = 0.10
+# Timbre flag thresholds on profile.tonal.
+TIMBRE_TONAL_MIN = 0.58
+TIMBRE_NOISY_MAX = 0.42
 
 
 def _duration_s(duration_ms: int) -> float:
@@ -940,19 +956,37 @@ def _clamp_seek_s(start_s: float, duration_s: float, window_s: float = SECTION_W
     return float(min(seek, max_start))
 
 
-def _analysis_window_plan(duration_ms: int) -> list[tuple[str, float]]:
+def _analysis_window_plan(
+    duration_ms: int, *, audible_start_s: float = 0.0
+) -> list[tuple[str, float]]:
     """Return ordered ``(role, start_s)`` windows — 1, 2, or 3 distinct tastes.
 
     Long tracks: intro / mid / late at 12s each (~36s budget).
     Short / unknown: never triple-sample the same audio.
+    When ``audible_start_s`` > 0 (silent/front-pad intro), windows sit on the
+    audible span so budget is not spent on near-silence — mid/late stay relative
+    to that span. Flashy first-hit poison is still handled by cold-open / outlier
+    intro merge weights, not by parking the sting as the sole mid window.
     """
     dur_s = _duration_s(duration_ms)
     win = SECTION_WINDOW_S
     gap = SECTION_MIN_GAP_S
+    offset = max(0.0, float(audible_start_s))
 
     if dur_s <= 0.0:
-        # Unknown duration: single listen from 0 (decode uses LONG_SINGLE_WINDOW_S).
-        return [("mid", 0.0)]
+        # Unknown duration: single listen — from audible start when probed.
+        return [("mid", offset if offset > 0.0 else 0.0)]
+
+    # Effective timeline for planning: [offset, dur_s].
+    if offset > 0.0:
+        if offset >= dur_s - 2.0:
+            return [("mid", _clamp_seek_s(max(0.0, dur_s - win), dur_s, win))]
+        # Plan as if the audible span were the whole track, then shift seeks.
+        span_ms = max(1, int(round((dur_s - offset) * 1000.0)))
+        inner = _analysis_window_plan(span_ms, audible_start_s=0.0)
+        return [
+            (role, _clamp_seek_s(offset + start, dur_s, win)) for role, start in inner
+        ]
 
     if dur_s < 18.0:
         return [("mid", 0.0)]
@@ -988,6 +1022,82 @@ def _analysis_window_plan(duration_ms: int) -> list[tuple[str, float]]:
     return [("intro", intro), ("mid", mid), ("late", late)]
 
 
+def _probe_head_status(
+    path: str, start_s: float, *, duration_s: float = PROBE_HEAD_S
+) -> str:
+    """Return ``ok`` / ``quiet`` / ``miss`` for a short head probe."""
+    if decode_abort_requested():
+        return "miss"
+    pcm = _decode_pcm(path, start_s=float(start_s), duration_s=float(duration_s))
+    if pcm is None:
+        return "miss"
+    return "ok" if _pcm_signal_ok(pcm) else "quiet"
+
+
+def _probe_signal_at(path: str, start_s: float, *, duration_s: float = PROBE_HEAD_S) -> bool:
+    """True when a short decode at ``start_s`` still has usable energy."""
+    return _probe_head_status(path, start_s, duration_s=duration_s) == "ok"
+
+
+def _find_audible_start(
+    path: str,
+    duration_ms: int,
+    *,
+    from_s: float = 0.0,
+    max_search_s: float = AUDIBLE_SEARCH_MAX_S,
+) -> float | None:
+    """First seek with audible content within a capped search, or None."""
+    dur_s = _duration_s(duration_ms)
+    start = max(0.0, float(from_s))
+    limit = float(max_search_s)
+    if dur_s > 0.0:
+        limit = min(limit, max(0.0, dur_s - 2.0))
+    t = start
+    while t <= start + limit + 1e-9:
+        if decode_abort_requested():
+            return None
+        status = _probe_head_status(path, t)
+        if status == "ok":
+            return float(t)
+        if status == "miss":
+            # Hard miss mid-search: stop burning ffmpeg on a broken file.
+            return None
+        t += PROBE_STEP_S
+    return None
+
+
+def _audible_span_offset(path: str, duration_ms: int) -> tuple[float, str]:
+    """Probe the head; if near-silent, return ``(first_audible_seek, head_status)``.
+
+    Spends only short probes — never a full 12s on a silent game-cue intro.
+    Hard miss at 0 does not scan forward (section path handles the file).
+    """
+    if decode_abort_requested():
+        return 0.0, "miss"
+    head = _probe_head_status(path, 0.0)
+    if head == "ok":
+        return 0.0, head
+    if head == "miss":
+        return 0.0, head
+    found = _find_audible_start(
+        path, duration_ms, from_s=PROBE_STEP_S, max_search_s=AUDIBLE_SEARCH_MAX_S
+    )
+    return (float(found), head) if found is not None else (0.0, head)
+
+
+def _leading_silence_s(pcm: np.ndarray, samplerate: int = 11025, floor: float = 0.012) -> float:
+    """Seconds of leading near-silence inside an already-decoded buffer."""
+    if pcm is None or pcm.size < 4096:
+        return 0.0
+    abs_p = np.abs(np.ascontiguousarray(pcm, dtype=np.float32))
+    peak = float(np.max(abs_p) + 1e-12)
+    thr = max(floor * peak, 1e-4)
+    idx = np.where(abs_p >= thr)[0]
+    if idx.size < 2048:
+        return 0.0
+    return float(idx[0]) / float(samplerate)
+
+
 def _primary_seek_s(duration_ms: int) -> float:
     """Compat: first planned window start (0 for short/unknown)."""
     plan = _analysis_window_plan(duration_ms)
@@ -1000,6 +1110,125 @@ def _secondary_seek_s(duration_ms: int) -> float | None:
     if len(plan) < 2:
         return None
     return float(plan[1][1])
+
+
+def _timbre_flag_from_tonal(tonal: float | None) -> str | None:
+    """Map continuous tonal score to a tiny persisted vocabulary."""
+    if tonal is None:
+        return None
+    t = float(tonal)
+    if not np.isfinite(t):
+        return None
+    if t >= TIMBRE_TONAL_MIN:
+        return "tonal"
+    if t <= TIMBRE_NOISY_MAX:
+        return "noisy"
+    return None
+
+
+def shape_note_from_roles(role_profiles: dict[str, object]) -> str | None:
+    """Tiny shape vocabulary from intro/mid/late disagreement — or None.
+
+    ``steady`` when multi-window and mild; ``build`` / ``drop`` / ``bookend``
+    only when the energy arc is clear. Not a map axis — queue + stored note.
+    """
+    if not role_profiles or len(role_profiles) < 2:
+        return None
+    roles = [r for r in ("intro", "mid", "late") if r in role_profiles]
+    if len(roles) < 2:
+        return None
+
+    def _e(role: str) -> float:
+        return float(getattr(role_profiles[role], "energy", 0.5) or 0.5)
+
+    def _v(role: str) -> float:
+        return float(getattr(role_profiles[role], "valence", 0.5) or 0.5)
+
+    max_disagree = 0.0
+    for i, ra in enumerate(roles):
+        for rb in roles[i + 1 :]:
+            d = float(np.hypot(_v(ra) - _v(rb), _e(ra) - _e(rb)))
+            if d > max_disagree:
+                max_disagree = d
+    energies = [_e(r) for r in roles]
+    span = float(max(energies) - min(energies))
+
+    intro_e = _e("intro") if "intro" in role_profiles else None
+    mid_e = _e("mid") if "mid" in role_profiles else None
+    late_e = _e("late") if "late" in role_profiles else None
+
+    clear = max_disagree >= SHAPE_DISAGREE_CLEAR or span >= SHAPE_ENERGY_SPAN_CLEAR
+    if not clear:
+        # Multi-window mild agreement → steady (still useful for queue).
+        return "steady"
+
+    # bookend: hot edges, calm mid
+    if intro_e is not None and mid_e is not None and late_e is not None:
+        if (
+            intro_e > mid_e + 0.08
+            and late_e > mid_e + 0.08
+            and 0.5 * (intro_e + late_e) > mid_e + 0.10
+        ):
+            return "bookend"
+        # drop: quiet/soft open into a hotter body (or falling after a hot open)
+        if mid_e > intro_e + 0.10 and mid_e >= late_e - 0.05:
+            return "drop"
+        if intro_e > mid_e + 0.10 and (late_e is None or mid_e >= late_e - 0.04):
+            return "drop"
+        # build: rising arc
+        if mid_e >= intro_e - 0.02 and late_e > mid_e + 0.06 and late_e > intro_e + 0.10:
+            return "build"
+        if late_e > intro_e + 0.12 and mid_e >= intro_e - 0.02:
+            return "build"
+
+    if intro_e is not None and late_e is not None and mid_e is None:
+        if late_e > intro_e + 0.12:
+            return "build"
+        if intro_e > late_e + 0.12:
+            return "drop"
+
+    if intro_e is not None and mid_e is not None and late_e is None:
+        if mid_e > intro_e + 0.12:
+            return "drop"
+        if mid_e > intro_e + 0.08:
+            return "build"
+
+    if mid_e is not None and late_e is not None and intro_e is None:
+        if late_e > mid_e + 0.12:
+            return "build"
+        if mid_e > late_e + 0.12:
+            return "drop"
+
+    # Clear disagreement without a clean archetype — still mark steady vs inventing.
+    return "steady"
+
+
+def steer_weight_from_listen(
+    *,
+    pcm_ok: bool,
+    multi_window: bool,
+    pcm_fallback: bool,
+    pcm_unstable: bool,
+    edge_salvage: str | None,
+    seed_evidence: bool,
+    variation: float = 0.0,
+) -> float:
+    """How safe this placement is to steer the queue (0 ≈ seed/intro-only)."""
+    if not pcm_ok:
+        return 0.05 if seed_evidence else 0.0
+    if edge_salvage == "intro":
+        return 0.05
+    if edge_salvage in ("late", "ends"):
+        return 0.22
+    if edge_salvage == "mid":
+        return 0.35
+    if multi_window and not pcm_unstable and variation < 0.28:
+        return 0.95
+    if multi_window:
+        return 0.78
+    if pcm_fallback or pcm_unstable:
+        return 0.32
+    return 0.70
 
 
 def _profile_stability(p) -> float:
@@ -1019,6 +1248,35 @@ def _is_cold_open_profile(p) -> bool:
         and float(getattr(p, "onset_rate", 0.0) or 0.0) < 0.45
         and float(p.energy_mean) < 0.42
     )
+
+
+def _avg_tonal(profiles: list, weights: list[float] | None = None) -> float:
+    if not profiles:
+        return 0.5
+    if weights is None:
+        return float(np.mean([float(getattr(p, "tonal", 0.5) or 0.5) for p in profiles]))
+    total = sum(max(0.0, float(w)) for w in weights)
+    if total <= 1e-12:
+        return float(getattr(profiles[0], "tonal", 0.5) or 0.5)
+    return float(
+        sum(float(getattr(p, "tonal", 0.5) or 0.5) * max(0.0, float(w)) for p, w in zip(profiles, weights))
+        / total
+    )
+
+
+def _pick_timbre_source(profiles: list, weights: list[float] | None = None) -> str | None:
+    """Prefer the heaviest-weighted non-None timbre_source."""
+    best: str | None = None
+    best_w = -1.0
+    for i, p in enumerate(profiles):
+        src = getattr(p, "timbre_source", None)
+        if not src:
+            continue
+        w = float(weights[i]) if weights is not None else 1.0
+        if w > best_w:
+            best_w = w
+            best = str(src)
+    return best
 
 
 def _merge_two_pcm_profiles(primary, secondary):
@@ -1060,6 +1318,8 @@ def _merge_two_pcm_profiles(primary, secondary):
         if loser_more_active:
             # Persist the active window's motion cues for Focus / album spread.
             ostats_src = loser if float(loser.onset_rate) >= float(winner.onset_rate) else winner
+        tonal = _avg_tonal([winner, loser], [1.0 - inj_v, inj_v])
+        timbre_source = _pick_timbre_source([winner, loser], [1.0 - inj_v, inj_v])
     else:
         # Mild disagreement: lean toward the stabler window.
         wp = 0.62 if primary is winner else 0.38
@@ -1076,6 +1336,8 @@ def _merge_two_pcm_profiles(primary, secondary):
         variation = float(wp * primary.variation + ws * secondary.variation)
         unstable = bool(primary.unstable or secondary.unstable)
         ostats_src = winner
+        tonal = _avg_tonal([primary, secondary], [wp, ws])
+        timbre_source = _pick_timbre_source([primary, secondary], [wp, ws])
 
     return AcousticProfile(
         valence=float(np.clip(valence, 0.03, 0.97)),
@@ -1096,6 +1358,9 @@ def _merge_two_pcm_profiles(primary, secondary):
         variation=variation,
         window_count=int(primary.window_count + secondary.window_count),
         pcm_samples=int(primary.pcm_samples + secondary.pcm_samples),
+        tonal=float(np.clip(tonal, 0.05, 0.95)),
+        timbre_source=timbre_source,
+        shape_note=None,
     )
 
 
@@ -1133,6 +1398,8 @@ def _weighted_profile_blend(items: list[tuple[object, float]]):
     bpms = [float(p.bpm) for p, _w in normed if getattr(p, "bpm", None) is not None]
     bpm = float(np.median(bpms)) if bpms else None
     bands = dict(anchor.band_energy)
+    profiles = [p for p, _w in normed]
+    weights = [w for _p, w in normed]
     return AcousticProfile(
         valence=float(np.clip(_avg("valence"), 0.03, 0.97)),
         energy=float(np.clip(_avg("energy"), 0.03, 0.97)),
@@ -1152,7 +1419,20 @@ def _weighted_profile_blend(items: list[tuple[object, float]]):
         variation=float(max(float(p.variation) for p, _w in health_normed)),
         window_count=int(sum(int(p.window_count) for p, _w in normed)),
         pcm_samples=int(sum(int(p.pcm_samples) for p, _w in normed)),
+        tonal=float(np.clip(_avg_tonal(profiles, weights), 0.05, 0.95)),
+        timbre_source=_pick_timbre_source(profiles, weights),
+        shape_note=None,
     )
+
+
+def _attach_shape(profile, role_profiles: dict[str, object]):
+    """Stamp shape_note onto a merged profile from role-tagged windows."""
+    note = shape_note_from_roles(role_profiles)
+    try:
+        profile.shape_note = note
+    except Exception:
+        pass
+    return profile
 
 
 def _merge_section_profiles(role_profiles: dict[str, object]):
@@ -1160,20 +1440,24 @@ def _merge_section_profiles(role_profiles: dict[str, object]):
     if not role_profiles:
         raise ValueError("role_profiles must not be empty")
     if len(role_profiles) == 1:
-        return next(iter(role_profiles.values()))
+        sole = next(iter(role_profiles.values()))
+        return _attach_shape(sole, role_profiles)
     if len(role_profiles) == 2:
         # Preserve dual-window stabler/inject behavior for two survivors.
         ordered = [role_profiles[k] for k in ("intro", "mid", "late") if k in role_profiles]
         if len(ordered) == 2:
-            return _merge_two_pcm_profiles(ordered[0], ordered[1])
-        return _merge_two_pcm_profiles(*ordered)
+            merged = _merge_two_pcm_profiles(ordered[0], ordered[1])
+        else:
+            merged = _merge_two_pcm_profiles(*ordered)
+        return _attach_shape(merged, role_profiles)
 
     intro = role_profiles.get("intro")
     mid = role_profiles.get("mid")
     late = role_profiles.get("late")
     if intro is None or mid is None or late is None:
         ordered = [role_profiles[k] for k in ("intro", "mid", "late") if k in role_profiles]
-        return _merge_two_pcm_profiles(ordered[0], ordered[1])
+        merged = _merge_two_pcm_profiles(ordered[0], ordered[1])
+        return _attach_shape(merged, role_profiles)
 
     weights = dict(SECTION_BLEND_WEIGHTS)
     # Cold-open / silent intro must not veto a clear mid+late body.
@@ -1194,6 +1478,7 @@ def _merge_section_profiles(role_profiles: dict[str, object]):
     elif intro_vs_body > 0.22 and mid_late_agree:
         # Active-but-outlier intro (false cold? drama open): tiny coord nudge only.
         # Health excludes this weight via SECTION_HEALTH_WEIGHT_MIN (rehunt score 5).
+        # Also covers flashy first-hit after audible-span shift — do not poison body.
         weights["intro"] = SECTION_OUTLIER_INTRO_WEIGHT
         weights["mid"] = 0.55
         weights["late"] = 0.37
@@ -1207,16 +1492,18 @@ def _merge_section_profiles(role_profiles: dict[str, object]):
     if body_disagree > 0.18:
         body = _merge_two_pcm_profiles(mid, late)
         if weights["intro"] <= 1e-9:
-            return body
-        return _weighted_profile_blend([(intro, weights["intro"]), (body, 1.0 - weights["intro"])])
+            return _attach_shape(body, role_profiles)
+        merged = _weighted_profile_blend([(intro, weights["intro"]), (body, 1.0 - weights["intro"])])
+        return _attach_shape(merged, role_profiles)
 
-    return _weighted_profile_blend(
+    merged = _weighted_profile_blend(
         [
             (intro, weights["intro"]),
             (mid, weights["mid"]),
             (late, weights["late"]),
         ]
     )
+    return _attach_shape(merged, role_profiles)
 
 
 def _merge_pcm_profiles(primary, secondary=None, *, role_profiles: dict[str, object] | None = None):
@@ -1268,17 +1555,31 @@ def _decode_pcm_with_fallback(
     places (weak/low-trust if not a full honest body listen) — no defer-on-seed
     when music was heard. Dual-plan intro-only falls through to a ~28s
     single-window salvage from 0 / primary. Unknown duration uses that same ~28s
-    listen from 0. True silence / total decode failure still returns no PCM.
+    listen from the first audible sample (short head probe skips front-loaded
+    silence / game cues). True silence / total decode failure still returns no PCM.
     """
     from meridian.acoustic import build_profile
 
-    plan = _analysis_window_plan(duration_ms)
+    # Audible-span: for known durations, probe a short head; if near-silent, shift
+    # the plan onto the first window that has sound (mid/late stay on the audible
+    # span). Unknown duration skips the upfront probe — it listens ~28s once and
+    # may re-seek once if the buffer itself is front-loaded silence (game cues).
+    # Flashy first-hit poison stays handled by cold-open / outlier intro weights.
+    dur_s = _duration_s(duration_ms)
+    audible_off = 0.0
+    head_status = "ok"
+    skip_reseek_starts: set[float] = set()
+    if dur_s > 0.0:
+        audible_off, head_status = _audible_span_offset(path, duration_ms)
+        # Hard miss on the short probe does not blacklist the full section seek —
+        # only a failed SECTION_WINDOW decode spends that offset.
+        _ = head_status
+    plan = _analysis_window_plan(duration_ms, audible_start_s=audible_off)
     if not plan:
         return None, False, None, None
 
     # Seeks already tried: no-signal (energy gate) or hard decode miss — do not
     # blindly re-ffmpeg the same offsets in the silence-fallback pass (rehunt score 2).
-    skip_reseek_starts: set[float] = set()
     # Dual/long-plan salvage: section evidence failed → ~28s single listen.
     dual_salvage = False
     # If longer salvage fails, weak-place this stashed intro stub.
@@ -1368,9 +1669,8 @@ def _decode_pcm_with_fallback(
                 return role_pcm[rep], True, merged, tag
 
     # Single-window / silence-fallback / dual-salvage path.
-    dur_s = _duration_s(duration_ms)
     if dur_s <= 0.0 or dual_salvage:
-        # Unknown duration or intro-only salvage: prior ~28s single listen from 0.
+        # Unknown duration or intro-only salvage: prior ~28s single listen.
         win_s = LONG_SINGLE_WINDOW_S
     elif dur_s < 40.0:
         win_s = min(LONG_SINGLE_WINDOW_S, max(SECTION_WINDOW_S, dur_s))
@@ -1378,14 +1678,21 @@ def _decode_pcm_with_fallback(
         win_s = LONG_SINGLE_WINDOW_S
     starts = [float(ss) for _role, ss in plan]
     if dual_salvage:
-        # Prefer primary / 0 first for the long salvage listen.
+        # Prefer primary / audible-start first for the long salvage listen.
         primary = float(plan[0][1])
         starts = [primary] + [s for s in starts if abs(s - primary) > 1e-9]
     if dur_s > 0.0:
-        mid_fb = _clamp_seek_s(dur_s * 0.35, dur_s, win_s)
+        mid_fb = _clamp_seek_s(
+            (audible_off if audible_off > 0.0 else 0.0) + max(0.0, dur_s - audible_off) * 0.35,
+            dur_s,
+            win_s,
+        )
         if mid_fb not in starts:
             starts.append(mid_fb)
-    if 0.0 not in starts:
+    head = float(audible_off) if audible_off > 0.0 else 0.0
+    if head not in starts:
+        starts.append(head)
+    if 0.0 not in starts and audible_off <= 0.0:
         starts.append(0.0)
 
     seen: set[float] = set()
@@ -1398,6 +1705,14 @@ def _decode_pcm_with_fallback(
         seen.add(key)
         pcm = _decode_pcm(path, start_s=float(ss), duration_s=win_s)
         if pcm is not None and _pcm_signal_ok(pcm):
+            # Unknown-duration / single listen: if the buffer itself has a long
+            # silent head (game cue), spend one more listen from the first sound.
+            if dur_s <= 0.0 and not dual_salvage and index == 0 and abs(float(ss)) < 0.01:
+                lead = _leading_silence_s(pcm)
+                if lead >= 2.5:
+                    pcm2 = _decode_pcm(path, start_s=float(lead), duration_s=win_s)
+                    if pcm2 is not None and _pcm_signal_ok(pcm2):
+                        return pcm2, True, None, None
             # Longer salvage after multi-window honesty failed — still fallback-taxed.
             # If we only ever had intro evidence, keep the intro edge tag so a pad
             # head cannot look mid-trust after a ~28s re-listen of the same region.
@@ -1844,6 +2159,30 @@ def analyze_audio(
         confidence = min(float(confidence), CONFIDENCE_LOW - 0.01)
         if "seed only" not in note:
             note = f"{note} · seed only" if note else "seed only"
+
+    tonal = float(getattr(profile, "tonal", 0.5) or 0.5) if profile else None
+    timbre_flag = _timbre_flag_from_tonal(tonal) if pcm_ok else None
+    timbre_source = (
+        str(getattr(profile, "timbre_source", None) or "") or None if profile and pcm_ok else None
+    )
+    shape_note = (
+        str(getattr(profile, "shape_note", None) or "") or None if profile and pcm_ok else None
+    )
+    # Single-window listens do not get a multi-section shape.
+    if shape_note and not multi_window and edge_salvage not in ("ends",):
+        # ends salvage is dual-edge and may carry a shape; intro-only must not.
+        if edge_salvage:
+            shape_note = None
+    steer = steer_weight_from_listen(
+        pcm_ok=pcm_ok,
+        multi_window=multi_window,
+        pcm_fallback=pcm_fallback,
+        pcm_unstable=pcm_unstable,
+        edge_salvage=edge_salvage,
+        seed_evidence=seed_evidence,
+        variation=float(getattr(profile, "variation", 0.0) or 0.0) if profile else 0.0,
+    )
+
     return MoodResult(
         valence=float(valence),
         energy=float(energy),
@@ -1856,6 +2195,10 @@ def analyze_audio(
         ),
         acoustic_flux=float(getattr(profile, "flux", 0.0)) if profile else None,
         brightness=float(getattr(profile, "brightness", 0.5)) if profile else None,
+        shape_note=shape_note,
+        timbre_flag=timbre_flag,
+        timbre_source=timbre_source,
+        steer_weight=float(steer),
         pcm_ok=bool(pcm_ok),
         seed_evidence=seed_evidence,
     )
