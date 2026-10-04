@@ -29,16 +29,26 @@ jobs:
 
       - name: Verify artifact
         run: |
+          set -euo pipefail
           test -f dist/Meridian-x86_64.AppImage
-          sha256sum dist/Meridian-x86_64.AppImage | tee dist/Meridian-x86_64.AppImage.sha256
+          # Docker/proot builds leave dist root-owned on the bind mount; reclaim
+          # so chmod / checksum writes succeed on the runner user.
+          if [[ ! -w dist ]] || [[ ! -O dist/Meridian-x86_64.AppImage ]]; then
+            sudo chown -R "$(id -u):$(id -g)" dist
+          fi
+          chmod +x dist/Meridian-x86_64.AppImage
+          # Write checksum to runner temp (always writable); keep a copy in dist
+          # when possible for local/upload convenience.
+          SHA_FILE="${RUNNER_TEMP}/Meridian-x86_64.AppImage.sha256"
+          sha256sum dist/Meridian-x86_64.AppImage | tee "$SHA_FILE"
+          cp -f "$SHA_FILE" dist/Meridian-x86_64.AppImage.sha256
           # audit expects an AppDir (build script already audited during package);
           # fall back to extracting the AppImage if AppDir was cleaned up.
           if [[ -d dist/Meridian.AppDir ]]; then
             python3 packaging/audit-appimage-glibc.py dist/Meridian.AppDir
           else
-            mkdir -p /tmp/meridian-ai-audit
-            cd /tmp/meridian-ai-audit
-            chmod +x "$GITHUB_WORKSPACE/dist/Meridian-x86_64.AppImage"
+            mkdir -p "${RUNNER_TEMP}/meridian-ai-audit"
+            cd "${RUNNER_TEMP}/meridian-ai-audit"
             "$GITHUB_WORKSPACE/dist/Meridian-x86_64.AppImage" --appimage-extract >/dev/null
             python3 "$GITHUB_WORKSPACE/packaging/audit-appimage-glibc.py" squashfs-root
           fi
@@ -48,7 +58,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          SHA=$(cut -d' ' -f1 dist/Meridian-x86_64.AppImage.sha256)
+          SHA_FILE="${RUNNER_TEMP}/Meridian-x86_64.AppImage.sha256"
+          if [[ ! -f "$SHA_FILE" ]]; then
+            SHA_FILE=dist/Meridian-x86_64.AppImage.sha256
+          fi
+          SHA=$(cut -d' ' -f1 "$SHA_FILE")
           COMMIT=${GITHUB_SHA}
           NOTES="Meridian 1.3.6 — source archives + AppImage refreshed $(date -u +%Y-%m-%d). Version stays **1.3.6**.
 

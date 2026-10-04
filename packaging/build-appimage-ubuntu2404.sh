@@ -104,6 +104,23 @@ bootstrap_proot_packages() {
   '
 }
 
+reclaim_dist_ownership() {
+  # Container/proot runs as root and can leave dist unwritable to the host user
+  # (breaks CI steps that tee checksums into dist/).
+  if [[ ! -d "$DIST" ]]; then
+    return 0
+  fi
+  if [[ "$(id -u)" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ -O "$DIST" ]] && { [[ ! -e "${DIST}/${OUT_NAME}" ]] || [[ -O "${DIST}/${OUT_NAME}" ]]; }; then
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo chown -R "$(id -u):$(id -g)" "$DIST" || true
+  fi
+}
+
 run_container_build() {
   local bin
   bin="$(container_bin)"
@@ -115,6 +132,7 @@ run_container_build() {
     -e HOME=/tmp \
     meridian-u2404-build \
     bash packaging/build-appimage-ubuntu2404.sh --inside-container
+  reclaim_dist_ownership
 }
 
 run_proot_build() {
@@ -122,6 +140,7 @@ run_proot_build() {
   ensure_proot_rootfs
   bootstrap_proot_packages
   run_in_proot /usr/bin/bash -lc 'bash packaging/build-appimage-ubuntu2404.sh --inside-proot'
+  reclaim_dist_ownership
 }
 
 setup_venv_inside() {
