@@ -290,6 +290,9 @@ class MoodSeed:
     tag_key: str | None = None
     path_key: str | None = None
     keyword_hit: bool = False
+    # Raw keyword deltas (pre-jitter) so analyze can zero them on PCM contradiction.
+    keyword_dv: float = 0.0
+    keyword_de: float = 0.0
 
     @property
     def clamp_match(self) -> bool:
@@ -750,6 +753,8 @@ def genre_seed(
         tag_key=tag_key,
         path_key=path_key,
         keyword_hit=bool(abs(dv) > 1e-9 or abs(de) > 1e-9),
+        keyword_dv=float(dv),
+        keyword_de=float(de),
     )
 
 def genre_match(genre: str) -> str | None:
@@ -940,6 +945,14 @@ SHAPE_ENERGY_SPAN_CLEAR = 0.10
 # Timbre flag thresholds on profile.tonal.
 TIMBRE_TONAL_MIN = 0.58
 TIMBRE_NOISY_MAX = 0.42
+# Section blend: tonal×onset reweight floor so a sting cannot become the song.
+SECTION_TONAL_ONSET_FLOOR = 0.18
+SECTION_TONAL_ONSET_CAP = 0.70
+# Pulse clarity must permit BPM→Kinetic (muddy pulse skips the nudge).
+PULSE_CLARITY_BPM_MIN = 0.58
+# Spectral slope clarity: muffled stays nearer sticker; clear may move.
+SLOPE_MUFFLED_MAX = 0.38
+SLOPE_CLEAR_MIN = 0.55
 
 
 def _duration_s(duration_ms: int) -> float:
@@ -1270,6 +1283,23 @@ def _avg_tonal(profiles: list, weights: list[float] | None = None) -> float:
     )
 
 
+def _avg_attr(profiles: list, attr: str, default: float, weights: list[float] | None = None) -> float:
+    if not profiles:
+        return default
+    if weights is None:
+        return float(np.mean([float(getattr(p, attr, default) or default) for p in profiles]))
+    total = sum(max(0.0, float(w)) for w in weights)
+    if total <= 1e-12:
+        return float(getattr(profiles[0], attr, default) or default)
+    return float(
+        sum(
+            float(getattr(p, attr, default) or default) * max(0.0, float(w))
+            for p, w in zip(profiles, weights)
+        )
+        / total
+    )
+
+
 def _pick_timbre_source(profiles: list, weights: list[float] | None = None) -> str | None:
     """Prefer the heaviest-weighted non-None timbre_source."""
     best: str | None = None
@@ -1283,6 +1313,88 @@ def _pick_timbre_source(profiles: list, weights: list[float] | None = None) -> s
             best_w = w
             best = str(src)
     return best
+
+
+def _reweight_tonal_onset(
+    role_weights: dict[str, float],
+    role_profiles: dict[str, object],
+) -> dict[str, float]:
+    """Bias section blend toward tonal + real-onset windows; keep a share floor.
+
+    A single stingy/flashy window cannot monopolize the song body. Zero-weight
+    roles stay zero. If every survivor scores near zero, leave base weights.
+    """
+    from meridian.acoustic import tonal_onset_score
+
+    active = {r: float(w) for r, w in role_weights.items() if float(w) > 1e-12 and r in role_profiles}
+    if len(active) < 2:
+        return dict(role_weights)
+    scores = {r: float(tonal_onset_score(role_profiles[r])) for r in active}
+    if max(scores.values()) < 0.08:
+        return dict(role_weights)
+    boosted = {r: active[r] * (0.40 + 0.60 * scores[r]) for r in active}
+    total = sum(boosted.values())
+    if total <= 1e-12:
+        return dict(role_weights)
+    normed = {r: boosted[r] / total for r in boosted}
+    n = len(normed)
+    floor = min(SECTION_TONAL_ONSET_FLOOR, 1.0 / n)
+    # Enforce floor, then cap any single window so a sting cannot become the song.
+    for r in list(normed):
+        normed[r] = max(normed[r], floor)
+    total = sum(normed.values())
+    normed = {r: normed[r] / total for r in normed}
+    for r in list(normed):
+        if normed[r] > SECTION_TONAL_ONSET_CAP:
+            excess = normed[r] - SECTION_TONAL_ONSET_CAP
+            normed[r] = SECTION_TONAL_ONSET_CAP
+            others = [o for o in normed if o != r]
+            if others:
+                share = excess / len(others)
+                for o in others:
+                    normed[o] += share
+    total = sum(normed.values())
+    normed = {r: normed[r] / total for r in normed}
+    out = dict(role_weights)
+    for r, w in role_weights.items():
+        if float(w) <= 1e-12:
+            out[r] = 0.0
+        elif r in normed:
+            out[r] = float(normed[r])
+    return out
+
+
+def _keyword_contradicted_by_pcm(
+    *,
+    keyword_dv: float,
+    keyword_de: float,
+    seed_valence: float,
+    seed_energy: float,
+    pcm_valence: float,
+    pcm_energy: float,
+    onset_consistency: float,
+    unstable: bool,
+    variation: float,
+) -> bool:
+    """True when a steady listen clearly opposes the keyword nudge (genre untouched)."""
+    dv = float(keyword_dv)
+    de = float(keyword_de)
+    if abs(dv) < 0.04 and abs(de) < 0.04:
+        return False
+    if unstable or float(onset_consistency) < 0.55 or float(variation) > 0.28:
+        return False
+    base_v = float(seed_valence) - dv
+    base_e = float(seed_energy) - de
+    # Opposite direction from the keyword, with a clear gap (ignore keyword magnitude).
+    contra_v = (
+        abs(dv) >= 0.04
+        and (float(pcm_valence) - base_v) * float(np.sign(dv) or 1.0) < -0.10
+    )
+    contra_e = (
+        abs(de) >= 0.04
+        and (float(pcm_energy) - base_e) * float(np.sign(de) or 1.0) < -0.10
+    )
+    return bool(contra_v or contra_e)
 
 
 def _merge_two_pcm_profiles(primary, secondary):
@@ -1326,6 +1438,8 @@ def _merge_two_pcm_profiles(primary, secondary):
             ostats_src = loser if float(loser.onset_rate) >= float(winner.onset_rate) else winner
         tonal = _avg_tonal([winner, loser], [1.0 - inj_v, inj_v])
         timbre_source = _pick_timbre_source([winner, loser], [1.0 - inj_v, inj_v])
+        slope_profiles = [winner, loser]
+        slope_weights = [1.0 - inj_v, inj_v]
     else:
         # Mild disagreement: lean toward the stabler window.
         wp = 0.62 if primary is winner else 0.38
@@ -1344,6 +1458,8 @@ def _merge_two_pcm_profiles(primary, secondary):
         ostats_src = winner
         tonal = _avg_tonal([primary, secondary], [wp, ws])
         timbre_source = _pick_timbre_source([primary, secondary], [wp, ws])
+        slope_profiles = [primary, secondary]
+        slope_weights = [wp, ws]
 
     return AcousticProfile(
         valence=float(np.clip(valence, 0.03, 0.97)),
@@ -1367,6 +1483,11 @@ def _merge_two_pcm_profiles(primary, secondary):
         tonal=float(np.clip(tonal, 0.05, 0.95)),
         timbre_source=timbre_source,
         shape_note=None,
+        spectral_slope=float(
+            _avg_attr(slope_profiles, "spectral_slope", 0.5, slope_weights)
+        ),
+        sub_bass=float(_avg_attr(slope_profiles, "sub_bass", 0.0, slope_weights)),
+        zcr=float(_avg_attr(slope_profiles, "zcr", 0.0, slope_weights)),
     )
 
 
@@ -1428,6 +1549,9 @@ def _weighted_profile_blend(items: list[tuple[object, float]]):
         tonal=float(np.clip(_avg_tonal(profiles, weights), 0.05, 0.95)),
         timbre_source=_pick_timbre_source(profiles, weights),
         shape_note=None,
+        spectral_slope=float(_avg_attr(profiles, "spectral_slope", 0.5, weights)),
+        sub_bass=float(_avg_attr(profiles, "sub_bass", 0.0, weights)),
+        zcr=float(_avg_attr(profiles, "zcr", 0.0, weights)),
     )
 
 
@@ -1492,6 +1616,24 @@ def _merge_section_profiles(role_profiles: dict[str, object]):
         # Path-to-9: mid+late agree closely + intro clearly offset → soft body bias.
         # Mild/normal intros keep default blend so build-ups aren't half-muted.
         weights = dict(SECTION_BODY_AGREE_WEIGHTS)
+
+    # Honesty: lean toward windows with real tonality + real onsets; floor so a
+    # sting cannot become the song. Applied after cold-open / outlier / body bias.
+    # Preserve intentional intro caps (0 / outlier 0.08) so flashy stings cannot
+    # re-enter merge health via tonal×onset boost (rehunt score 5).
+    intro_cap = float(weights.get("intro", 0.0))
+    preserve_intro_cap = intro_cap <= SECTION_OUTLIER_INTRO_WEIGHT + 1e-12
+    weights = _reweight_tonal_onset(weights, role_profiles)
+    if preserve_intro_cap and "intro" in weights:
+        body = {r: float(weights[r]) for r in ("mid", "late") if r in weights}
+        body_total = sum(body.values())
+        remain = max(0.0, 1.0 - intro_cap)
+        if body_total > 1e-12 and remain > 0.0:
+            weights["intro"] = intro_cap
+            for r in body:
+                weights[r] = remain * (body[r] / body_total)
+        else:
+            weights["intro"] = intro_cap
 
     # Strong mid vs late disagreement: prefer stabler body, inject from active loser.
     body_disagree = body_span
@@ -1882,6 +2024,9 @@ def analyze_audio(
         replaygain_db=replaygain_db,
     )
     valence, energy = seed.valence, seed.energy
+    # Working seed coords — keyword may be zeroed when PCM clearly contradicts.
+    seed_v, seed_e = float(seed.valence), float(seed.energy)
+    keyword_hit = bool(seed.keyword_hit)
     tag_bpm = _coerce_bpm(bpm)
     tag_bpm_ok = tag_bpm is not None
     weak_tags = _weak_tag_ext(path)
@@ -1923,9 +2068,22 @@ def analyze_audio(
         onset_c = float(getattr(profile, "onset_consistency", 0.5) or 0.5) if profile else 0.5
         variation = float(getattr(profile, "variation", 0.0) or 0.0) if profile else 0.0
         unstable = bool(pcm_unstable or variation > 0.28)
-        disagree = float(
-            np.hypot(valence_pcm - seed.valence, energy_pcm - seed.energy)
-        )
+        # Zero keyword nudge when the listen clearly contradicts it — leave genre alone.
+        if keyword_hit and _keyword_contradicted_by_pcm(
+            keyword_dv=float(seed.keyword_dv),
+            keyword_de=float(seed.keyword_de),
+            seed_valence=float(seed.valence),
+            seed_energy=float(seed.energy),
+            pcm_valence=valence_pcm,
+            pcm_energy=energy_pcm,
+            onset_consistency=onset_c,
+            unstable=unstable,
+            variation=variation,
+        ):
+            seed_v = float(np.clip(seed.valence - float(seed.keyword_dv), 0.03, 0.97))
+            seed_e = float(np.clip(seed.energy - float(seed.keyword_de), 0.03, 0.97))
+            keyword_hit = False
+        disagree = float(np.hypot(valence_pcm - seed_v, energy_pcm - seed_e))
         genre_conflict = _genre_pair_conflict(seed.tag_key, seed.path_key)
         # Good metadata: real genre, sane tag BPM, not container/weak/conflict.
         # Strong onset evidence: steady rhythm + real BPM/onset cues (not unstable).
@@ -2025,76 +2183,102 @@ def analyze_audio(
             pcm_w_e = min(0.72, pcm_w_e + transfer * 0.18)
             clamp_shift = min(PCM_STRONG_ONSET_MAX, clamp_shift + transfer * 0.025)
 
+        # Spectral slope as confidence/permission: muffled → stay nearer sticker;
+        # clear dark low end may still move Shadow (Glow dampened when muffled).
+        slope = float(getattr(profile, "spectral_slope", 0.5) or 0.5) if profile else 0.5
+        sub = float(getattr(profile, "sub_bass", 0.0) or 0.0) if profile else 0.0
+        bright_pcm = float(getattr(profile, "brightness", 0.5) or 0.5) if profile else 0.5
+        if slope < SLOPE_MUFFLED_MAX:
+            muff = float(np.clip((SLOPE_MUFFLED_MAX - slope) / max(SLOPE_MUFFLED_MAX, 1e-6), 0.0, 1.0))
+            soft_shift_v *= 1.0 - 0.45 * muff
+            soft_shift_e *= 1.0 - 0.35 * muff
+            pcm_w_v *= 1.0 - 0.35 * muff
+            pcm_w_e *= 1.0 - 0.25 * muff
+            clamp_shift *= 1.0 - 0.25 * muff
+        elif slope >= SLOPE_CLEAR_MIN and bright_pcm < 0.42 and sub >= 0.12:
+            # Clear dark low end: allow Shadow room (do not shrink valence pull).
+            soft_shift_v = max(soft_shift_v, min(EVIDENCE_SOFT_VALENCE_MAX, soft_shift_v * 1.15))
+            pcm_w_v = min(0.62, pcm_w_v + 0.06)
+
         soft_shift = soft_shift_e  # post-BPM energy reclamp uses Kinetic envelope
 
         if weak_tags:
             # Dump formats: distrust tags; lean hard on waveform.
-            valence = float(np.clip(0.22 * seed.valence + 0.78 * valence_pcm, 0.03, 0.97))
-            energy = float(np.clip(0.18 * seed.energy + 0.82 * energy_pcm, 0.03, 0.97))
+            valence = float(np.clip(0.22 * seed_v + 0.78 * valence_pcm, 0.03, 0.97))
+            energy = float(np.clip(0.18 * seed_e + 0.82 * energy_pcm, 0.03, 0.97))
         elif soft_pcm_only:
             # Genre+BPM soft residual. Glow may evidence-widen; Kinetic stays a
             # fine-tune when metadata is accurate + onset is strong (see gates above).
             valence = float(
                 np.clip(
-                    seed.valence
-                    + float(np.clip(valence_pcm - seed.valence, -soft_shift_v, soft_shift_v)),
+                    seed_v
+                    + float(np.clip(valence_pcm - seed_v, -soft_shift_v, soft_shift_v)),
                     0.03,
                     0.97,
                 )
             )
             energy = float(
                 np.clip(
-                    seed.energy
-                    + float(np.clip(energy_pcm - seed.energy, -soft_shift_e, soft_shift_e)),
+                    seed_e
+                    + float(np.clip(energy_pcm - seed_e, -soft_shift_e, soft_shift_e)),
                     0.03,
                     0.97,
                 )
             )
         elif seed.clamp_match:
-            valence = float(np.clip((1.0 - pcm_w_v) * seed.valence + pcm_w_v * valence_pcm, 0.03, 0.97))
-            energy = float(np.clip((1.0 - pcm_w_e) * seed.energy + pcm_w_e * energy_pcm, 0.03, 0.97))
+            valence = float(np.clip((1.0 - pcm_w_v) * seed_v + pcm_w_v * valence_pcm, 0.03, 0.97))
+            energy = float(np.clip((1.0 - pcm_w_e) * seed_e + pcm_w_e * energy_pcm, 0.03, 0.97))
             valence = float(
                 np.clip(
-                    seed.valence
-                    + float(np.clip(valence - seed.valence, -clamp_shift, clamp_shift)),
+                    seed_v
+                    + float(np.clip(valence - seed_v, -clamp_shift, clamp_shift)),
                     0.03,
                     0.97,
                 )
             )
             energy = float(
                 np.clip(
-                    seed.energy
-                    + float(np.clip(energy - seed.energy, -clamp_shift, clamp_shift)),
+                    seed_e
+                    + float(np.clip(energy - seed_e, -clamp_shift, clamp_shift)),
                     0.03,
                     0.97,
                 )
             )
         else:
             # Messy / untagged: trust waveform cues heavily.
-            valence = float(np.clip(0.15 * seed.valence + 0.85 * valence_pcm, 0.03, 0.97))
-            energy = float(np.clip(0.12 * seed.energy + 0.88 * energy_pcm, 0.03, 0.97))
+            valence = float(np.clip(0.15 * seed_v + 0.85 * valence_pcm, 0.03, 0.97))
+            energy = float(np.clip(0.12 * seed_e + 0.88 * energy_pcm, 0.03, 0.97))
 
     # Prefer a real tag BPM for storage; energy nudge may use detected when rhythm is steady.
     out_bpm = tag_bpm if tag_bpm is not None else detected_bpm
     onset_for_bpm = float(getattr(profile, "onset_consistency", 0.5) or 0.5) if profile else 0.5
-    nudge_bpm = _energy_bpm_for_nudge(
-        tag_bpm,
-        detected_bpm,
-        onset_consistency=onset_for_bpm,
-        unstable=bool(pcm_unstable),
+    variation_for_bpm = float(getattr(profile, "variation", 0.0) or 0.0) if profile else 0.0
+    # Pulse clarity — not the BPM number alone — permits a Kinetic step.
+    pulse_clear = bool(
+        pcm_ok
+        and onset_for_bpm >= PULSE_CLARITY_BPM_MIN
+        and not bool(pcm_unstable)
+        and variation_for_bpm < 0.28
     )
-    energy = _bpm_nudge(
-        energy,
-        nudge_bpm,
-        soft=soft_pcm_only or (tag_bpm is None and detected_bpm is not None),
-    )
+    if pulse_clear:
+        nudge_bpm = _energy_bpm_for_nudge(
+            tag_bpm,
+            detected_bpm,
+            onset_consistency=onset_for_bpm,
+            unstable=bool(pcm_unstable),
+        )
+        energy = _bpm_nudge(
+            energy,
+            nudge_bpm,
+            soft=soft_pcm_only or (tag_bpm is None and detected_bpm is not None),
+        )
     if soft_pcm_only and pcm_ok:
         energy = float(
             np.clip(
-                seed.energy
+                seed_e
                 + float(
                     np.clip(
-                        energy - seed.energy,
+                        energy - seed_e,
                         -soft_shift,
                         soft_shift,
                     )
@@ -2126,9 +2310,9 @@ def analyze_audio(
         bpm_ok = True
 
     if not np.isfinite(valence):
-        valence = float(seed.valence)
+        valence = float(seed_v)
     if not np.isfinite(energy):
-        energy = float(seed.energy)
+        energy = float(seed_e)
     valence = float(np.clip(valence, 0.03, 0.97))
     energy = float(np.clip(energy, 0.03, 0.97))
 
@@ -2141,7 +2325,7 @@ def analyze_audio(
         bpm_ok=bpm_ok,
         bpm_conflict=bpm_conflict,
         replaygain=replaygain_db is not None and np.isfinite(float(replaygain_db)),
-        keyword_hit=seed.keyword_hit,
+        keyword_hit=keyword_hit,
         weak_tags=weak_tags,
         jitter=used_jitter,
         variation=float(getattr(profile, "variation", 0.0) or 0.0) if profile else 0.0,
@@ -2162,6 +2346,7 @@ def analyze_audio(
         if edge_note not in note:
             note = f"{note} · {edge_note}" if note else edge_note
     # Tag/path/keyword evidence — enough to conclude without waveform.
+    # Original seed keyword still counts as seed evidence even if PCM undid the nudge.
     seed_evidence = bool(seed.clamp_match or seed.keyword_hit)
     if not pcm_ok and seed_evidence:
         confidence = min(float(confidence), CONFIDENCE_LOW - 0.01)
