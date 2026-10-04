@@ -339,3 +339,148 @@ def test_loved_fill_promoted_under_day_band() -> None:
             renewal=RenewalContext(prior_queue_ids=frozenset({1}), renew_streak=0),
         )
         assert 1 in plan.order
+
+
+def test_queue_prefers_sure_pins_over_low_trust() -> None:
+    """Path-to-9: subtle importance/fit lift for high-confidence pins vs dim scrapes."""
+    from unittest.mock import patch
+
+    from meridian.context import Mode, make_context
+    from meridian.library import Track
+    from meridian.queue_engine import classify
+
+    def t(i, *, conf: float, low_trust: bool, valence: float = 0.50, energy: float = 0.50,
+          onset: float | None = None):
+        return Track(
+            id=i,
+            path=f"/m/{i}.mp3",
+            title=f"t{i}",
+            artist=f"A{i}",
+            album=f"L{i}",
+            albumartist=f"A{i}",
+            genre="Metal",
+            duration_ms=1000,
+            year=None,
+            bpm=120.0,
+            valence=valence,
+            energy=energy,
+            mood_confidence=conf,
+            confidence_note="test",
+            low_trust=low_trust,
+            onset_consistency=onset,
+            pinned=False,
+            loved=False,
+            play_count=2,
+            skip_count=0,
+            last_played=None,
+            added_at=0.0,
+            mtime=0.0,
+            analyzed=True,
+        )
+
+    sure = t(1, conf=0.88, low_trust=False)
+    scrape = t(2, conf=0.30, low_trust=True)
+    with patch("meridian.context.current_hour", return_value=13):
+        ctx = make_context(Mode.FOCUS, 0.5, 0.5, 0.28, 0.0)
+        ranked = classify([sure, scrape], ctx, set())
+    by_id = {r.track.id: r for r in ranked}
+    # Same distance to lens — sure pin should outrank the dim scrape.
+    score = lambda r: r.fit * 0.7 + r.importance * 0.3
+    assert score(by_id[1]) > score(by_id[2])
+    assert by_id[1].importance > by_id[2].importance
+
+
+def test_queue_closer_dim_competes_vs_farther_sure_focus() -> None:
+    """Hunt #4: confidence nudge must not bury a closer dim neighbor under Focus onset stack."""
+    from unittest.mock import patch
+
+    from meridian.context import Mode, make_context
+    from meridian.library import Track
+    from meridian.queue_engine import classify
+
+    def t(i, *, conf: float, low_trust: bool, valence: float, energy: float,
+          onset: float | None):
+        return Track(
+            id=i,
+            path=f"/m/{i}.mp3",
+            title=f"t{i}",
+            artist=f"A{i}",
+            album=f"L{i}",
+            albumartist=f"A{i}",
+            genre="Metal",
+            duration_ms=1000,
+            year=None,
+            bpm=120.0,
+            valence=valence,
+            energy=energy,
+            mood_confidence=conf,
+            confidence_note="test",
+            low_trust=low_trust,
+            onset_consistency=onset,
+            pinned=False,
+            loved=False,
+            play_count=2,
+            skip_count=0,
+            last_played=None,
+            added_at=0.0,
+            mtime=0.0,
+            analyzed=True,
+        )
+
+    # Lens at (0.5, 0.5): scrape ~0.02 away, sure ~0.10 away.
+    sure = t(1, conf=0.90, low_trust=False, valence=0.57, energy=0.57, onset=0.90)
+    scrape = t(2, conf=0.50, low_trust=True, valence=0.51, energy=0.51, onset=None)
+    with patch("meridian.context.current_hour", return_value=13):
+        ctx = make_context(Mode.FOCUS, 0.5, 0.5, 0.28, 0.0)
+        ranked = classify([sure, scrape], ctx, set())
+    by_id = {r.track.id: r for r in ranked}
+    score = lambda r: r.fit * 0.7 + r.importance * 0.3
+    # Closer dim scrape must still win (or tie) the combined ranking.
+    assert score(by_id[2]) >= score(by_id[1]) - 1e-9
+
+
+def test_queue_confidence_zero_treated_as_unsure() -> None:
+    """Hunt #1: mood_confidence exactly 0.0 is low/unsure, not medium via falsy or."""
+    from unittest.mock import patch
+
+    from meridian.context import Mode, make_context
+    from meridian.library import Track
+    from meridian.queue_engine import classify
+
+    def t(i, *, conf: float | None):
+        return Track(
+            id=i,
+            path=f"/m/{i}.mp3",
+            title=f"t{i}",
+            artist=f"A{i}",
+            album=f"L{i}",
+            albumartist=f"A{i}",
+            genre="Metal",
+            duration_ms=1000,
+            year=None,
+            bpm=120.0,
+            valence=0.50,
+            energy=0.50,
+            mood_confidence=conf if conf is not None else 0.5,
+            confidence_note="test",
+            low_trust=False,
+            pinned=False,
+            loved=False,
+            play_count=2,
+            skip_count=0,
+            last_played=None,
+            added_at=0.0,
+            mtime=0.0,
+            analyzed=True,
+        )
+
+    zero = t(1, conf=0.0)
+    medium = t(2, conf=0.5)
+    zero.mood_confidence = 0.0
+    with patch("meridian.context.current_hour", return_value=13):
+        ctx = make_context(Mode.FOCUS, 0.5, 0.5, 0.28, 0.0)
+        ranked = classify([zero, medium], ctx, set())
+    by_id = {r.track.id: r for r in ranked}
+    # Exact 0 must not get a medium-confidence lift over a real 0.5.
+    assert by_id[1].importance < by_id[2].importance
+    assert by_id[1].fit <= by_id[2].fit + 1e-9

@@ -203,12 +203,14 @@ WORD_ENERGY = {
     "lo-fi": -0.18,
 }
 
-PCM_MAX_SHIFT = 0.12
+PCM_MAX_SHIFT = 0.16
 # Tiny residual when genre+BPM are already strong — spreads neighbors without leaving the cluster.
-SOFT_PCM_MAX_SHIFT = 0.06
+SOFT_PCM_MAX_SHIFT = 0.09
 # Evidence-gated soft widen: steady PCM that clearly disagrees with the seed.
-EVIDENCE_SOFT_VALENCE_MAX = 0.12
-EVIDENCE_SOFT_ENERGY_MAX = 0.10
+EVIDENCE_SOFT_VALENCE_MAX = 0.14
+EVIDENCE_SOFT_ENERGY_MAX = 0.12
+# Strong-onset clamp widen — stays above base, below ~continent hop.
+PCM_STRONG_ONSET_MAX = 0.18
 KEYWORD_SHIFT_CAP = 0.18
 REPLAYGAIN_ENERGY_CAP = 0.06
 DEFAULT_VALENCE = 0.5
@@ -912,6 +914,12 @@ LONG_SINGLE_WINDOW_S = 28.0
 SECTION_MIN_GAP_S = 8.0
 # Mid-heavy blend for intro / mid / late when all three are usable.
 SECTION_BLEND_WEIGHTS = {"intro": 0.20, "mid": 0.50, "late": 0.30}
+# When mid+late agree closely *and* intro is meaningfully offset (not a mild
+# build-up), soft-bias the body — still leave intro more say than cold-open/outlier.
+SECTION_BODY_AGREE_WEIGHTS = {"intro": 0.15, "mid": 0.53, "late": 0.32}
+SECTION_BODY_AGREE_MAX = 0.12
+# Below this, a normal intro keeps default 20/50/30 even if mid+late sit close.
+SECTION_BODY_AGREE_INTRO_MIN = 0.16
 # Shrunk outlier intro keeps a tiny coord nudge but must not poison merge health
 # (unstable / variation) — same spirit as zero-weight cold-open (rehunt score 5).
 SECTION_OUTLIER_INTRO_WEIGHT = 0.08
@@ -1169,7 +1177,9 @@ def _merge_section_profiles(role_profiles: dict[str, object]):
 
     weights = dict(SECTION_BLEND_WEIGHTS)
     # Cold-open / silent intro must not veto a clear mid+late body.
-    mid_late_agree = float(np.hypot(mid.valence - late.valence, mid.energy - late.energy)) <= 0.18
+    body_span = float(np.hypot(mid.valence - late.valence, mid.energy - late.energy))
+    mid_late_agree = body_span <= 0.18
+    mid_late_close = body_span <= SECTION_BODY_AGREE_MAX
     intro_vs_body = float(
         np.hypot(
             intro.valence - 0.5 * (mid.valence + late.valence),
@@ -1187,9 +1197,13 @@ def _merge_section_profiles(role_profiles: dict[str, object]):
         weights["intro"] = SECTION_OUTLIER_INTRO_WEIGHT
         weights["mid"] = 0.55
         weights["late"] = 0.37
+    elif mid_late_close and intro_vs_body > SECTION_BODY_AGREE_INTRO_MIN:
+        # Path-to-9: mid+late agree closely + intro clearly offset → soft body bias.
+        # Mild/normal intros keep default blend so build-ups aren't half-muted.
+        weights = dict(SECTION_BODY_AGREE_WEIGHTS)
 
     # Strong mid vs late disagreement: prefer stabler body, inject from active loser.
-    body_disagree = float(np.hypot(mid.valence - late.valence, mid.energy - late.energy))
+    body_disagree = body_span
     if body_disagree > 0.18:
         body = _merge_two_pcm_profiles(mid, late)
         if weights["intro"] <= 1e-9:
@@ -1590,18 +1604,30 @@ def analyze_audio(
             np.hypot(valence_pcm - seed.valence, energy_pcm - seed.energy)
         )
         genre_conflict = _genre_pair_conflict(seed.tag_key, seed.path_key)
+        # Good metadata: real genre, sane tag BPM, not container/weak/conflict.
+        # Strong onset evidence: steady rhythm + real BPM/onset cues (not unstable).
+        meta_accurate = bool(soft_pcm_only and not genre_conflict)
+        strong_onset_ev = bool(
+            onset_c > 0.70
+            and not unstable
+            and variation < 0.22
+            and (detected_bpm is not None or onset_c > 0.78)
+        )
         # Structure-aware clamps: steady rhythm + genre disagreement → trust PCM more;
-        # unstable / uneven onsets → hug the genre seed tighter.
+        # unstable / uneven onsets → hug the genre seed tighter (keep this branch tight).
         soft_shift_v = SOFT_PCM_MAX_SHIFT
         soft_shift_e = SOFT_PCM_MAX_SHIFT
         pcm_w_v, pcm_w_e = 0.40, 0.48
         clamp_shift = PCM_MAX_SHIFT
         if onset_c > 0.70 and disagree > 0.12:
-            widened = min(0.09, SOFT_PCM_MAX_SHIFT * 1.45)
+            widened = min(0.13, SOFT_PCM_MAX_SHIFT * 1.45)
             soft_shift_v = widened
-            soft_shift_e = widened
+            # Kinetic widen needs a truly solid onset — mid-shaky must not out-shove
+            # a clean listen on good tags (path-to-9 hunt score 5).
+            if variation < 0.22 and not unstable:
+                soft_shift_e = widened
             pcm_w_v, pcm_w_e = 0.55, 0.62
-            clamp_shift = min(0.16, PCM_MAX_SHIFT * 1.25)
+            clamp_shift = min(PCM_STRONG_ONSET_MAX, PCM_MAX_SHIFT * 1.25)
         elif unstable or onset_c < 0.35:
             soft_shift_v = SOFT_PCM_MAX_SHIFT * 0.55
             soft_shift_e = SOFT_PCM_MAX_SHIFT * 0.55
@@ -1615,7 +1641,7 @@ def analyze_audio(
             clamp_shift = max(clamp_shift, 0.20)
 
         # Evidence-gated soft widen: stable PCM that clearly disagrees with the seed.
-        # Glow may move farther than Kinetic (genre+BPM usually encode pace better).
+        # Glow may move farther than Kinetic when metadata is accurate (pace often in tags).
         if (
             soft_pcm_only
             and onset_c > 0.70
@@ -1624,7 +1650,26 @@ def analyze_audio(
             and disagree > 0.18
         ):
             soft_shift_v = max(soft_shift_v, EVIDENCE_SOFT_VALENCE_MAX)
-            soft_shift_e = max(soft_shift_e, min(EVIDENCE_SOFT_ENERGY_MAX, EVIDENCE_SOFT_VALENCE_MAX))
+            if meta_accurate:
+                # Good metadata + strong onset: fine-tune Kinetic only (stay near seed).
+                soft_shift_e = min(soft_shift_e, SOFT_PCM_MAX_SHIFT)
+            else:
+                soft_shift_e = max(
+                    soft_shift_e, min(EVIDENCE_SOFT_ENERGY_MAX, EVIDENCE_SOFT_VALENCE_MAX)
+                )
+
+        # Metadata-gated Kinetic: less accurate labels + strong onset → stronger PCM pull
+        # inside the loosened clamp band (aubio/PCM may correct pace).
+        if strong_onset_ev and not meta_accurate:
+            pcm_w_e = max(pcm_w_e, 0.70)
+            if not soft_pcm_only:
+                clamp_shift = max(clamp_shift, min(PCM_STRONG_ONSET_MAX, PCM_MAX_SHIFT * 1.25))
+            else:
+                # Soft path but conflict/container edge: open Kinetic residual a bit.
+                soft_shift_e = max(soft_shift_e, min(EVIDENCE_SOFT_ENERGY_MAX, SOFT_PCM_MAX_SHIFT * 1.35))
+        elif strong_onset_ev and meta_accurate:
+            # Accurate genre+BPM: keep Kinetic near seed even if Glow widened.
+            soft_shift_e = min(soft_shift_e, SOFT_PCM_MAX_SHIFT)
 
         # Tag vs path conflict: metadata is unreliable — reduce seed authority.
         # Freed weight goes to PCM only in proportion to how trustworthy PCM is
@@ -1641,13 +1686,21 @@ def analyze_audio(
             else:
                 pcm_claim = 0.85
             transfer = conflict_amt * pcm_claim
-            # Soft residual: open the envelope a little with freed metadata weight.
-            soft_shift_v = min(0.10, soft_shift_v + transfer * 0.045)
-            soft_shift_e = min(0.09, soft_shift_e + transfer * 0.035)
+            # Soft residual: open the envelope with freed metadata weight.
+            # Never claw back room evidence/structure already opened; only widen
+            # up to the evidence-soft ceilings.
+            soft_shift_v = max(
+                soft_shift_v,
+                min(EVIDENCE_SOFT_VALENCE_MAX, soft_shift_v + transfer * 0.045),
+            )
+            soft_shift_e = max(
+                soft_shift_e,
+                min(EVIDENCE_SOFT_ENERGY_MAX, soft_shift_e + transfer * 0.035),
+            )
             # Clamp blend: move weight from seed → PCM (capped; not untagged-level).
             pcm_w_v = min(0.58, pcm_w_v + transfer * 0.18)
-            pcm_w_e = min(0.65, pcm_w_e + transfer * 0.18)
-            clamp_shift = min(0.15, clamp_shift + transfer * 0.025)
+            pcm_w_e = min(0.72, pcm_w_e + transfer * 0.18)
+            clamp_shift = min(PCM_STRONG_ONSET_MAX, clamp_shift + transfer * 0.025)
 
         soft_shift = soft_shift_e  # post-BPM energy reclamp uses Kinetic envelope
 
@@ -1656,7 +1709,8 @@ def analyze_audio(
             valence = float(np.clip(0.22 * seed.valence + 0.78 * valence_pcm, 0.03, 0.97))
             energy = float(np.clip(0.18 * seed.energy + 0.82 * energy_pcm, 0.03, 0.97))
         elif soft_pcm_only:
-            # Genre+BPM already trusted — residual spreads neighbors (wider when evidence is strong).
+            # Genre+BPM soft residual. Glow may evidence-widen; Kinetic stays a
+            # fine-tune when metadata is accurate + onset is strong (see gates above).
             valence = float(
                 np.clip(
                     seed.valence

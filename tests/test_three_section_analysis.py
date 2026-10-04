@@ -89,8 +89,8 @@ def test_merge_dual_compat_and_mid_heavy_three() -> None:
 
     intro = _prof(valence=0.44, energy=0.46, onset_consistency=0.8)
     mid = _prof(valence=0.50, energy=0.50, onset_consistency=0.85)
-    # Mild spreads so neither cold-open nor body-disagree branches fire.
-    late = _prof(valence=0.56, energy=0.54, onset_consistency=0.75)
+    # Spread mid↔late just outside body-close (0.12) so default 20/50/30 applies.
+    late = _prof(valence=0.60, energy=0.58, onset_consistency=0.75)
 
     # Dual legacy path still works.
     dual = _merge_pcm_profiles(intro, mid)
@@ -107,6 +107,61 @@ def test_merge_dual_compat_and_mid_heavy_three() -> None:
     )
     assert abs(merged.valence - expected) < 0.02
     assert abs(merged.valence - mid.valence) < abs(merged.valence - intro.valence)
+
+
+def test_mid_late_close_agreement_trusts_body() -> None:
+    """Path-to-9: mid+late close + meaningfully offset intro → soft body bias."""
+    from meridian.features import (
+        SECTION_BLEND_WEIGHTS,
+        SECTION_BODY_AGREE_WEIGHTS,
+        _merge_pcm_profiles,
+    )
+
+    # Intro offset enough to matter, but not outlier/cold-open; mid+late sit close.
+    intro = _prof(valence=0.42, energy=0.40, onset_consistency=0.75)
+    mid = _prof(valence=0.55, energy=0.55, onset_consistency=0.88)
+    late = _prof(valence=0.58, energy=0.57, onset_consistency=0.84)
+
+    merged = _merge_pcm_profiles(
+        None, role_profiles={"intro": intro, "mid": mid, "late": late}
+    )
+    expected = (
+        SECTION_BODY_AGREE_WEIGHTS["intro"] * intro.valence
+        + SECTION_BODY_AGREE_WEIGHTS["mid"] * mid.valence
+        + SECTION_BODY_AGREE_WEIGHTS["late"] * late.valence
+    )
+    default = (
+        SECTION_BLEND_WEIGHTS["intro"] * intro.valence
+        + SECTION_BLEND_WEIGHTS["mid"] * mid.valence
+        + SECTION_BLEND_WEIGHTS["late"] * late.valence
+    )
+    assert abs(merged.valence - expected) < 0.02
+    # Soft body bias still sits closer to mid+late than default 20/50/30.
+    body_mid = 0.5 * (mid.valence + late.valence)
+    assert abs(merged.valence - body_mid) < abs(default - body_mid) + 1e-9
+    assert abs(merged.valence - body_mid) < abs(merged.valence - intro.valence)
+    # Intro keeps more say than the old half-weight (0.10) cut.
+    assert SECTION_BODY_AGREE_WEIGHTS["intro"] >= 0.15
+
+
+def test_normal_mild_intro_keeps_default_blend_when_body_close() -> None:
+    """Hunt #3: normal build-up intros keep 20/50/30 when not pathological."""
+    from meridian.features import SECTION_BLEND_WEIGHTS, _merge_pcm_profiles
+
+    # Mild intro offset (below BODY_AGREE_INTRO_MIN); mid+late still close.
+    intro = _prof(valence=0.50, energy=0.48, onset_consistency=0.80)
+    mid = _prof(valence=0.55, energy=0.55, onset_consistency=0.88)
+    late = _prof(valence=0.56, energy=0.54, onset_consistency=0.84)
+
+    merged = _merge_pcm_profiles(
+        None, role_profiles={"intro": intro, "mid": mid, "late": late}
+    )
+    expected = (
+        SECTION_BLEND_WEIGHTS["intro"] * intro.valence
+        + SECTION_BLEND_WEIGHTS["mid"] * mid.valence
+        + SECTION_BLEND_WEIGHTS["late"] * late.valence
+    )
+    assert abs(merged.valence - expected) < 0.02
 
 
 def test_cold_open_intro_does_not_veto_mid_late() -> None:

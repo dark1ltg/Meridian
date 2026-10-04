@@ -6,6 +6,15 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 Version stays **1.3.6**. This refresh is about making first-run analyze actually run, showing your whole library on the mood map, listening smarter, and speeding up analyze on SSDs — plus a pile of bug fixes.
 
+### Path-to-9 blend (local AppImage)
+
+**Placement / listen blend**
+- Soft genre+BPM residual and normal genre clamp are slightly looser (still continent-scale — tagged rock stays rock-ish). Wider genre clamps can leave album mates a touch more scattered before tidy — accepted.
+- Steady onset evidence with **good** tags only fine-tunes Kinetic; mid-shaky listens do not get a wider Kinetic shove than a solid listen. Weaker tags (missing BPM, container-only, genre conflict, weak dumps) allow a stronger waveform/aubio Kinetic pull inside that band.
+- Tag↔path genre conflict opens Kinetic/Glow residual room and keeps evidence-opened envelopes (no immediate claw-back).
+- When mid and late tastes agree closely *and* the intro is clearly offset, the merge soft-biases the body; normal build-up intros keep more say than a half-weight cut.
+- Focus / NOW ranking gives a light lift to higher-confidence listens over dim scrapes at similar distance — toned so Focus onset + confidence don’t bury a closer dim neighbor. Exact confidence `0.0` counts as unsure, not medium.
+
 ### What’s new (plain English)
 
 **Faster listening on SSDs**
