@@ -4,16 +4,21 @@ All notable Meridian releases are listed here. Download AppImages from [Releases
 
 ## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-10-03)
 
-Version stays **1.3.6**. This refresh is about making first-run analyze actually run, showing your whole library on the mood map, listening smarter, and speeding up analyze on SSDs — plus a pile of bug fixes.
+Version stays **1.3.6**. This refresh tightens how stars land and how the queue picks neighbors — map feel, listening blend, and Focus ranking — on top of earlier analyze / dual-worker / map-completeness work.
 
-### Path-to-9 blend (local AppImage)
+### Path-to-9 blend (this AppImage)
 
-**Placement / listen blend**
+**Refinements**
 - Soft genre+BPM residual and normal genre clamp are slightly looser (still continent-scale — tagged rock stays rock-ish). Wider genre clamps can leave album mates a touch more scattered before tidy — accepted.
-- Steady onset evidence with **good** tags only fine-tunes Kinetic; mid-shaky listens do not get a wider Kinetic shove than a solid listen. Weaker tags (missing BPM, container-only, genre conflict, weak dumps) allow a stronger waveform/aubio Kinetic pull inside that band.
+- Steady onset evidence with **good** tags only fine-tunes Kinetic; weaker tags (missing BPM, container-only, genre conflict, weak dumps) allow a stronger waveform/aubio Kinetic pull inside that band.
+- When mid and late tastes agree closely *and* the intro is clearly offset, the merge soft-biases the body so a flashy open can’t yank the pin.
+- Focus / NOW ranking gives a light lift to higher-confidence listens over dim scrapes at similar distance.
+
+**Bug fixes**
+- Mid-shaky listens with good tags no longer get a wider Kinetic shove than a solid listen.
 - Tag↔path genre conflict opens Kinetic/Glow residual room and keeps evidence-opened envelopes (no immediate claw-back).
-- When mid and late tastes agree closely *and* the intro is clearly offset, the merge soft-biases the body; normal build-up intros keep more say than a half-weight cut.
-- Focus / NOW ranking gives a light lift to higher-confidence listens over dim scrapes at similar distance — toned so Focus onset + confidence don’t bury a closer dim neighbor. Exact confidence `0.0` counts as unsure, not medium.
+- Normal build-up intros keep more say than a half-weight cut when mid+late agree (body bias only when the intro is clearly offset).
+- Focus onset + confidence don’t bury a closer dim neighbor; exact confidence `0.0` counts as unsure, not medium.
 
 ### What’s new (plain English)
 
@@ -78,8 +83,9 @@ Version stays **1.3.6**. This refresh is about making first-run analyze actually
 
 - AppImage baseline remains Ubuntu 24.04 / glibc 2.38+.
 - Host **ffmpeg** required for mood analysis; system **libx264** for H.264 playback through Qt’s FFmpeg plugin (not bundled).
-- Release AppImage refreshed **2026-10-03** with the analyze / dual-worker / map-completeness work above.
+- Release AppImage refreshed **2026-10-03** with path-to-9 blend + hunt fixes (plus earlier analyze / dual-worker / map-completeness work).
 - **Bug fix:** AppImage AppStream stamp now updates only the newest release row (older history like 1.3.5 stays intact).
+- **Bug fix:** GitHub “Refresh AppImage” workflow no longer fails with Permission denied when writing the SHA256 checksum after a Docker/proot build.
 
 
 ## [1.3.5](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.5) — 2026-09-06 (AppImage refreshed 2026-09-09)

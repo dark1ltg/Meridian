@@ -62,7 +62,8 @@ On the “stay near the sticker” path, tempo still can’t kick the star outsi
 ### 5. How sure are we?
 
 Meridian stores a confidence note (tag? path? listen? conflict?).  
-Low confidence means “take this with a grain of salt” in the UI — it doesn’t invent a third map axis.
+Low confidence means “take this with a grain of salt” in the UI — it doesn’t invent a third map axis.  
+Focus / NOW ranking gives a **light** lift to higher-confidence listens over dim scrapes at similar distance — not enough to bury a clearly closer neighbor.
 
 ### 6. Save (pins stay put)
 
