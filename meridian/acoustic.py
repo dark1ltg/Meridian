@@ -35,6 +35,72 @@ class AcousticProfile:
     variation: float = 0.0
     window_count: int = 0
     pcm_samples: int = 0
+    # Timbre leftovers (persisted upstream; not a map axis).
+    tonal: float = 0.5
+    timbre_source: str | None = None
+    # Multi-section shape note set by features merge (steady|build|drop|bookend).
+    shape_note: str | None = None
+
+
+# Target RMS for analysis-only loudness normalization (fixes hot-master Kinetic leak).
+ANALYSIS_TARGET_RMS = 0.10
+# Cap boost so near-floor hiss does not explode into a fake body.
+ANALYSIS_MAX_GAIN = 40.0
+
+
+def normalize_analysis_loudness(
+    pcm: np.ndarray, *, target_rms: float = ANALYSIS_TARGET_RMS
+) -> tuple[np.ndarray, float]:
+    """Uniform gain to a shared RMS target; returns ``(normalized, raw_rms)``.
+
+    Relative dynamics (crest, hop std/mean, onset timing) are preserved under a
+    single scale factor. ReplayGain stays a weak tag prior elsewhere — this is
+    waveform-local only, before energy/brightness cues.
+    """
+    mono = np.ascontiguousarray(pcm, dtype=np.float32)
+    if mono.size < 64:
+        return mono, 0.0
+    raw_rms = float(np.sqrt(np.mean(np.square(mono))) + 1e-12)
+    if raw_rms < 1e-8:
+        return mono, raw_rms
+    gain = float(target_rms) / raw_rms
+    gain = float(min(max(gain, 1e-3), ANALYSIS_MAX_GAIN))
+    out = mono * gain
+    peak = float(np.max(np.abs(out)) + 1e-12)
+    # Soft ceiling only after a boost — never re-inflate a hot master.
+    if peak > 1.0 and gain > 1.0:
+        out = out * (1.0 / peak)
+    return np.ascontiguousarray(out, dtype=np.float32), raw_rms
+
+
+def infer_timbre_source(
+    bands: dict[str, float],
+    *,
+    flatness: float,
+    zcr: float,
+    tonal: float,
+) -> str | None:
+    """Honest vocal/instrumental guess from spectrum — None when unsure."""
+    mid = float(bands.get("mid", 0.2)) + float(bands.get("high_mid", 0.2))
+    bass = float(bands.get("bass", 0.2)) + float(bands.get("low_mid", 0.2))
+    high = float(bands.get("high", 0.2))
+    flat = float(flatness)
+    # Noise-like / FX: never claim vocal.
+    if flat > 0.55 or tonal < 0.40:
+        return "instrumental" if flat > 0.60 or tonal < 0.35 else None
+    # Vocal-ish: midband presence, moderate ZCR, not bass-dominated pad.
+    if (
+        tonal >= 0.55
+        and mid >= 0.36
+        and mid >= bass * 0.80
+        and flat < 0.42
+        and 0.04 <= float(zcr) <= 0.28
+    ):
+        return "vocal"
+    # Clear instrumental / harmonic body.
+    if tonal >= 0.58 and flat < 0.40 and (bass >= 0.32 or high >= 0.22 or mid >= 0.30):
+        return "instrumental"
+    return None
 
 
 def trim_silence(pcm: np.ndarray, floor: float = 0.012) -> np.ndarray:
@@ -334,13 +400,16 @@ def local_analysis_windows(pcm_size: int, n: int) -> list[int]:
 def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProfile:
     """Expanded acoustic profile → still projects to valence/energy only."""
     pcm = trim_silence(np.ascontiguousarray(pcm, dtype=np.float32))
-    n = min(4096, int(pcm.size))
+    # Loudness-normalize before energy/brightness so hot masters (OC ReMix-style)
+    # do not leak into Kinetic via absolute RMS. Audibility still uses raw level.
+    pcm_n, raw_rms = normalize_analysis_loudness(pcm)
+    n = min(4096, int(pcm_n.size))
     brights: list[float] = []
     basses: list[float] = []
     flats: list[float] = []
     band_list: list[dict[str, float]] = []
-    for start in local_analysis_windows(pcm.size, n):
-        bright, bass, flat, bands, _c = spectral_slice(pcm, start, n, samplerate)
+    for start in local_analysis_windows(pcm_n.size, n):
+        bright, bass, flat, bands, _c = spectral_slice(pcm_n, start, n, samplerate)
         brights.append(bright)
         basses.append(bass)
         flats.append(flat)
@@ -352,21 +421,21 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
     variation = float(agg["variation"])
     unstable = bool(agg["unstable"] > 0.5)
 
-    flux = spectral_flux(pcm, samplerate)
-    est = energy_stats(pcm)
-    detected_bpm, ostats = onset_stats(pcm, samplerate)
+    flux = spectral_flux(pcm_n, samplerate)
+    est = energy_stats(pcm_n)
+    detected_bpm, ostats = onset_stats(pcm_n, samplerate)
 
-    zcr = float(np.mean(np.abs(np.diff(np.sign(pcm)))) / 2) if pcm.size > 2 else 0.0
+    zcr = float(np.mean(np.abs(np.diff(np.sign(pcm_n)))) / 2) if pcm_n.size > 2 else 0.0
     kinetic_zcr = float(np.clip(zcr * 3.2, 0.05, 0.95))
 
-    peak = float(np.max(np.abs(pcm)) + 1e-12) if pcm.size else 1e-12
-    rms = float(np.sqrt(np.mean(np.square(pcm))) + 1e-12) if pcm.size else 1e-12
+    peak = float(np.max(np.abs(pcm_n)) + 1e-12) if pcm_n.size else 1e-12
+    rms = float(np.sqrt(np.mean(np.square(pcm_n))) + 1e-12) if pcm_n.size else 1e-12
     crest = peak / rms
     crest_n = float(np.clip((np.log10(crest) - 0.25) / 1.15, 0.05, 0.95))
 
     # Quiet / near-floor material: broadband hiss looks "bright" but shouldn't Glow.
-    # audibility→0 collapses brightness and band_glow toward neutral.
-    audibility = float(np.clip(rms / 0.045, 0.0, 1.0))
+    # audibility→0 collapses brightness and band_glow toward neutral (from raw RMS).
+    audibility = float(np.clip(raw_rms / 0.045, 0.0, 1.0))
     bright_v = 0.50 + (bright - 0.50) * audibility
 
     warm = float(bands_m.get("bass", 0.2) + bands_m.get("low_mid", 0.2))
@@ -378,6 +447,9 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
     # Tonal vs noisy: high flatness (noise-like) pulls Glow down; clear tones keep Glow.
     tonal = float(np.clip(1.0 - 0.85 * flatness, 0.05, 0.95))
     noise_pull = float(np.clip((flatness - 0.35) / 0.45, 0.0, 1.0))
+    timbre_source = infer_timbre_source(
+        bands_m, flatness=flatness, zcr=zcr, tonal=tonal
+    )
     # band_glow already encodes bass/low-mid darkness — do not also use (1-bass).
     valence = float(
         np.clip(
@@ -418,6 +490,7 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
     kinetic = float(np.clip(kinetic_base * burst_mod, 0.05, 0.95))
     # Brightness belongs on Shadow↔Glow only — keep energy Still↔Kinetic.
     # Motion/activity dominates Y; loudness is supporting texture (not "loud = Kinetic").
+    # After loudness-norm, est mean/peak are relative — still keep them light vs onset/flux.
     # High onset consistency + high RMS consistency = controlled Kinetic: dampen
     # irregular/dynamic loudness cues without pushing a steady loop toward Still.
     dyn_from_consistency = float(np.clip(1.0 - float(est["consistency"]), 0.0, 1.0))
@@ -466,7 +539,9 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
         onset_consistency=float(ostats["consistency"]),
         variation=variation,
         window_count=len(brights),
-        pcm_samples=int(pcm.size),
+        pcm_samples=int(pcm_n.size),
+        tonal=tonal,
+        timbre_source=timbre_source,
     )
 
 
