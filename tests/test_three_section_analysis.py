@@ -1009,3 +1009,68 @@ def test_merge_attaches_shape_note() -> None:
     late = _prof(valence=0.5, energy=0.66)
     merged = _merge_pcm_profiles(None, role_profiles={"intro": intro, "mid": mid, "late": late})
     assert merged.shape_note == "drop"
+
+
+def test_unknown_duration_silence_reseek_not_fallback() -> None:
+    """Hunt #6: successful leading-silence re-seek is a full listen, not PCM fallback."""
+    from meridian import features
+
+    features.clear_decode_abort()
+    sr = 11025
+    tone = (0.2 * np.sin(2 * np.pi * 440 * np.arange(sr * 24) / sr)).astype(np.float32)
+    buf = np.concatenate([np.zeros(sr * 4, dtype=np.float32), tone])
+    calls: list[tuple[float, float]] = []
+
+    def fake_decode(path: str, *, start_s: float = 0.0, duration_s: float = 12.0):
+        calls.append((float(start_s), float(duration_s)))
+        if abs(start_s) < 0.01:
+            return buf.copy()
+        return tone.copy()
+
+    with patch.object(features, "_decode_pcm", side_effect=fake_decode):
+        with patch.object(
+            features, "_pcm_signal_ok", side_effect=lambda p: float(np.sqrt(np.mean(np.square(p)))) > 1e-4
+        ):
+            pcm, fallback, merged, edge = features._decode_pcm_with_fallback(
+                "/cue.wav", duration_ms=0
+            )
+            with patch.object(
+                features,
+                "_decode_pcm_with_fallback",
+                return_value=(pcm, fallback, merged, edge),
+            ):
+                result = features.analyze_audio(
+                    "/cue.wav", "", "cue", "a", None, duration_ms=0
+                )
+    assert pcm is not None
+    assert fallback is False
+    assert len(calls) == 2
+    assert "PCM fallback" not in (result.confidence_note or "")
+    assert result.steer_weight is not None and result.steer_weight >= 0.65
+
+
+def test_partial_multi_window_caps_steer() -> None:
+    """Hunt #4: multi-window + pcm_fallback must not keep max steer."""
+    from meridian.features import steer_weight_from_listen
+
+    full = steer_weight_from_listen(
+        pcm_ok=True,
+        multi_window=True,
+        pcm_fallback=False,
+        pcm_unstable=False,
+        edge_salvage=None,
+        seed_evidence=True,
+        variation=0.1,
+    )
+    partial = steer_weight_from_listen(
+        pcm_ok=True,
+        multi_window=True,
+        pcm_fallback=True,
+        pcm_unstable=False,
+        edge_salvage=None,
+        seed_evidence=True,
+        variation=0.1,
+    )
+    assert full >= 0.9
+    assert partial <= 0.70
+    assert partial < full

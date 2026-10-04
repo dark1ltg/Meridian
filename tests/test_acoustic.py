@@ -650,3 +650,13 @@ def test_timbre_flag_persists_tonal_vs_noisy() -> None:
     flag_n = _timbre_flag_from_tonal(pn.tonal)
     assert flag_n in (None, "noisy")
     assert flag_n != "tonal"
+
+
+def test_near_floor_hiss_stays_still_after_loudness_norm() -> None:
+    """Hunt #3: boosted near-floor hiss must not invent mid Kinetic."""
+    sr = SAMPLERATE
+    rng = np.random.default_rng(2)
+    hiss = (rng.standard_normal(sr * 4).astype(np.float32) * 0.002)
+    profile = build_profile(hiss)
+    assert profile.energy < 0.30
+    assert abs(profile.valence - 0.5) < 0.12
