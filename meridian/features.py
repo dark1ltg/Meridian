@@ -1223,12 +1223,18 @@ def steer_weight_from_listen(
     if edge_salvage == "mid":
         return 0.35
     if multi_window and not pcm_unstable and variation < 0.28:
-        return 0.95
-    if multi_window:
-        return 0.78
-    if pcm_fallback or pcm_unstable:
+        steer = 0.95
+    elif multi_window:
+        steer = 0.78
+    elif pcm_fallback or pcm_unstable:
         return 0.32
-    return 0.70
+    else:
+        return 0.70
+    # Partial multi-window (missing a section) still takes the fallback tax on
+    # confidence — keep steer from looking fully safe.
+    if pcm_fallback:
+        steer = min(steer, 0.70)
+    return float(steer)
 
 
 def _profile_stability(p) -> float:
@@ -1712,7 +1718,9 @@ def _decode_pcm_with_fallback(
                 if lead >= 2.5:
                     pcm2 = _decode_pcm(path, start_s=float(lead), duration_s=win_s)
                     if pcm2 is not None and _pcm_signal_ok(pcm2):
-                        return pcm2, True, None, None
+                        # Successful audible re-seek is a full single listen — not
+                        # a weak fallback tax (game-cue / front-loaded silence).
+                        return pcm2, False, None, None
             # Longer salvage after multi-window honesty failed — still fallback-taxed.
             # If we only ever had intro evidence, keep the intro edge tag so a pad
             # head cannot look mid-trust after a ~28s re-listen of the same region.
@@ -2169,10 +2177,9 @@ def analyze_audio(
         str(getattr(profile, "shape_note", None) or "") or None if profile and pcm_ok else None
     )
     # Single-window listens do not get a multi-section shape.
-    if shape_note and not multi_window and edge_salvage not in ("ends",):
-        # ends salvage is dual-edge and may carry a shape; intro-only must not.
-        if edge_salvage:
-            shape_note = None
+    # Ends salvage is dual-edge and may carry a shape; everything else clears.
+    if not multi_window and edge_salvage != "ends":
+        shape_note = None
     steer = steer_weight_from_listen(
         pcm_ok=pcm_ok,
         multi_window=multi_window,

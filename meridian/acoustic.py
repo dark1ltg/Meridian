@@ -488,6 +488,10 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
     # ~±12% texture around the base when gated; irregular ambient won't fake energy.
     burst_mod = 1.0 + 0.12 * burst_gate * (burst - 0.35)
     kinetic = float(np.clip(kinetic_base * burst_mod, 0.05, 0.95))
+    # Near-floor hiss: loudness-norm can invent mid Kinetic — pull motion toward
+    # Still using the same raw-RMS audibility gate that hushes Glow.
+    motion_scale = float(np.clip(0.15 + 0.85 * audibility, 0.15, 1.0))
+    kinetic = float(np.clip(0.12 + (kinetic - 0.12) * motion_scale, 0.05, 0.95))
     # Brightness belongs on Shadow↔Glow only — keep energy Still↔Kinetic.
     # Motion/activity dominates Y; loudness is supporting texture (not "loud = Kinetic").
     # After loudness-norm, est mean/peak are relative — still keep them light vs onset/flux.
@@ -512,6 +516,7 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
             0.97,
         )
     )
+    energy = float(np.clip(0.12 + (energy - 0.12) * motion_scale, 0.03, 0.97))
 
     # np.clip does not scrub NaN — never leak non-finite moods.
     if not np.isfinite(valence):
