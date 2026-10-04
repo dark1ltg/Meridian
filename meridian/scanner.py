@@ -336,12 +336,11 @@ class AnalyzeWorker(QObject):
                         break
                     if not result.pcm_ok:
                         # No waveform this pass.
-                        # Prior PCM acoustics → keep that placement and defer retry
-                        # (do not downgrade a good listen to a tag sticky-note).
+                        # Prior PCM acoustics → keep that placement and conclude
+                        # analyzed=1 (do not leave analyzed=0 or every launch
+                        # re-queues the whole library). Explicit Rescan retries.
                         if self.library.had_pcm_acoustics(track.id):
-                            self.library.defer_analyze(
-                                track.id, note="pcm pending · kept prior"
-                            )
+                            self.library.conclude_kept_prior(track.id)
                         elif result.seed_evidence:
                             # First-time / never-heard: conclude on tags so the map
                             # still shows the full collection.

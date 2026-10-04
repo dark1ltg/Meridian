@@ -187,7 +187,10 @@ def test_analyze_worker_keeps_prior_pcm_when_decode_misses(tmp_path: Path, qapp)
                 AnalyzeWorker(lib).run()
         t = lib.get(tid)
         assert t is not None
-        assert t.analyzed is False  # deferred for retry
+        # Kept-prior must conclude analyzed=1 — deferring forever re-queues the
+        # whole library on every launch (live 7163 backlog).
+        assert t.analyzed is True
+        assert tid not in lib.unanalyzed_ids()
         assert abs(t.valence - 0.62) < 1e-9
         assert abs(t.energy - 0.71) < 1e-9
         assert t.brightness == 0.61

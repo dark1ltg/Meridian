@@ -948,7 +948,12 @@ class Library:
         return int(track_id) in self._playback_denylist
 
     def defer_analyze(self, track_id: int, *, note: str = "pcm pending") -> None:
-        """Leave analyzed=0 but denylist this session so silent PCM miss can retry later."""
+        """Leave analyzed=0 but denylist this session so silent PCM miss can retry later.
+
+        Use only when there is no prior PCM placement to keep. If acoustics already
+        exist, call :meth:`conclude_kept_prior` instead — leaving analyzed=0 forever
+        re-queues the whole library on every launch.
+        """
         tid = int(track_id)
         self._analyze_denylist.add(tid)
         with self.lock:
@@ -964,6 +969,63 @@ class Library:
                 (merged, tid),
             )
             self.conn.commit()
+
+    def conclude_kept_prior(
+        self, track_id: int, *, note: str = "pcm pending · kept prior"
+    ) -> None:
+        """Honest conclude when this listen failed but a prior waveform placement stands.
+
+        Marks analyzed=1 without touching valence/energy/acoustics so the track is
+        not eternally re-queued. Explicit Rescan still zeros analyzed for a retry.
+        """
+        tid = int(track_id)
+        # Session denylist: avoid a same-run claim if a dual worker races.
+        self._analyze_denylist.add(tid)
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT pinned, confidence_note FROM tracks WHERE id = ?", (tid,)
+            ).fetchone()
+            if not row:
+                return
+            if int(row["pinned"] or 0):
+                # Pins already keep mood; just clear the pending-analyze flag.
+                self.conn.execute(
+                    "UPDATE tracks SET analyzed = 1 WHERE id = ?", (tid,)
+                )
+            else:
+                merged = self._append_note(row["confidence_note"], note)
+                self.conn.execute(
+                    "UPDATE tracks SET confidence_note = ?, analyzed = 1 WHERE id = ?",
+                    (merged, tid),
+                )
+            self.conn.commit()
+
+    def heal_kept_prior_pending(self) -> int:
+        """One-shot: mark stuck 'kept prior' rows analyzed so launches stop re-listening.
+
+        Matches the live mass-defer backlog (analyzed=0 + prior acoustics + kept prior
+        note). Safe without shape/steer columns. Rescan still zeros analyzed afterward.
+        """
+        with self.lock:
+            rows = self.conn.execute(
+                """
+                SELECT id FROM tracks
+                WHERE analyzed = 0
+                  AND (brightness IS NOT NULL OR acoustic_flux IS NOT NULL)
+                  AND instr(lower(COALESCE(confidence_note, '')), 'kept prior') > 0
+                """
+            ).fetchall()
+            ids = [int(r["id"]) for r in rows]
+            if not ids:
+                return 0
+            self.conn.executemany(
+                "UPDATE tracks SET analyzed = 1 WHERE id = ?",
+                [(i,) for i in ids],
+            )
+            self.conn.commit()
+        for tid in ids:
+            self._analyze_denylist.discard(tid)
+        return len(ids)
 
     def count_tracks_under(self, root: Path | str) -> int:
         """How many DB tracks resolve under this library root (for sparse-mount guards)."""

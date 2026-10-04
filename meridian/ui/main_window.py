@@ -966,6 +966,16 @@ class MainWindow(QMainWindow):
             ):
                 self.library.requeue_seed_only_without_pcm()
                 self.settings.setValue("analyze/retry_seed_after_ffmpeg", False)
+        # Heal mass "kept prior" defer backlog once per process so a stuck DB
+        # (analyzed=0 forever after failed re-listen) does not re-queue everyone.
+        # Runs before pending select; does not re-fire after mid-session Rescan.
+        if not getattr(self, "_healed_kept_prior", False):
+            self._healed_kept_prior = True
+            healed = self.library.heal_kept_prior_pending()
+            if healed:
+                self._set_job_status(
+                    f"Kept prior mood for {healed} track{'s' if healed != 1 else ''}…"
+                )
         pending_ids = self.library.unanalyzed_ids()
         if not pending_ids:
             self._clear_job_status()
