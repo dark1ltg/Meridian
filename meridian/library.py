@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS tracks (
     acoustic_flux REAL,
     onset_consistency REAL,
     brightness REAL,
+    shape_note TEXT,
+    timbre_flag TEXT,
+    timbre_source TEXT,
+    steer_weight REAL,
     playback_denied INTEGER NOT NULL DEFAULT 0
 );
 
@@ -80,6 +84,10 @@ class Track:
     acoustic_flux: float | None = None
     onset_consistency: float | None = None
     brightness: float | None = None
+    shape_note: str | None = None
+    timbre_flag: str | None = None
+    timbre_source: str | None = None
+    steer_weight: float | None = None
 
     @property
     def label(self) -> str:
@@ -141,6 +149,14 @@ class Library:
                 self.conn.execute("ALTER TABLE tracks ADD COLUMN onset_consistency REAL")
             if "brightness" not in cols:
                 self.conn.execute("ALTER TABLE tracks ADD COLUMN brightness REAL")
+            if "shape_note" not in cols:
+                self.conn.execute("ALTER TABLE tracks ADD COLUMN shape_note TEXT")
+            if "timbre_flag" not in cols:
+                self.conn.execute("ALTER TABLE tracks ADD COLUMN timbre_flag TEXT")
+            if "timbre_source" not in cols:
+                self.conn.execute("ALTER TABLE tracks ADD COLUMN timbre_source TEXT")
+            if "steer_weight" not in cols:
+                self.conn.execute("ALTER TABLE tracks ADD COLUMN steer_weight REAL")
             if "playback_denied" not in cols:
                 self.conn.execute(
                     "ALTER TABLE tracks ADD COLUMN playback_denied INTEGER NOT NULL DEFAULT 0"
@@ -369,6 +385,10 @@ class Library:
         onset_consistency: float | None = None,
         acoustic_flux: float | None = None,
         brightness: float | None = None,
+        shape_note: str | None = None,
+        timbre_flag: str | None = None,
+        timbre_source: str | None = None,
+        steer_weight: float | None = None,
         from_pcm: bool = True,
     ) -> None:
         with self.lock:
@@ -385,6 +405,10 @@ class Library:
                         onset_consistency = ?,
                         acoustic_flux = ?,
                         brightness = ?,
+                        shape_note = ?,
+                        timbre_flag = ?,
+                        timbre_source = ?,
+                        steer_weight = ?,
                         analyzed = 1
                     WHERE id = ?
                     """,
@@ -398,6 +422,10 @@ class Library:
                         onset_consistency,
                         acoustic_flux,
                         brightness,
+                        shape_note,
+                        timbre_flag,
+                        timbre_source,
+                        steer_weight,
                         track_id,
                     ),
                 )
@@ -434,6 +462,10 @@ class Library:
                         onset_consistency = COALESCE(?, onset_consistency),
                         acoustic_flux = COALESCE(?, acoustic_flux),
                         brightness = COALESCE(?, brightness),
+                        shape_note = COALESCE(?, shape_note),
+                        timbre_flag = COALESCE(?, timbre_flag),
+                        timbre_source = COALESCE(?, timbre_source),
+                        steer_weight = COALESCE(?, steer_weight),
                         analyzed = 1
                     WHERE id = ?
                     """,
@@ -447,6 +479,10 @@ class Library:
                         onset_consistency,
                         acoustic_flux,
                         brightness,
+                        shape_note,
+                        timbre_flag,
+                        timbre_source,
+                        steer_weight,
                         track_id,
                     ),
                 )
@@ -1122,6 +1158,26 @@ class Library:
             brightness=(
                 float(row["brightness"])
                 if "brightness" in row.keys() and row["brightness"] is not None
+                else None
+            ),
+            shape_note=(
+                (row["shape_note"] or None)
+                if "shape_note" in row.keys() and row["shape_note"]
+                else None
+            ),
+            timbre_flag=(
+                (row["timbre_flag"] or None)
+                if "timbre_flag" in row.keys() and row["timbre_flag"]
+                else None
+            ),
+            timbre_source=(
+                (row["timbre_source"] or None)
+                if "timbre_source" in row.keys() and row["timbre_source"]
+                else None
+            ),
+            steer_weight=(
+                float(row["steer_weight"])
+                if "steer_weight" in row.keys() and row["steer_weight"] is not None
                 else None
             ),
         )

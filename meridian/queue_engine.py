@@ -209,6 +209,14 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
                 importance += 0.06
             elif oc < 0.35:
                 importance -= 0.04
+        # Focus / Dim: tonal loops over noisy stings (timbre is not a map axis).
+        timbre = getattr(track, "timbre_flag", None)
+        if timbre == "tonal" and ctx.mode in (Mode.FOCUS, Mode.DIM):
+            importance += 0.03
+        elif timbre == "noisy" and ctx.mode == Mode.FOCUS:
+            importance -= 0.04
+        elif timbre == "noisy" and ctx.mode == Mode.DIM and track.energy > 0.55:
+            importance -= 0.05
         # Prefer sure pins over dim scrapes at similar distance (Focus / NOW neighborhood).
         # Keep the nudge light so it doesn't stack harshly with Focus onset_consistency;
         # a closer dim neighbor must still be able to compete on combined score.
@@ -227,6 +235,23 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
                 fit = min(1.0, fit + 0.01)
             if ctx.mode == Mode.FOCUS and conf >= CONFIDENCE_HIGH:
                 importance += 0.01
+        # Steer weight: seed-only / intro-only are barely safe to steer — cut
+        # importance lightly here; NOW promotion is gated separately below.
+        raw_steer = getattr(track, "steer_weight", None)
+        if raw_steer is None:
+            # Legacy rows: infer a weak prior from confidence_note text.
+            note = (track.confidence_note or "").lower()
+            if "seed only" in note or "intro only" in note:
+                steer = 0.05
+            elif "end only" in note or "ends only" in note:
+                steer = 0.22
+            else:
+                steer = 0.55 if not track.low_trust else 0.30
+        else:
+            steer = float(raw_steer)
+        if steer < 0.20 and not track.pinned and not track.loved:
+            importance *= 0.82
+            fit *= 0.94
         importance = min(1.0, max(0.0, importance)) * (1.0 - 0.45 * skip_ratio)
         # High skip pressure softens NOW stickiness (favor exploring the ring).
         urgency = fit * (1.0 - 0.18 * pressure)
@@ -236,6 +261,22 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
             urgency = min(1.0, urgency + 0.08)
         if ctx.mode.value == "dim" and track.energy < 0.4:
             urgency = min(1.0, urgency + 0.08)
+        # Shape note: Dim avoids drop-shaped tracks; Charge prefers them.
+        shape = getattr(track, "shape_note", None)
+        if shape == "drop":
+            if ctx.mode == Mode.CHARGE:
+                urgency = min(1.0, urgency + 0.10)
+                importance = min(1.0, importance + 0.04)
+            elif ctx.mode == Mode.DIM:
+                urgency *= 0.72
+                importance *= 0.85
+        elif shape == "build" and ctx.mode == Mode.CHARGE:
+            urgency = min(1.0, urgency + 0.04)
+        elif shape == "steady" and ctx.mode == Mode.DIM:
+            urgency = min(1.0, urgency + 0.03)
+        # Low steer: further soften urgency so they lose NOW races.
+        if steer < 0.20 and not track.pinned and not track.loved and track.id not in explicit_ids:
+            urgency *= 0.35
         ranked.append(
             RankedTrack(
                 track=track,
@@ -273,7 +314,17 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
         if n_now + n_deep >= n:
             n_deep = max(1, n - n_now - 1) if n >= 3 else n - n_now
 
+    def _steer_of(item: RankedTrack) -> float:
+        raw = getattr(item.track, "steer_weight", None)
+        if raw is not None:
+            return float(raw)
+        note = (item.track.confidence_note or "").lower()
+        if "seed only" in note or "intro only" in note:
+            return 0.05
+        return 0.55
+
     range_order = 0
+    deferred_low_steer: list[int] = []
     for i in nearby_idx:
         item = ranked[i]
         if item.track.id in explicit_ids:
@@ -281,9 +332,30 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
             continue
         if i not in in_range_set:
             continue
+        # Push seed-only / intro-only out of NOW unless pinned or loved.
+        t = item.track
+        low_steer = (
+            _steer_of(item) < 0.20
+            and not t.pinned
+            and not t.loved
+        )
         if range_order < n_now:
+            if low_steer:
+                deferred_low_steer.append(i)
+                continue
             item.quadrant = Quadrant.NOW
         elif range_order < n_now + n_deep:
+            item.quadrant = Quadrant.DEEP
+        else:
+            item.quadrant = Quadrant.FILL
+        range_order += 1
+
+    # Low-steer leftovers land in DEEP/FILL, never backfilled into NOW.
+    for i in deferred_low_steer:
+        item = ranked[i]
+        if item.quadrant != Quadrant.SHELF:
+            continue
+        if range_order < n_now + n_deep:
             item.quadrant = Quadrant.DEEP
         else:
             item.quadrant = Quadrant.FILL

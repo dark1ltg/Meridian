@@ -356,6 +356,10 @@ class AnalyzeWorker(QObject):
                                 onset_consistency=result.onset_consistency,
                                 acoustic_flux=result.acoustic_flux,
                                 brightness=result.brightness,
+                                shape_note=result.shape_note,
+                                timbre_flag=result.timbre_flag,
+                                timbre_source=result.timbre_source,
+                                steer_weight=result.steer_weight,
                                 from_pcm=False,
                             )
                         else:
@@ -372,6 +376,10 @@ class AnalyzeWorker(QObject):
                             onset_consistency=result.onset_consistency,
                             acoustic_flux=result.acoustic_flux,
                             brightness=result.brightness,
+                            shape_note=result.shape_note,
+                            timbre_flag=result.timbre_flag,
+                            timbre_source=result.timbre_source,
+                            steer_weight=result.steer_weight,
                         )
                 except Exception:
                     # Always denylist in-process; DB mark may fail under lock contention.
