@@ -76,6 +76,44 @@ class QueuePlan:
     by_quadrant: dict[Quadrant, list[RankedTrack]] = field(default_factory=dict)
 
 
+# Below this, steer is "low" — seed/intro/failed listens stay out of NOW unless
+# pinned/loved, or NOW would otherwise be empty (backfill).
+STEER_LOW = 0.20
+
+
+def effective_steer_weight(track: Track) -> float:
+    """Persisted steer_weight, or a shared legacy prior when the column is null.
+
+    Used by both scoring and the NOW gate so analyze-failed / no-PCM / end-only
+    rows cannot outrank honest seed-only concludes.
+    """
+    raw = getattr(track, "steer_weight", None)
+    if raw is not None:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = None
+        else:
+            if value == value:  # not NaN
+                return float(value)
+    note = (getattr(track, "confidence_note", None) or "").lower()
+    if "seed only" in note or "intro only" in note:
+        return 0.05
+    if "analyze failed" in note:
+        return 0.05
+    if "end only" in note or "ends only" in note or "mid only" in note:
+        return 0.15
+    has_pcm = (
+        getattr(track, "brightness", None) is not None
+        or getattr(track, "acoustic_flux", None) is not None
+    )
+    if not has_pcm:
+        return 0.05
+    if bool(getattr(track, "low_trust", False)):
+        return 0.15
+    return 0.55
+
+
 def _gauss(distance: float, radius: float) -> float:
     sigma = max(LENS_RADIUS_MIN * 0.85, radius * 0.72)
     return exp(-(distance * distance) / (2 * sigma * sigma))
@@ -237,19 +275,8 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
                 importance += 0.01
         # Steer weight: seed-only / intro-only are barely safe to steer — cut
         # importance lightly here; NOW promotion is gated separately below.
-        raw_steer = getattr(track, "steer_weight", None)
-        if raw_steer is None:
-            # Legacy rows: infer a weak prior from confidence_note text.
-            note = (track.confidence_note or "").lower()
-            if "seed only" in note or "intro only" in note:
-                steer = 0.05
-            elif "end only" in note or "ends only" in note:
-                steer = 0.22
-            else:
-                steer = 0.55 if not track.low_trust else 0.30
-        else:
-            steer = float(raw_steer)
-        if steer < 0.20 and not track.pinned and not track.loved:
+        steer = effective_steer_weight(track)
+        if steer < STEER_LOW and not track.pinned and not track.loved:
             importance *= 0.82
             fit *= 0.94
         importance = min(1.0, max(0.0, importance)) * (1.0 - 0.45 * skip_ratio)
@@ -262,20 +289,22 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
         if ctx.mode.value == "dim" and track.energy < 0.4:
             urgency = min(1.0, urgency + 0.08)
         # Shape note: Dim avoids drop-shaped tracks; Charge prefers them.
+        # Pins / loves skip shape modifiers (same spirit as steer exceptions).
         shape = getattr(track, "shape_note", None)
-        if shape == "drop":
-            if ctx.mode == Mode.CHARGE:
-                urgency = min(1.0, urgency + 0.10)
-                importance = min(1.0, importance + 0.04)
-            elif ctx.mode == Mode.DIM:
-                urgency *= 0.72
-                importance *= 0.85
-        elif shape == "build" and ctx.mode == Mode.CHARGE:
-            urgency = min(1.0, urgency + 0.04)
-        elif shape == "steady" and ctx.mode == Mode.DIM:
-            urgency = min(1.0, urgency + 0.03)
+        if shape and not track.pinned and not track.loved:
+            if shape == "drop":
+                if ctx.mode == Mode.CHARGE:
+                    urgency = min(1.0, urgency + 0.10)
+                    importance = min(1.0, importance + 0.04)
+                elif ctx.mode == Mode.DIM:
+                    urgency *= 0.72
+                    importance *= 0.85
+            elif shape == "build" and ctx.mode == Mode.CHARGE:
+                urgency = min(1.0, urgency + 0.04)
+            elif shape == "steady" and ctx.mode == Mode.DIM:
+                urgency = min(1.0, urgency + 0.03)
         # Low steer: further soften urgency so they lose NOW races.
-        if steer < 0.20 and not track.pinned and not track.loved and track.id not in explicit_ids:
+        if steer < STEER_LOW and not track.pinned and not track.loved and track.id not in explicit_ids:
             urgency *= 0.35
         ranked.append(
             RankedTrack(
@@ -314,15 +343,6 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
         if n_now + n_deep >= n:
             n_deep = max(1, n - n_now - 1) if n >= 3 else n - n_now
 
-    def _steer_of(item: RankedTrack) -> float:
-        raw = getattr(item.track, "steer_weight", None)
-        if raw is not None:
-            return float(raw)
-        note = (item.track.confidence_note or "").lower()
-        if "seed only" in note or "intro only" in note:
-            return 0.05
-        return 0.55
-
     range_order = 0
     deferred_low_steer: list[int] = []
     for i in nearby_idx:
@@ -332,10 +352,10 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
             continue
         if i not in in_range_set:
             continue
-        # Push seed-only / intro-only out of NOW unless pinned or loved.
+        # Push seed-only / intro-only / failed out of NOW unless pinned or loved.
         t = item.track
         low_steer = (
-            _steer_of(item) < 0.20
+            effective_steer_weight(t) < STEER_LOW
             and not t.pinned
             and not t.loved
         )
@@ -350,7 +370,31 @@ def classify(tracks: list[Track], ctx: Context, explicit_ids: set[int]) -> list[
             item.quadrant = Quadrant.FILL
         range_order += 1
 
-    # Low-steer leftovers land in DEEP/FILL, never backfilled into NOW.
+    # If NOW would be empty (all-nearby low-steer), backfill closest deferred —
+    # prefer pinned/loved/higher steer, then original distance order.
+    now_count = sum(1 for r in ranked if r.quadrant == Quadrant.NOW)
+    need_now = max(0, n_now - now_count)
+    if need_now > 0 and deferred_low_steer:
+        ordered = sorted(
+            enumerate(deferred_low_steer),
+            key=lambda ei: (
+                0 if ranked[ei[1]].track.pinned else 1,
+                0 if ranked[ei[1]].track.loved else 1,
+                -effective_steer_weight(ranked[ei[1]].track),
+                ei[0],
+            ),
+        )
+        backfilled: set[int] = set()
+        for _ord, i in ordered:
+            if need_now <= 0:
+                break
+            ranked[i].quadrant = Quadrant.NOW
+            backfilled.add(i)
+            need_now -= 1
+            range_order += 1
+        deferred_low_steer = [i for i in deferred_low_steer if i not in backfilled]
+
+    # Remaining low-steer leftovers land in DEEP/FILL.
     for i in deferred_low_steer:
         item = ranked[i]
         if item.quadrant != Quadrant.SHELF:
