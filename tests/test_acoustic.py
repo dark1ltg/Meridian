@@ -313,6 +313,7 @@ def test_container_seed_skips_soft_pcm_lock() -> None:
     """OST/game catalog labels stay neighborhoods but do not soft-lock PCM like metal+BPM."""
     from unittest.mock import patch
 
+    from meridian.acoustic import AcousticProfile
     from meridian.features import analyze_audio, genre_seed
 
     sr = SAMPLERATE
@@ -322,10 +323,28 @@ def test_container_seed_skips_soft_pcm_lock() -> None:
     seed = genre_seed("soundtrack", "Boss Theme", "Composer", path="/music/OST/game/x.flac")
     assert seed.container_only
     assert seed.clamp_match
+    far = AcousticProfile(
+        valence=0.85,
+        energy=0.80,
+        bpm=120.0,
+        unstable=False,
+        brightness=0.8,
+        flux=0.55,
+        onset_consistency=0.75,
+        variation=0.08,
+        tonal=0.7,
+        spectral_slope=0.65,
+        window_count=3,
+        pcm_samples=pcm.size,
+    )
     with patch("meridian.features._decode_pcm_with_fallback", return_value=(pcm, False, None, None)):
-        result = analyze_audio(
-            "/music/OST/game/x.flac", "soundtrack", "Boss Theme", "Composer", 120.0
-        )
+        with patch(
+            "meridian.features._pcm_mood_cues",
+            return_value=(0.85, 0.80, 120.0, False, far),
+        ):
+            result = analyze_audio(
+                "/music/OST/game/x.flac", "soundtrack", "Boss Theme", "Composer", 120.0
+            )
         # Soft-PCM would keep within SOFT_PCM_MAX_SHIFT; container clamp may move farther.
         from meridian.features import SOFT_PCM_MAX_SHIFT
 

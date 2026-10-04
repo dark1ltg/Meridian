@@ -122,7 +122,11 @@ def trim_silence(pcm: np.ndarray, floor: float = 0.012) -> np.ndarray:
 
 
 def spectral_bands(spec: np.ndarray, freqs: np.ndarray) -> dict[str, float]:
-    """Broad band energy shares from an existing magnitude spectrum."""
+    """Broad band energy shares from an existing magnitude spectrum.
+
+    Partition only (bass/low_mid/mid/high_mid/high). Sub-bass (&lt;~80 Hz) is a
+    parallel leftover computed beside this dict — not a second map axis.
+    """
     denom = float(spec.sum()) + 1e-12
     nyq = float(freqs[-1]) if freqs.size else 5500.0
     edges = (
@@ -131,8 +135,6 @@ def spectral_bands(spec: np.ndarray, freqs: np.ndarray) -> dict[str, float]:
         ("mid", 500.0, 2000.0),
         ("high_mid", 2000.0, min(4000.0, nyq)),
         ("high", min(4000.0, nyq), nyq + 1.0),
-        # Honesty: sub-bass share under ~80 Hz (Shadow vote only — not a map axis).
-        ("sub_bass", 20.0, 80.0),
     )
     out: dict[str, float] = {}
     for name, lo, hi in edges:
@@ -142,6 +144,15 @@ def spectral_bands(spec: np.ndarray, freqs: np.ndarray) -> dict[str, float]:
         mask = (freqs >= lo) & (freqs < hi)
         out[name] = float(np.clip(spec[mask].sum() / denom, 0.0, 1.0))
     return out
+
+
+def sub_bass_share(spec: np.ndarray, freqs: np.ndarray) -> float:
+    """Energy share under ~80 Hz — parallel leftover, not a partition band."""
+    denom = float(spec.sum()) + 1e-12
+    mask = (freqs >= 20.0) & (freqs < 80.0)
+    if not np.any(mask):
+        return 0.0
+    return float(np.clip(spec[mask].sum() / denom, 0.0, 1.0))
 
 
 def normalize_brightness(centroid_hz: float) -> float:
@@ -183,38 +194,149 @@ def frame_zcr(frame: np.ndarray) -> float:
     return float(np.mean(np.abs(np.diff(np.sign(frame)))) / 2.0)
 
 
+def frame_harmonicity(spec: np.ndarray, freqs: np.ndarray) -> float:
+    """0..1 peakiness in the voiced band — high for sung/tones, low for noise/speech.
+
+    Decoupled from spectral flatness so dialogue gating is not deadlocked when
+    ``tonal = 1 - 0.85·flat``. Prefer ``frame_periodicity`` for dialogue keep/drop.
+    """
+    if spec.size < 8 or freqs.size < 8:
+        return 0.5
+    mask = (freqs >= 80.0) & (freqs <= 4000.0)
+    if int(np.count_nonzero(mask)) < 8:
+        return 0.5
+    mag = np.asarray(spec[mask], dtype=np.float64)
+    peak = float(np.max(mag))
+    med = float(np.median(mag)) + 1e-12
+    # Crest ~1 (noise) … tens (pure tone). Map loosely into 0..1.
+    crest = peak / med
+    return float(np.clip(np.log1p(crest) / np.log1p(25.0), 0.0, 1.0))
+
+
+def frame_periodicity(frame: np.ndarray, samplerate: int = SAMPLERATE) -> float:
+    """0..1 clear-period strength from autocorrelation (sung/tonal ≫ speech/noise)."""
+    mono = np.ascontiguousarray(frame, dtype=np.float64)
+    if mono.size < 64:
+        return 0.0
+    mono = mono - float(np.mean(mono))
+    rms = float(np.sqrt(np.mean(mono * mono)) + 1e-12)
+    if rms < 1e-8:
+        return 0.0
+    mono = mono / rms
+    fmin, fmax = 80.0, 1000.0
+    lag_min = max(1, int(samplerate / fmax))
+    lag_max = min(mono.size // 2, int(samplerate / fmin))
+    if lag_max <= lag_min + 2:
+        return 0.0
+    n_fft = 1
+    while n_fft < 2 * mono.size:
+        n_fft <<= 1
+    spec = np.fft.rfft(mono, n=n_fft)
+    ac = np.fft.irfft(spec * np.conj(spec), n=n_fft)[: mono.size]
+    if ac[0] <= 1e-12:
+        return 0.0
+    ac = ac / ac[0]
+    region = ac[lag_min : lag_max + 1]
+    if region.size < 3:
+        return 0.0
+    peak_val = float(np.max(region))
+    return float(np.clip(peak_val, 0.0, 1.0))
+
+
+def estimate_pitch_hz(
+    frame: np.ndarray, samplerate: int = SAMPLERATE, *, fmin: float = 80.0, fmax: float = 1000.0
+) -> float | None:
+    """Lightweight autocorrelation F0 proxy — None when no clear period."""
+    mono = np.ascontiguousarray(frame, dtype=np.float64)
+    if mono.size < int(samplerate / fmin) + 16:
+        return None
+    mono = mono - float(np.mean(mono))
+    rms = float(np.sqrt(np.mean(mono * mono)) + 1e-12)
+    if rms < 1e-8:
+        return None
+    mono = mono / rms
+    lag_min = max(1, int(samplerate / fmax))
+    lag_max = min(mono.size // 2, int(samplerate / fmin))
+    if lag_max <= lag_min + 2:
+        return None
+    # Biased autocorr via FFT (same length).
+    n_fft = 1
+    while n_fft < 2 * mono.size:
+        n_fft <<= 1
+    spec = np.fft.rfft(mono, n=n_fft)
+    ac = np.fft.irfft(spec * np.conj(spec), n=n_fft)[: mono.size]
+    if ac[0] <= 1e-12:
+        return None
+    ac = ac / ac[0]
+    region = ac[lag_min : lag_max + 1]
+    if region.size < 3:
+        return None
+    peak_i = int(np.argmax(region))
+    peak_val = float(region[peak_i])
+    # Require a clear periodic peak (sung/tonal); reject noise.
+    if peak_val < 0.35:
+        return None
+    lag = lag_min + peak_i
+    if lag <= 0:
+        return None
+    hz = float(samplerate) / float(lag)
+    if not (fmin <= hz <= fmax) or not np.isfinite(hz):
+        return None
+    return hz
+
+
+def normalize_pitch_glow(pitch_hz: float) -> float:
+    """Map F0 into Glow contribution — higher pitch → more Glow."""
+    hz = max(80.0, float(pitch_hz))
+    mapped = np.log1p((hz - 80.0) / 120.0) / np.log1p((800.0 - 80.0) / 120.0)
+    return float(np.clip(mapped, 0.05, 0.95))
+
+
 def is_dialogue_frame(
     *,
-    tonal: float,
-    flatness: float,
+    periodicity: float,
     zcr: float,
     bands: dict[str, float],
+    flatness: float | None = None,
+    harmonicity: float | None = None,
 ) -> bool:
     """True only when a local frame is clearly spoken dialogue, not music.
 
-    Bias toward keeping music when unsure — sung vocals are tonal and must not
-    be treated as speech. Returns False unless mid-heavy voice-like *and* not
-    tonal/harmonic enough to be sung or instrumental.
+    Keep when a clear period is present (sung/tonal). Bias toward keeping when
+    unsure. ``harmonicity`` is accepted for back-compat but periodicity wins.
     """
-    t = float(tonal)
-    flat = float(flatness)
-    # Sung / harmonic / instrumental body → keep.
-    if t >= 0.48 or flat < 0.38:
+    period = float(periodicity)
+    # Sung / clear pitched body → keep (never treat sung as speech).
+    if period >= 0.35:
+        return False
+    # Optional: very smooth + peaky spectrum without a strong period still keep.
+    if harmonicity is not None and float(harmonicity) >= 0.72 and period >= 0.22:
+        return False
+    if flatness is not None and float(flatness) < 0.18 and period >= 0.25:
         return False
     mid = float(bands.get("mid", 0.2)) + float(bands.get("high_mid", 0.2))
     bass = float(bands.get("bass", 0.2)) + float(bands.get("low_mid", 0.2))
     z = float(zcr)
-    # Spoken-like: mid presence, speechy ZCR, noise-ish, not bass-pad music.
-    if mid >= 0.40 and mid >= bass * 0.95 and flat >= 0.45 and 0.07 <= z <= 0.38:
+    # Spoken-like: mid presence, speechy ZCR, weak period.
+    if mid >= 0.36 and mid >= bass * 0.85 and period < 0.28 and 0.06 <= z <= 0.42:
         return True
     return False
 
 
 def tonal_onset_score(profile: object) -> float:
     """0..1 quality: real tonality × real onset structure (section blend weight)."""
-    tonal = float(getattr(profile, "tonal", 0.5) or 0.5)
-    onset_c = float(getattr(profile, "onset_consistency", 0.5) or 0.5)
-    onset_r = float(getattr(profile, "onset_rate", 0.0) or 0.0)
+    tonal_raw = getattr(profile, "tonal", None)
+    tonal = float(tonal_raw) if tonal_raw is not None else 0.5
+    if not np.isfinite(tonal):
+        tonal = 0.5
+    oc_raw = getattr(profile, "onset_consistency", None)
+    onset_c = float(oc_raw) if oc_raw is not None else 0.5
+    if not np.isfinite(onset_c):
+        onset_c = 0.5
+    or_raw = getattr(profile, "onset_rate", None)
+    onset_r = float(or_raw) if or_raw is not None else 0.0
+    if not np.isfinite(onset_r):
+        onset_r = 0.0
     tonal_q = float(np.clip((tonal - 0.32) / 0.50, 0.0, 1.0))
     onset_q = float(
         np.clip(0.55 * onset_c + 0.45 * float(np.clip(onset_r / 2.8, 0.0, 1.0)), 0.0, 1.0)
@@ -222,58 +344,21 @@ def tonal_onset_score(profile: object) -> float:
     return float(np.clip(tonal_q * onset_q, 0.0, 1.0))
 
 
-def spectral_slice(
-    pcm: np.ndarray, start: int, n: int, samplerate: int = SAMPLERATE
-) -> tuple[float, float, float, dict[str, float], float]:
-    """bright, bass_share, flatness, bands, centroid_hz for one window."""
-    end = min(start + n, pcm.size)
-    if end - start < n // 2:
-        start = max(0, pcm.size - n)
-        end = pcm.size
-    frame = pcm[start:end]
-    if frame.size < 64:
-        empty = {
-            k: 0.2 for k in ("bass", "low_mid", "mid", "high_mid", "high", "sub_bass")
-        }
-        empty["sub_bass"] = 0.05
-        return 0.5, 0.35, 0.3, empty, 1500.0
-    if frame.size < n:
-        pad = np.zeros(n, dtype=np.float32)
-        pad[: frame.size] = frame
-        frame = pad
-    else:
-        frame = frame[:n]
-    windowed = frame * np.hanning(frame.size)
-    spec = np.abs(np.fft.rfft(windowed)) + 1e-12
-    freqs = np.fft.rfftfreq(frame.size, 1.0 / samplerate)
-    denom = float(spec.sum()) + 1e-12
-    centroid = float((freqs * spec).sum() / denom)
-    bright = normalize_brightness(centroid)
-    bass = float(np.clip(spec[freqs < 250.0].sum() / denom, 0.0, 1.0))
-    power = np.square(spec)
-    flatness = float(np.exp(np.mean(np.log(power))) / (float(np.mean(power)) + 1e-12))
-    flatness = float(np.clip(flatness, 0.0, 1.0))
-    bands = spectral_bands(spec, freqs)
-    # Stash clarity on bands dict under a private key? Prefer separate return —
-    # keep signature stable; callers that need slope use spectral_slice_ex.
-    return bright, bass, flatness, bands, centroid
+def _empty_partition_bands() -> dict[str, float]:
+    return {k: 0.2 for k in ("bass", "low_mid", "mid", "high_mid", "high")}
 
 
 def spectral_slice_ex(
     pcm: np.ndarray, start: int, n: int, samplerate: int = SAMPLERATE
-) -> tuple[float, float, float, dict[str, float], float, float, float]:
-    """Like ``spectral_slice`` plus ``(slope_clarity, frame_zcr)``."""
+) -> tuple[float, float, float, dict[str, float], float, float, float, float, float, float]:
+    """bright, bass, flatness, bands, centroid, slope, zcr, sub_bass, harmonicity, periodicity."""
     end = min(start + n, pcm.size)
     if end - start < n // 2:
         start = max(0, pcm.size - n)
         end = pcm.size
     frame = pcm[start:end]
     if frame.size < 64:
-        empty = {
-            k: 0.2 for k in ("bass", "low_mid", "mid", "high_mid", "high", "sub_bass")
-        }
-        empty["sub_bass"] = 0.05
-        return 0.5, 0.35, 0.3, empty, 1500.0, 0.5, 0.0
+        return 0.5, 0.35, 0.3, _empty_partition_bands(), 1500.0, 0.5, 0.0, 0.05, 0.5, 0.0
     if frame.size < n:
         pad = np.zeros(n, dtype=np.float32)
         pad[: frame.size] = frame
@@ -293,7 +378,20 @@ def spectral_slice_ex(
     bands = spectral_bands(spec, freqs)
     slope = spectral_slope_clarity(spec, freqs)
     zcr = frame_zcr(frame)
-    return bright, bass, flatness, bands, centroid, slope, zcr
+    sub = sub_bass_share(spec, freqs)
+    harm = frame_harmonicity(spec, freqs)
+    period = frame_periodicity(frame, samplerate)
+    return bright, bass, flatness, bands, centroid, slope, zcr, sub, harm, period
+
+
+def spectral_slice(
+    pcm: np.ndarray, start: int, n: int, samplerate: int = SAMPLERATE
+) -> tuple[float, float, float, dict[str, float], float]:
+    """bright, bass_share, flatness, bands, centroid_hz for one window."""
+    bright, bass, flatness, bands, centroid, *_rest = spectral_slice_ex(
+        pcm, start, n, samplerate
+    )
+    return bright, bass, flatness, bands, centroid
 
 
 def spectral_flux(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> float:
@@ -458,13 +556,9 @@ def onset_stats(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> tuple[float | 
 
 def _mean_bands(band_list: list[dict[str, float]]) -> dict[str, float]:
     if not band_list:
-        return {
-            k: 0.2 for k in ("bass", "low_mid", "mid", "high_mid", "high", "sub_bass")
-        }
-    keys = set()
-    for b in band_list:
-        keys.update(b.keys())
-    return {k: float(np.mean([float(b.get(k, 0.0)) for b in band_list])) for k in keys}
+        return _empty_partition_bands()
+    keys = ("bass", "low_mid", "mid", "high_mid", "high")
+    return {k: float(np.mean([float(b.get(k, 0.2)) for b in band_list])) for k in keys}
 
 
 def aggregate_window_metrics(
@@ -475,10 +569,6 @@ def aggregate_window_metrics(
 ) -> tuple[dict[str, float], dict[str, float]]:
     """Robust overall + variation across local windows inside one decode."""
     if not bright:
-        empty_bands = {
-            k: 0.2 for k in ("bass", "low_mid", "mid", "high_mid", "high", "sub_bass")
-        }
-        empty_bands["sub_bass"] = 0.05
         return (
             {
                 "bright": 0.5,
@@ -489,7 +579,7 @@ def aggregate_window_metrics(
                 "variation": 0.0,
                 "unstable": 0.0,
             },
-            empty_bands,
+            _empty_partition_bands(),
         )
     b = np.asarray(bright, dtype=np.float64)
     ba = np.asarray(bass, dtype=np.float64)
@@ -538,16 +628,20 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
     band_list: list[dict[str, float]] = []
     centroids: list[float] = []
     slopes: list[float] = []
-    zcrs: list[float] = []
-    tonals_w: list[float] = []
+    zcrs_w: list[float] = []
+    subs: list[float] = []
+    frame_starts: list[int] = []
     keep_mask: list[bool] = []
     for start in local_analysis_windows(pcm_n.size, n):
-        bright, bass, flat, bands, centroid, slope, zcr_w = spectral_slice_ex(
+        bright, bass, flat, bands, centroid, slope, zcr_w, sub, harm, period = spectral_slice_ex(
             pcm_n, start, n, samplerate
         )
-        tonal_w = float(np.clip(1.0 - 0.85 * flat, 0.05, 0.95))
         dialogue = is_dialogue_frame(
-            tonal=tonal_w, flatness=flat, zcr=zcr_w, bands=bands
+            periodicity=period,
+            zcr=zcr_w,
+            bands=bands,
+            flatness=flat,
+            harmonicity=harm,
         )
         brights.append(bright)
         basses.append(bass)
@@ -555,8 +649,9 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
         band_list.append(bands)
         centroids.append(centroid)
         slopes.append(slope)
-        zcrs.append(zcr_w)
-        tonals_w.append(tonal_w)
+        zcrs_w.append(zcr_w)
+        subs.append(sub)
+        frame_starts.append(start)
         keep_mask.append(not dialogue)
 
     # Drop dialogue frames when at least one musical frame survives; else keep all.
@@ -567,8 +662,9 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
         band_list = [v for v, k in zip(band_list, keep_mask) if k]
         centroids = [v for v, k in zip(centroids, keep_mask) if k]
         slopes = [v for v, k in zip(slopes, keep_mask) if k]
-        zcrs = [v for v, k in zip(zcrs, keep_mask) if k]
-        tonals_w = [v for v, k in zip(tonals_w, keep_mask) if k]
+        zcrs_w = [v for v, k in zip(zcrs_w, keep_mask) if k]
+        subs = [v for v, k in zip(subs, keep_mask) if k]
+        frame_starts = [v for v, k in zip(frame_starts, keep_mask) if k]
 
     agg, bands_m = aggregate_window_metrics(brights, basses, flats, band_list)
     bright = float(agg["bright"])
@@ -576,15 +672,15 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
     variation = float(agg["variation"])
     unstable = bool(agg["unstable"] > 0.5)
     slope_clarity = float(np.median(slopes)) if slopes else 0.5
-    sub_bass = float(bands_m.get("sub_bass", 0.0))
-    centroid_m = float(np.median(centroids)) if centroids else 1500.0
+    sub_bass = float(np.median(subs)) if subs else 0.0
 
     flux = spectral_flux(pcm_n, samplerate)
     est = energy_stats(pcm_n)
     detected_bpm, ostats = onset_stats(pcm_n, samplerate)
 
-    zcr = float(np.mean(zcrs)) if zcrs else (
-        float(np.mean(np.abs(np.diff(np.sign(pcm_n)))) / 2) if pcm_n.size > 2 else 0.0
+    # Whole-buffer ZCR for Kinetic + timbre (window ZCR is dialogue-only).
+    zcr = (
+        float(np.mean(np.abs(np.diff(np.sign(pcm_n)))) / 2.0) if pcm_n.size > 2 else 0.0
     )
     kinetic_zcr = float(np.clip(zcr * 3.2, 0.05, 0.95))
 
@@ -612,12 +708,22 @@ def build_profile(pcm: np.ndarray, samplerate: int = SAMPLERATE) -> AcousticProf
     )
 
     # Pitch for Glow only when the frame is tonal enough; else brightness path.
-    # Centroid pitch proxy — sung/harmonic material may Glow from pitch height;
-    # noisy/speechy frames keep the existing brightness contribution.
+    # Real autocorrelation F0 proxy — not centroid-as-pitch.
     if tonal >= 0.55:
-        pitch_v = normalize_brightness(centroid_m)
-        pitch_v = 0.50 + (pitch_v - 0.50) * audibility
-        bright_term = pitch_v
+        pitch_vals: list[float] = []
+        for start in frame_starts or local_analysis_windows(pcm_n.size, n):
+            end = min(start + n, pcm_n.size)
+            chunk = pcm_n[start:end]
+            hz = estimate_pitch_hz(chunk, samplerate)
+            if hz is not None:
+                pitch_vals.append(hz)
+        if pitch_vals:
+            pitch_v = normalize_pitch_glow(float(np.median(pitch_vals)))
+            pitch_v = 0.50 + (pitch_v - 0.50) * audibility
+            bright_term = pitch_v
+        else:
+            # Tonal but no clear F0 — keep brightness path rather than inventing pitch.
+            bright_term = bright_v
     else:
         bright_term = bright_v
 

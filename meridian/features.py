@@ -290,9 +290,12 @@ class MoodSeed:
     tag_key: str | None = None
     path_key: str | None = None
     keyword_hit: bool = False
-    # Raw keyword deltas (pre-jitter) so analyze can zero them on PCM contradiction.
+    # Applied keyword contribution (after clip) so undo cannot eat genre.
     keyword_dv: float = 0.0
     keyword_de: float = 0.0
+    # Pre-keyword coords (post genre/year/RG) for clip-safe undo.
+    keyword_base_valence: float | None = None
+    keyword_base_energy: float | None = None
 
     @property
     def clamp_match(self) -> bool:
@@ -738,8 +741,13 @@ def genre_seed(
     if fn and fn.lower() not in blob.lower():
         blob = f"{blob} {fn}"
     dv, de = _keyword_shift(blob, skip_words=skip_words)
-    valence = float(np.clip(valence + dv, 0.03, 0.97))
-    energy = float(np.clip(energy + de, 0.03, 0.97))
+    # Persist pre-keyword coords so undo restores genre, not an overshoot past clip.
+    base_v, base_e = float(valence), float(energy)
+    post_kw_v = float(np.clip(base_v + dv, 0.03, 0.97))
+    post_kw_e = float(np.clip(base_e + de, 0.03, 0.97))
+    applied_dv = post_kw_v - base_v
+    applied_de = post_kw_e - base_e
+    valence, energy = post_kw_v, post_kw_e
     # Stable per-path scatter so same-genre cohorts form clouds, not single pixels.
     # Applied at seed time (scan + analyze base) so large imports read as a night sky
     # before PCM tidy finishes.
@@ -752,9 +760,11 @@ def genre_seed(
         energy=energy,
         tag_key=tag_key,
         path_key=path_key,
-        keyword_hit=bool(abs(dv) > 1e-9 or abs(de) > 1e-9),
-        keyword_dv=float(dv),
-        keyword_de=float(de),
+        keyword_hit=bool(abs(applied_dv) > 1e-9 or abs(applied_de) > 1e-9),
+        keyword_dv=float(applied_dv),
+        keyword_de=float(applied_de),
+        keyword_base_valence=float(base_v),
+        keyword_base_energy=float(base_e),
     )
 
 def genre_match(genre: str) -> str | None:
@@ -1283,21 +1293,50 @@ def _avg_tonal(profiles: list, weights: list[float] | None = None) -> float:
     )
 
 
+def _finite_attr(profile: object, attr: str, default: float) -> float:
+    """Read a numeric profile field without treating 0.0 as missing."""
+    raw = getattr(profile, attr, None)
+    if raw is None:
+        return float(default)
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+    if not np.isfinite(val):
+        return float(default)
+    return val
+
+
 def _avg_attr(profiles: list, attr: str, default: float, weights: list[float] | None = None) -> float:
     if not profiles:
         return default
     if weights is None:
-        return float(np.mean([float(getattr(p, attr, default) or default) for p in profiles]))
+        return float(np.mean([_finite_attr(p, attr, default) for p in profiles]))
     total = sum(max(0.0, float(w)) for w in weights)
     if total <= 1e-12:
-        return float(getattr(profiles[0], attr, default) or default)
+        return _finite_attr(profiles[0], attr, default)
     return float(
-        sum(
-            float(getattr(p, attr, default) or default) * max(0.0, float(w))
-            for p, w in zip(profiles, weights)
-        )
+        sum(_finite_attr(p, attr, default) * max(0.0, float(w)) for p, w in zip(profiles, weights))
         / total
     )
+
+
+def _blend_band_energy(profiles: list, weights: list[float]) -> dict[str, float]:
+    """Weight-average partition bands (no sub_bass key — parallel leftover only)."""
+    keys = ("bass", "low_mid", "mid", "high_mid", "high")
+    total = sum(max(0.0, float(w)) for w in weights)
+    if total <= 1e-12 or not profiles:
+        return {k: 0.2 for k in keys}
+    out: dict[str, float] = {}
+    for k in keys:
+        out[k] = float(
+            sum(
+                float((getattr(p, "band_energy", None) or {}).get(k, 0.2)) * max(0.0, float(w))
+                for p, w in zip(profiles, weights)
+            )
+            / total
+        )
+    return out
 
 
 def _pick_timbre_source(profiles: list, weights: list[float] | None = None) -> str | None:
@@ -1323,6 +1362,7 @@ def _reweight_tonal_onset(
 
     A single stingy/flashy window cannot monopolize the song body. Zero-weight
     roles stay zero. If every survivor scores near zero, leave base weights.
+    Floor is re-enforced after cap redistribute so the sting floor cannot break.
     """
     from meridian.acoustic import tonal_onset_score
 
@@ -1339,20 +1379,37 @@ def _reweight_tonal_onset(
     normed = {r: boosted[r] / total for r in boosted}
     n = len(normed)
     floor = min(SECTION_TONAL_ONSET_FLOOR, 1.0 / n)
-    # Enforce floor, then cap any single window so a sting cannot become the song.
+    # Iterate floor + cap to a fixed point (cap excess only onto above-floor peers).
+    for _ in range(6):
+        for r in list(normed):
+            normed[r] = max(normed[r], floor)
+        total = sum(normed.values())
+        normed = {r: normed[r] / total for r in normed}
+        capped = False
+        for r in list(normed):
+            if normed[r] > SECTION_TONAL_ONSET_CAP + 1e-12:
+                excess = normed[r] - SECTION_TONAL_ONSET_CAP
+                normed[r] = SECTION_TONAL_ONSET_CAP
+                peers = [o for o in normed if o != r and normed[o] + 1e-12 < SECTION_TONAL_ONSET_CAP]
+                if not peers:
+                    peers = [o for o in normed if o != r]
+                if peers:
+                    share = excess / len(peers)
+                    for o in peers:
+                        normed[o] += share
+                capped = True
+        total = sum(normed.values())
+        normed = {r: normed[r] / total for r in normed}
+        if not capped and all(normed[r] + 1e-12 >= floor for r in normed):
+            break
+    # Final snap: renorm can leave values a hair under floor.
     for r in list(normed):
-        normed[r] = max(normed[r], floor)
-    total = sum(normed.values())
-    normed = {r: normed[r] / total for r in normed}
-    for r in list(normed):
-        if normed[r] > SECTION_TONAL_ONSET_CAP:
-            excess = normed[r] - SECTION_TONAL_ONSET_CAP
-            normed[r] = SECTION_TONAL_ONSET_CAP
-            others = [o for o in normed if o != r]
-            if others:
-                share = excess / len(others)
-                for o in others:
-                    normed[o] += share
+        if normed[r] < floor:
+            need = floor - normed[r]
+            donor = max(normed, key=lambda k: normed[k])
+            take = min(need, max(0.0, normed[donor] - floor))
+            normed[r] += take
+            normed[donor] -= take
     total = sum(normed.values())
     normed = {r: normed[r] / total for r in normed}
     out = dict(role_weights)
@@ -1362,6 +1419,48 @@ def _reweight_tonal_onset(
         elif r in normed:
             out[r] = float(normed[r])
     return out
+
+
+def _keyword_contradiction_axes(
+    *,
+    keyword_dv: float,
+    keyword_de: float,
+    seed_valence: float,
+    seed_energy: float,
+    pcm_valence: float,
+    pcm_energy: float,
+    onset_consistency: float,
+    unstable: bool,
+    variation: float,
+    keyword_base_valence: float | None = None,
+    keyword_base_energy: float | None = None,
+) -> tuple[bool, bool]:
+    """Per-axis: True when a steady listen clearly opposes that keyword nudge."""
+    dv = float(keyword_dv)
+    de = float(keyword_de)
+    if abs(dv) < 1e-9 and abs(de) < 1e-9:
+        return False, False
+    if unstable or float(onset_consistency) < 0.55 or float(variation) > 0.28:
+        return False, False
+    base_v = (
+        float(keyword_base_valence)
+        if keyword_base_valence is not None
+        else float(seed_valence) - dv
+    )
+    base_e = (
+        float(keyword_base_energy)
+        if keyword_base_energy is not None
+        else float(seed_energy) - de
+    )
+    contra_v = (
+        abs(dv) >= 0.04
+        and (float(pcm_valence) - base_v) * float(np.sign(dv) or 1.0) < -0.10
+    )
+    contra_e = (
+        abs(de) >= 0.04
+        and (float(pcm_energy) - base_e) * float(np.sign(de) or 1.0) < -0.10
+    )
+    return bool(contra_v), bool(contra_e)
 
 
 def _keyword_contradicted_by_pcm(
@@ -1375,26 +1474,24 @@ def _keyword_contradicted_by_pcm(
     onset_consistency: float,
     unstable: bool,
     variation: float,
+    keyword_base_valence: float | None = None,
+    keyword_base_energy: float | None = None,
 ) -> bool:
-    """True when a steady listen clearly opposes the keyword nudge (genre untouched)."""
-    dv = float(keyword_dv)
-    de = float(keyword_de)
-    if abs(dv) < 0.04 and abs(de) < 0.04:
-        return False
-    if unstable or float(onset_consistency) < 0.55 or float(variation) > 0.28:
-        return False
-    base_v = float(seed_valence) - dv
-    base_e = float(seed_energy) - de
-    # Opposite direction from the keyword, with a clear gap (ignore keyword magnitude).
-    contra_v = (
-        abs(dv) >= 0.04
-        and (float(pcm_valence) - base_v) * float(np.sign(dv) or 1.0) < -0.10
+    """True when any axis is clearly contradicted (compat wrapper)."""
+    cv, ce = _keyword_contradiction_axes(
+        keyword_dv=keyword_dv,
+        keyword_de=keyword_de,
+        seed_valence=seed_valence,
+        seed_energy=seed_energy,
+        pcm_valence=pcm_valence,
+        pcm_energy=pcm_energy,
+        onset_consistency=onset_consistency,
+        unstable=unstable,
+        variation=variation,
+        keyword_base_valence=keyword_base_valence,
+        keyword_base_energy=keyword_base_energy,
     )
-    contra_e = (
-        abs(de) >= 0.04
-        and (float(pcm_energy) - base_e) * float(np.sign(de) or 1.0) < -0.10
-    )
-    return bool(contra_v or contra_e)
+    return bool(cv or ce)
 
 
 def _merge_two_pcm_profiles(primary, secondary):
@@ -1425,7 +1522,7 @@ def _merge_two_pcm_profiles(primary, secondary):
         brightness = float((1.0 - inj_v) * winner.brightness + inj_v * loser.brightness)
         flux = float(max(winner.flux, (1.0 - inj_e) * winner.flux + inj_e * loser.flux))
         trend = float((1.0 - inj_e) * winner.energy_trend + inj_e * loser.energy_trend)
-        bands = dict(winner.band_energy)
+        bands = _blend_band_energy([winner, loser], [1.0 - inj_v, inj_v])
         bpm = winner.bpm if winner.bpm is not None else loser.bpm
         onset_consistency = float(winner.onset_consistency)
         variation = float(
@@ -1449,7 +1546,7 @@ def _merge_two_pcm_profiles(primary, secondary):
         brightness = float(wp * primary.brightness + ws * secondary.brightness)
         flux = float(wp * primary.flux + ws * secondary.flux)
         trend = float(wp * primary.energy_trend + ws * secondary.energy_trend)
-        bands = dict(winner.band_energy)
+        bands = _blend_band_energy([primary, secondary], [wp, ws])
         bpms = [b for b in (primary.bpm, secondary.bpm) if b is not None]
         bpm = float(np.median(bpms)) if bpms else None
         onset_consistency = float(winner.onset_consistency)
@@ -1524,9 +1621,9 @@ def _weighted_profile_blend(items: list[tuple[object, float]]):
     anchor = max(normed, key=lambda pw: (pw[1], _profile_stability(pw[0])))[0]
     bpms = [float(p.bpm) for p, _w in normed if getattr(p, "bpm", None) is not None]
     bpm = float(np.median(bpms)) if bpms else None
-    bands = dict(anchor.band_energy)
     profiles = [p for p, _w in normed]
     weights = [w for _p, w in normed]
+    bands = _blend_band_energy(profiles, weights)
     return AcousticProfile(
         valence=float(np.clip(_avg("valence"), 0.03, 0.97)),
         energy=float(np.clip(_avg("energy"), 0.03, 0.97)),
@@ -1565,6 +1662,32 @@ def _attach_shape(profile, role_profiles: dict[str, object]):
     return profile
 
 
+def _preserve_shrunk_intro(
+    weights: dict[str, float],
+    *,
+    intro_cap: float,
+    role_profiles: dict[str, object],
+) -> dict[str, float]:
+    """Restore intentional intro weight below the default 0.20 blend share."""
+    if "intro" not in weights:
+        return weights
+    default_intro = float(SECTION_BLEND_WEIGHTS["intro"])
+    if intro_cap + 1e-12 >= default_intro:
+        return weights
+    out = dict(weights)
+    body = {r: float(out[r]) for r in ("mid", "late") if r in out and r in role_profiles}
+    # Dual paths may use late-only / mid-only companions.
+    if not body:
+        body = {r: float(out[r]) for r in out if r != "intro"}
+    body_total = sum(body.values())
+    remain = max(0.0, 1.0 - intro_cap)
+    out["intro"] = float(intro_cap)
+    if body_total > 1e-12 and remain > 0.0:
+        for r in body:
+            out[r] = remain * (body[r] / body_total)
+    return out
+
+
 def _merge_section_profiles(role_profiles: dict[str, object]):
     """Mid-heavy intro/mid/late merge; cold-open intro cannot veto mid+late."""
     if not role_profiles:
@@ -1572,20 +1695,41 @@ def _merge_section_profiles(role_profiles: dict[str, object]):
     if len(role_profiles) == 1:
         sole = next(iter(role_profiles.values()))
         return _attach_shape(sole, role_profiles)
-    if len(role_profiles) == 2:
-        # Preserve dual-window stabler/inject behavior for two survivors.
-        ordered = [role_profiles[k] for k in ("intro", "mid", "late") if k in role_profiles]
-        if len(ordered) == 2:
-            merged = _merge_two_pcm_profiles(ordered[0], ordered[1])
+
+    roles = [r for r in ("intro", "mid", "late") if r in role_profiles]
+
+    # Dual-window path: tonal×onset reweight + sting floor (same honesty as three-section).
+    if len(roles) == 2:
+        a, b = roles[0], roles[1]
+        pa, pb = role_profiles[a], role_profiles[b]
+        sa, sb = _profile_stability(pa), _profile_stability(pb)
+        # Mild stability prior, then honesty reweight.
+        if sa + sb > 1e-12:
+            wa = 0.38 + 0.24 * (sa / (sa + sb))
         else:
-            merged = _merge_two_pcm_profiles(*ordered)
+            wa = 0.5
+        weights = {a: float(wa), b: float(1.0 - wa)}
+        # Cold-open / outlier intro on dual plans.
+        if a == "intro":
+            span = float(np.hypot(pa.valence - pb.valence, pa.energy - pb.energy))
+            if _is_cold_open_profile(pa) and span > 0.10:
+                weights["intro"] = 0.0
+                weights[b] = 1.0
+            elif span > 0.22:
+                weights["intro"] = SECTION_OUTLIER_INTRO_WEIGHT
+                weights[b] = 1.0 - SECTION_OUTLIER_INTRO_WEIGHT
+        intro_cap = float(weights.get("intro", 1.0))
+        weights = _reweight_tonal_onset(weights, role_profiles)
+        weights = _preserve_shrunk_intro(weights, intro_cap=intro_cap, role_profiles=role_profiles)
+        merged = _weighted_profile_blend([(role_profiles[r], weights[r]) for r in roles])
         return _attach_shape(merged, role_profiles)
 
     intro = role_profiles.get("intro")
     mid = role_profiles.get("mid")
     late = role_profiles.get("late")
     if intro is None or mid is None or late is None:
-        ordered = [role_profiles[k] for k in ("intro", "mid", "late") if k in role_profiles]
+        # Should be unreachable (handled by dual), but keep a safe fallback.
+        ordered = [role_profiles[k] for k in roles]
         merged = _merge_two_pcm_profiles(ordered[0], ordered[1])
         return _attach_shape(merged, role_profiles)
 
@@ -1618,27 +1762,23 @@ def _merge_section_profiles(role_profiles: dict[str, object]):
         weights = dict(SECTION_BODY_AGREE_WEIGHTS)
 
     # Honesty: lean toward windows with real tonality + real onsets; floor so a
-    # sting cannot become the song. Applied after cold-open / outlier / body bias.
-    # Preserve intentional intro caps (0 / outlier 0.08) so flashy stings cannot
-    # re-enter merge health via tonal×onset boost (rehunt score 5).
+    # sting cannot become the song. Preserve any intentional intro below default 0.20
+    # (cold-open 0, outlier 0.08, body-agree 0.15).
     intro_cap = float(weights.get("intro", 0.0))
-    preserve_intro_cap = intro_cap <= SECTION_OUTLIER_INTRO_WEIGHT + 1e-12
     weights = _reweight_tonal_onset(weights, role_profiles)
-    if preserve_intro_cap and "intro" in weights:
-        body = {r: float(weights[r]) for r in ("mid", "late") if r in weights}
-        body_total = sum(body.values())
-        remain = max(0.0, 1.0 - intro_cap)
-        if body_total > 1e-12 and remain > 0.0:
-            weights["intro"] = intro_cap
-            for r in body:
-                weights[r] = remain * (body[r] / body_total)
-        else:
-            weights["intro"] = intro_cap
+    weights = _preserve_shrunk_intro(weights, intro_cap=intro_cap, role_profiles=role_profiles)
 
-    # Strong mid vs late disagreement: prefer stabler body, inject from active loser.
+    # Strong mid vs late disagreement: keep tonal×onset mid/late shares (do not
+    # throw them away for a stability-only merge_two).
     body_disagree = body_span
     if body_disagree > 0.18:
-        body = _merge_two_pcm_profiles(mid, late)
+        mid_w = float(weights.get("mid", 0.0))
+        late_w = float(weights.get("late", 0.0))
+        body_total = mid_w + late_w
+        if body_total <= 1e-12:
+            body = _merge_two_pcm_profiles(mid, late)
+        else:
+            body = _weighted_profile_blend([(mid, mid_w), (late, late_w)])
         if weights["intro"] <= 1e-9:
             return _attach_shape(body, role_profiles)
         merged = _weighted_profile_blend([(intro, weights["intro"]), (body, 1.0 - weights["intro"])])
@@ -2065,24 +2205,34 @@ def analyze_audio(
             multi_window = False
         detected_bpm = _coerce_bpm(detected_bpm)
 
-        onset_c = float(getattr(profile, "onset_consistency", 0.5) or 0.5) if profile else 0.5
-        variation = float(getattr(profile, "variation", 0.0) or 0.0) if profile else 0.0
+        onset_c = _finite_attr(profile, "onset_consistency", 0.5) if profile else 0.5
+        variation = _finite_attr(profile, "variation", 0.0) if profile else 0.0
         unstable = bool(pcm_unstable or variation > 0.28)
-        # Zero keyword nudge when the listen clearly contradicts it — leave genre alone.
-        if keyword_hit and _keyword_contradicted_by_pcm(
-            keyword_dv=float(seed.keyword_dv),
-            keyword_de=float(seed.keyword_de),
-            seed_valence=float(seed.valence),
-            seed_energy=float(seed.energy),
-            pcm_valence=valence_pcm,
-            pcm_energy=energy_pcm,
-            onset_consistency=onset_c,
-            unstable=unstable,
-            variation=variation,
-        ):
-            seed_v = float(np.clip(seed.valence - float(seed.keyword_dv), 0.03, 0.97))
-            seed_e = float(np.clip(seed.energy - float(seed.keyword_de), 0.03, 0.97))
-            keyword_hit = False
+        # Zero keyword nudge per axis when the listen clearly contradicts it —
+        # leave genre alone (undo uses applied deltas / keyword_base, not raw pre-clip).
+        if keyword_hit:
+            contra_v, contra_e = _keyword_contradiction_axes(
+                keyword_dv=float(seed.keyword_dv),
+                keyword_de=float(seed.keyword_de),
+                seed_valence=float(seed.valence),
+                seed_energy=float(seed.energy),
+                pcm_valence=valence_pcm,
+                pcm_energy=energy_pcm,
+                onset_consistency=onset_c,
+                unstable=unstable,
+                variation=variation,
+                keyword_base_valence=seed.keyword_base_valence,
+                keyword_base_energy=seed.keyword_base_energy,
+            )
+            if contra_v:
+                seed_v = float(np.clip(seed.valence - float(seed.keyword_dv), 0.03, 0.97))
+            if contra_e:
+                seed_e = float(np.clip(seed.energy - float(seed.keyword_de), 0.03, 0.97))
+            if contra_v or contra_e:
+                # Keep keyword_hit only if an uncontradicted axis still applied.
+                remain_v = abs(float(seed.keyword_dv)) > 1e-9 and not contra_v
+                remain_e = abs(float(seed.keyword_de)) > 1e-9 and not contra_e
+                keyword_hit = bool(remain_v or remain_e)
         disagree = float(np.hypot(valence_pcm - seed_v, energy_pcm - seed_e))
         genre_conflict = _genre_pair_conflict(seed.tag_key, seed.path_key)
         # Good metadata: real genre, sane tag BPM, not container/weak/conflict.
@@ -2185,9 +2335,10 @@ def analyze_audio(
 
         # Spectral slope as confidence/permission: muffled → stay nearer sticker;
         # clear dark low end may still move Shadow (Glow dampened when muffled).
-        slope = float(getattr(profile, "spectral_slope", 0.5) or 0.5) if profile else 0.5
-        sub = float(getattr(profile, "sub_bass", 0.0) or 0.0) if profile else 0.0
-        bright_pcm = float(getattr(profile, "brightness", 0.5) or 0.5) if profile else 0.5
+        # None-aware reads — exact 0.0 must not become the 0.5 default.
+        slope = _finite_attr(profile, "spectral_slope", 0.5) if profile else 0.5
+        sub = _finite_attr(profile, "sub_bass", 0.0) if profile else 0.0
+        bright_pcm = _finite_attr(profile, "brightness", 0.5) if profile else 0.5
         if slope < SLOPE_MUFFLED_MAX:
             muff = float(np.clip((SLOPE_MUFFLED_MAX - slope) / max(SLOPE_MUFFLED_MAX, 1e-6), 0.0, 1.0))
             soft_shift_v *= 1.0 - 0.45 * muff
@@ -2251,27 +2402,30 @@ def analyze_audio(
 
     # Prefer a real tag BPM for storage; energy nudge may use detected when rhythm is steady.
     out_bpm = tag_bpm if tag_bpm is not None else detected_bpm
-    onset_for_bpm = float(getattr(profile, "onset_consistency", 0.5) or 0.5) if profile else 0.5
-    variation_for_bpm = float(getattr(profile, "variation", 0.0) or 0.0) if profile else 0.0
-    # Pulse clarity — not the BPM number alone — permits a Kinetic step.
-    pulse_clear = bool(
-        pcm_ok
-        and onset_for_bpm >= PULSE_CLARITY_BPM_MIN
-        and not bool(pcm_unstable)
-        and variation_for_bpm < 0.28
-    )
-    if pulse_clear:
-        nudge_bpm = _energy_bpm_for_nudge(
-            tag_bpm,
-            detected_bpm,
-            onset_consistency=onset_for_bpm,
-            unstable=bool(pcm_unstable),
+    onset_for_bpm = _finite_attr(profile, "onset_consistency", 0.5) if profile else 0.5
+    variation_for_bpm = _finite_attr(profile, "variation", 0.0) if profile else 0.0
+    # Pulse clarity — not the BPM number alone — permits a Kinetic step when pulse
+    # was measured. Without PCM, keep the prior tag-BPM nudge.
+    if pcm_ok:
+        pulse_clear = bool(
+            onset_for_bpm >= PULSE_CLARITY_BPM_MIN
+            and not bool(pcm_unstable)
+            and variation_for_bpm < 0.28
         )
-        energy = _bpm_nudge(
-            energy,
-            nudge_bpm,
-            soft=soft_pcm_only or (tag_bpm is None and detected_bpm is not None),
-        )
+        if pulse_clear:
+            nudge_bpm = _energy_bpm_for_nudge(
+                tag_bpm,
+                detected_bpm,
+                onset_consistency=onset_for_bpm,
+                unstable=bool(pcm_unstable),
+            )
+            energy = _bpm_nudge(
+                energy,
+                nudge_bpm,
+                soft=soft_pcm_only or (tag_bpm is None and detected_bpm is not None),
+            )
+    else:
+        energy = _bpm_nudge(energy, tag_bpm, soft=soft_pcm_only)
     if soft_pcm_only and pcm_ok:
         energy = float(
             np.clip(
