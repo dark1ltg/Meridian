@@ -10,7 +10,8 @@ For how that listen turns into a star on the map, see [How stars get placed](pla
 Meridian does **not** listen to the whole song every time.
 
 On long enough tracks it takes **three 12-second tastes** — **intro**, **mid**, and **late** (about **36 seconds** total).  
-Those tastes are blended with a **mid-heavy** mix (roughly 20% intro / 50% mid / 30% late), not a blind average.
+Those tastes are blended with a **mid-heavy** mix (roughly 20% intro / 50% mid / 30% late), not a blind average.  
+If the intro head is near-silent (game cues, long pads), windows **shift onto the first audible stretch** so Meridian isn’t tasting only hush.
 
 Shorter tracks get **one or two** windows only — Meridian will not triple-sample the same few seconds of audio.
 
@@ -50,6 +51,7 @@ It asks your computer’s `ffmpeg` for those section windows. Meridian does **no
 - On long tracks, intro / mid / late are compared. A silent or cold-open intro does **not** veto a clear mid+late body. When mid and late **agree closely** *and* the intro is clearly offset (not a mild build-up), Meridian soft-biases that body so a flashy intro can’t yank the pin — normal intros keep more say. When sections disagree, it keeps the **steadier** song-like taste and may inject contrast from a more active window — not a fake middle.  
 - If only the intro decoded and mid+late failed, analyze still **places** the track as weak/low-trust (`intro only`) so the map shows the full collection — after trying the same longer (~28s) salvage listen used on short/medium dual plans. Late-only / ends-only are also weak-placed (`end only` / `ends only`).  
 - If there is no usable audio **and** no genre/path/keyword evidence, analyze **defers** (`pcm pending`) for a later retry. Tags alone conclude as `seed only` (low-trust).  
+- If a later pass can’t hear audio but Meridian **already kept a good pin** (`pcm pending · kept prior`), that row is **concluded as analyzed** so the whole library isn’t re-queued every launch. **Rescan** still clears analyzed on purpose when you ask for a fresh listen.  
 - If `ffmpeg` is missing, Meridian still plays music, but analyze leaves stars on genre/folder seeds instead of inventing a waveform placement. Startup shows a warning dialog and a sticky status tip (same idea as the missing-libx264 tip).  
 - Stopping analyze kills every in-flight `ffmpeg` process (one or two analyze workers on SSD/NVMe).  
 - Large libraries on flash storage may run **two** analyze workers silently (HDD stays at one).
@@ -60,25 +62,28 @@ If **aubio** is installed, it also hears tempo / beat-ish clues. Without aubio, 
 
 Still on each already-decoded buffer (no extra “go fetch more audio” beyond the section plan):
 
-- Bright vs dark tone  
-- Bass-heavy vs treble-heavy  
-- Steady tone vs noisy / hissy  
+- Bright vs dark tone (loudness-normalized so hot masters don’t fake Kinetic)  
+- Bass-heavy vs treble-heavy (including a light sub-bass Shadow vote)  
+- Steady tone vs noisy / hissy (and optional tonal / noisy timbre hint)  
 - How much the sound changes over time  
 - How even or punchy the loudness is  
 - How regular or jumpy the hits are  
+- Spoken non-musical frames dropped when real music remains  
 
-Then it squashes all of that into the two map directions: **Glow** and **Kinetic**.
+Then it squashes all of that into the two map directions: **Glow** and **Kinetic**.  
+Multi-window listens may also store a simple **shape** note (steady / build / drop / bookend) and a **steer weight** for the queue — not new map axes.
 
 Simple rules of thumb Meridian tries to follow:
 
 - Quiet hiss should **not** look bright and happy.  
-- Brightness belongs on Glow, not “fake energy.”  
-- Weird / jumpy timing is a **texture**, not automatic “this is energetic.”  
-- Uneven, punchy loudness feels more Kinetic than flat, even loudness.
+- Brightness belongs on Glow, not “fake energy.” Clear harmonic tone may set Glow from pitch height; muffled listens stay nearer the sticker.  
+- Weird / jumpy timing is a **texture**, not automatic “this is energetic.” Muddy pulse skips the BPM→Kinetic step.  
+- Uneven, punchy loudness feels more Kinetic than flat, even loudness.  
+- Blend leans toward windows that are both tonal and onset-solid (a flashy sting can’t become the whole song).
 
 ### 5. Save the result
 
-It stores the map position, a confidence note (“how sure are we” — multi-window listens say so), and a few leftover clues (brightness, flux, steady rhythm) for later tidy-ups — **without** listening again.
+It stores the map position, a confidence note (“how sure are we” — multi-window listens say so), shape/timbre/steer leftovers when known, and a few other clues (brightness, flux, steady rhythm) for later tidy-ups — **without** listening again.
 
 **Rescan / mtime refresh:** when Meridian clears the “analyzed” flag so a track will be listened to again, it still **keeps the existing PCM mood coords** if leftover brightness/flux clues remain — so Rescan does not flash stars back to genre seeds until a new successful decode lands. Section blend weights are deterministic (no random jitter on merge).
 

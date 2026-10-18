@@ -55,15 +55,18 @@ It does **not** mean “ignore everything and max out the waveform.”
 
 ### 4. Tiny tempo tweak
 
-BPM can give Kinetic a small push.  
+BPM can give Kinetic a small push — but only when the pulse sounds clear enough.  
 If the tag tempo and the heard tempo disagree, Meridian picks carefully (steady rhythm → heard tempo can win the nudge; otherwise the tag stays in charge).  
 On the “stay near the sticker” path, tempo still can’t kick the star outside that soft neighborhood.
+
+Title/artist mood words that clearly fight a **steady** listen are undone; **genre / folder seed stays**.
 
 ### 5. How sure are we?
 
 Meridian stores a confidence note (tag? path? listen? conflict?).  
 Low confidence means “take this with a grain of salt” in the UI — it doesn’t invent a third map axis.  
-Focus / NOW ranking gives a **light** lift to higher-confidence listens over dim scrapes at similar distance — not enough to bury a clearly closer neighbor.
+Focus / NOW ranking gives a **light** lift to higher-confidence listens over dim scrapes at similar distance — not enough to bury a clearly closer neighbor.  
+Full multi-window listens **steer** the queue more; seed-only / intro-only listens stay out of NOW unless the neighborhood has nothing better (pins and loved tracks still qualify). Shape/timbre leftovers gently bias Dim / Charge / Focus — still the same two map axes.
 
 ### 6. Save (pins stay put)
 
@@ -87,7 +90,7 @@ Rough / partial listens (seed-only, intro-only, end-only) can get nudged toward 
 - Heard *some* audio but not a solid middle → star still placed, marked low-trust.  
 - Heard nothing but tags/folders help → rough `seed only` place (better than a missing star).  
 - Heard nothing *and* no tags → deferred for a later retry.  
-- A later failed listen does **not** overwrite a prior good waveform pin.
+- A later failed listen does **not** overwrite a prior good waveform pin — and that “kept prior” case is marked analyzed so every launch doesn’t re-queue thousands of finished tracks (Rescan still retries on purpose).
 
 ## How listening feeds placement
 

@@ -43,14 +43,14 @@
   </keywords>
   <content_rating type="oars-1.1" />
   <releases>
-    <release version="1.3.6" date="2026-10-03">
+    <release version="1.3.6" date="2026-10-18">
       <description>
         <p>
-          AppImage refresh (still 1.3.6): map/listen blend refinements (slightly
-          freer placement, smarter Kinetic from tags vs waveform, mid+late body
-          trust, Focus prefers sure pins lightly), hunt bug fixes, first-run
-          analyze handoff, intro/mid/end listening, full-library weak pins,
-          silent dual analyze workers on SSD, and packaging CI checksum fix.
+          AppImage refresh (still 1.3.6): louder-normalized short listens,
+          audible-span windows, shape/timbre/steer for the queue, placement
+          honesty cues (dialogue drop, tonal×onset blend, pitch Glow, pulse
+          Kinetic, keyword undo, sub-bass Shadow), kept-prior mass re-queue
+          bug fix, plus earlier path-to-9 blend and dual-worker analyze.
         </p>
       </description>
     </release>

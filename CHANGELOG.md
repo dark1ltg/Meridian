@@ -2,23 +2,30 @@
 
 All notable Meridian releases are listed here. Download AppImages from [Releases](https://github.com/dark1ltg/Meridian/releases).
 
-## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-10-03)
+## [1.3.6](https://github.com/dark1ltg/Meridian/releases/tag/v1.3.6) — 2026-09-10 (AppImage refreshed 2026-10-18)
 
-Version stays **1.3.6**. This refresh tightens how stars land and how the queue picks neighbors — map feel, listening blend, and Focus ranking — on top of earlier analyze / dual-worker / map-completeness work.
+Version stays **1.3.6**. This refresh makes the short listen more honest and the queue more careful — analysis upgrades, placement honesty, and a mass re-queue bug fix — on top of earlier path-to-9 / dual-worker / map-completeness work.
 
-### Path-to-9 blend (this AppImage)
+### Analysis & honesty (this AppImage)
 
-**Refinements**
-- Soft genre+BPM residual and normal genre clamp are slightly looser (still continent-scale — tagged rock stays rock-ish). Wider genre clamps can leave album mates a touch more scattered before tidy — accepted.
-- Steady onset evidence with **good** tags only fine-tunes Kinetic; weaker tags (missing BPM, container-only, genre conflict, weak dumps) allow a stronger waveform/aubio Kinetic pull inside that band.
-- When mid and late tastes agree closely *and* the intro is clearly offset, the merge soft-biases the body so a flashy open can’t yank the pin.
-- Focus / NOW ranking gives a light lift to higher-confidence listens over dim scrapes at similar distance.
+**Smarter short listen**
+- Loudness is normalized before Kinetic/Glow cues so a hot master doesn’t look “more energetic” just because it’s louder.
+- Silent game-cue intros shift the listen onto the first audible stretch instead of tasting only hush.
+- Multi-window listens can store a simple **shape** note (steady / build / drop / bookend) and a **timbre** hint (tonal vs noisy) for the queue — still the same two map axes.
+- Full listens steer the queue more; seed-only / intro-only listens stay out of NOW unless nothing better is nearby (or the track is pinned / loved).
+
+**More honest placement**
+- Spoken non-musical frames are dropped when real music remains in the listen.
+- Blend leans toward windows that are both tonal and onset-solid (with a floor so a flashy sting can’t become the whole song).
+- Clear harmonic tone may set Glow from pitch height; muffled listens stay nearer the sticker; heavy sub-bass can vote Shadow once.
+- Muddy pulse skips the BPM→Kinetic step; title/artist mood words that clearly fight a steady listen are undone (genre/folder seed stays).
 
 **Bug fixes**
-- Mid-shaky listens with good tags no longer get a wider Kinetic shove than a solid listen.
-- Tag↔path genre conflict opens Kinetic/Glow residual room and keeps evidence-opened envelopes (no immediate claw-back).
-- Normal build-up intros keep more say than a half-weight cut when mid+late agree (body bias only when the intro is clearly offset).
-- Focus onset + confidence don’t bury a closer dim neighbor; exact confidence `0.0` counts as unsure, not medium.
+- **Kept-prior PCM miss no longer re-queues the whole library:** when a later pass can’t hear audio but Meridian already kept a good pin (`pcm pending · kept prior`), that row is marked analyzed so every launch doesn’t re-listen thousands of finished tracks. Rescan still retries on purpose.
+- NOW fills with the closest neighbors when everything under the lens is low-steer (no empty NOW from seed-only neighborhoods).
+- Finding audio after a silent head is a normal listen, not a “weak listen” tax; partial multi-window listens can’t claim full steer weight.
+- Skimpy re-analyze keeps a prior shape note; seed-only rows don’t get fake high steer; near-floor hiss stays quiet on Glow.
+- Dialogue / slope / pitch-Glow / keyword-undo / dual-window honesty gates fixed so the honesty pack actually fires on real audio.
 
 ### What’s new (plain English)
 
@@ -66,6 +73,10 @@ Version stays **1.3.6**. This refresh tightens how stars land and how the queue 
 
 ### Earlier 1.3.6 refreshes (still included)
 
+**2026-10-03 — path-to-9 blend**
+- Soft genre+BPM residual and normal genre clamp slightly looser; good tags only fine-tune Kinetic; mid+late body trust when the intro is clearly offset; Focus lightly prefers sure pins.
+- **Bug fixes:** mid-shaky listens don’t get a wider Kinetic shove; tag↔path conflict keeps evidence-opened envelopes; normal build-ups keep more say; confidence `0.0` counts as unsure.
+
 **2026-10-02 — queue / Rescan / search / reliability**
 - Dead next / sole-track next no longer hard-restarts or strands playback; deferred analyze status is honest.
 - Rescan keeps prior waveform placement until a new decode lands; matrix re-click restarts in place; zoom LOD recovers; missing host ffmpeg warns at startup.
@@ -83,7 +94,7 @@ Version stays **1.3.6**. This refresh tightens how stars land and how the queue 
 
 - AppImage baseline remains Ubuntu 24.04 / glibc 2.38+.
 - Host **ffmpeg** required for mood analysis; system **libx264** for H.264 playback through Qt’s FFmpeg plugin (not bundled).
-- Release AppImage refreshed **2026-10-03** with path-to-9 blend + hunt fixes (plus earlier analyze / dual-worker / map-completeness work).
+- Release AppImage refreshed **2026-10-18** with analysis upgrades, placement honesty, and kept-prior defer fix (plus earlier path-to-9 / dual-worker / map-completeness work).
 - **Bug fix:** AppImage AppStream stamp now updates only the newest release row (older history like 1.3.5 stays intact).
 - **Bug fix:** GitHub “Refresh AppImage” workflow no longer fails with Permission denied when writing the SHA256 checksum after a Docker/proot build.
 
