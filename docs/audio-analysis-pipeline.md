@@ -56,7 +56,7 @@ It asks your computer’s `ffmpeg` for those section windows. Meridian does **no
 - Stopping analyze kills every in-flight `ffmpeg` process (one or two analyze workers on SSD/NVMe).  
 - Large libraries on flash storage may run **two** analyze workers silently (HDD stays at one).
 
-If **aubio** is installed, it also hears tempo / beat-ish clues. Without aubio, Meridian still works; it just has less rhythm info.
+The release **AppImage** ships aubio built **without** libavcodec (sndfile + fftw3f), so tempo / onset work without host `libx264` (older distro libaubio pulled `libavcodec.so.60` → `libx264.so.164`). A **source checkout** still uses host aubio/ffmpeg — install native aubio for the same rhythm cues; without it, Meridian still works with less tempo info.
 
 ### 4. What it measures in that snippet
 

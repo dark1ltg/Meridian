@@ -93,8 +93,8 @@ Version stays **1.3.6**. This refresh makes the short listen more honest and the
 ### Packaging
 
 - AppImage baseline remains Ubuntu 24.04 / glibc 2.38+.
-- Host **ffmpeg** required for mood analysis; system **libx264** for H.264 playback through Qt’s FFmpeg plugin (not bundled).
-- Aubio in the AppImage is built without libavcodec (sndfile + fftw3f). Distro libaubio pulls `libavcodec.so.60`, which needs `libx264.so.164`; Kubuntu 26.04 only ships `.165`, so `import aubio` used to fail and tempo/onset were skipped. Meridian only feeds aubio PCM. A source checkout still uses host aubio/ffmpeg.
+- Host **ffmpeg** required for mood analysis; system **libx264** for H.264 playback through Qt’s FFmpeg plugin (not bundled). Host libx264 is **not** required for AppImage tempo/onset.
+- **Bug fix:** AppImage tempo/onset no longer needs host `libx264`. Aubio is built without libavcodec (sndfile + fftw3f). Distro libaubio pulls `libavcodec.so.60`, which needs `libx264.so.164`; Kubuntu 26.04 only ships `.165`, so `import aubio` used to fail and rhythm cues were skipped. Meridian only feeds aubio PCM. A source checkout still uses host aubio/ffmpeg.
 - Release AppImage packaging refreshed **2026-11-07** (America/New_York) for the aubio build; analysis upgrades, placement honesty, and kept-prior defer fix remain (plus earlier path-to-9 / dual-worker / map-completeness work).
 - **Bug fix:** AppImage AppStream stamp now updates only the newest release row (older history like 1.3.5 stays intact).
 - **Bug fix:** GitHub “Refresh AppImage” workflow no longer fails with Permission denied when writing the SHA256 checksum after a Docker/proot build.

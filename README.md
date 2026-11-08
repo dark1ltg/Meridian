@@ -19,7 +19,7 @@ Meridian is a local, offline Linux music player. Every track becomes a star on a
 - **Mood map** — browse by atmosphere instead of folders; drag the lens, scroll to resize, pinch to zoom
 - **Listen matrix** — nearby tracks sorted into NOW / DEEP / FILL / SHELF
 - **Context queue** — replenishes from the lens, time of day, and listening mode (Focus, Wander, Charge, Dim); **Renew queue** pulls a fresh queue from the current matrix without counting replaced songs as skips
-- **Local analysis** — tags plus a short waveform listen (`ffmpeg`: intro/mid/end on long tracks, shifted past silent heads); optional **aubio** for tempo/onset cues; SSD libraries may listen with two workers at once
+- **Local analysis** — tags plus a short waveform listen (`ffmpeg`: intro/mid/end on long tracks, shifted past silent heads); **aubio** for tempo/onset cues (bundled in the AppImage without libavcodec; optional host aubio when running from source); SSD libraries may listen with two workers at once
 - **Pins & search** — drag a star to lock its mood; search by title, artist, album, or path
 - **Crossfade** — smooth advances while something is already playing
 
@@ -31,7 +31,7 @@ Meridian is a local, offline Linux music player. Every track becomes a star on a
 
 The release AppImage needs **glibc 2.38+** (Ubuntu 24.04 ships **2.39**). Distros with older glibc (for example AlmaLinux 9 / glibc 2.34) will not run it. AlmaLinux 10 (glibc 2.39) matches the baseline.
 
-Also install host **`ffmpeg`** for mood analysis. For H.264 through Qt’s FFmpeg plugin, install system **`x264` / `libx264`** (not bundled). Meridian warns if that library is missing. Aubio in the AppImage is built without libavcodec, so tempo/onset does not need host `libx264.so.164` (Kubuntu 26.04 ships `.165` only). A source checkout still uses host aubio/ffmpeg.
+Also install host **`ffmpeg`** for mood analysis. For H.264 through Qt’s FFmpeg plugin, install system **`x264` / `libx264`** (not bundled). Meridian warns if that library is missing. Aubio in the AppImage is built without libavcodec, so **tempo/onset does not need host libx264** (distro libaubio used to pull `libavcodec.so.60` → `libx264.so.164`; Kubuntu 26.04 ships `.165` only). Host libx264 remains for H.264 playback only. A source checkout still uses host aubio/ffmpeg.
 
 On broken GPU/EGL setups (some VMs / missing Mesa), Meridian **does not** use an OpenGL mood-map viewport by default. The map runs on a normal software widget path. To opt into GPU acceleration when your drivers are healthy:
 
@@ -71,7 +71,7 @@ Needs system PySide6 (Qt 6) plus a venv for analysis libraries:
 bash scripts/run.sh
 ```
 
-`aubio` needs the native library (e.g. Arch/CachyOS: `sudo pacman -S aubio`). Without it, Meridian still runs; tempo/onset cues are skipped.
+From source, `aubio` needs the native library (e.g. Arch/CachyOS: `sudo pacman -S aubio`). Without it, Meridian still runs; tempo/onset cues are skipped. The AppImage already bundles a PCM-only aubio build (no host libx264 required for tempo).
 
 **Add library folder** imports music. `~/Music` is scanned on first launch if it exists. **Rescan** refreshes tags and re-analyzes every track.
 
@@ -84,7 +84,7 @@ bash packaging/build-appimage-ubuntu2404.sh
 # → dist/Meridian-x86_64-ubuntu2404.AppImage  (also Meridian-x86_64.AppImage)
 ```
 
-Uses Docker/Podman with `ubuntu:24.04`, or a local Ubuntu 24.04 rootfs via proot when containers are unavailable.
+Uses Docker/Podman with `ubuntu:24.04`, or a local Ubuntu 24.04 rootfs via proot when containers are unavailable. The recipe compiles aubio into the extension **without** libavcodec (sndfile + fftw3f) so AppImage tempo does not depend on host `libx264.so.164`.
 
 A plain host build may only run on machines as new as your build PC:
 

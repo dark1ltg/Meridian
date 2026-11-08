@@ -108,10 +108,13 @@ Install it separately under whatever licence applies to your system package.
 libx264 (host — not bundled)
 ----------------------------------------------------------------------------
 libx264 is commonly GPL-2.0-only and must not be redistributed inside this
-GPL-3.0-only AppImage. Bundled libavcodec may load the host libx264 at
-runtime when present. Install your distribution’s x264 / libx264 package
-(e.g. Arch/CachyOS: `pacman -S x264`). Meridian warns at startup if it is
-missing while the FFmpeg media backend is in use.
+GPL-3.0-only AppImage. Bundled Qt FFmpeg playback (libavcodec) may load the
+host libx264 at runtime when present — that is for H.264 playback only.
+AppImage aubio is built without libavcodec, so tempo/onset does not need
+host libx264. Install your distribution’s x264 / libx264 package
+(e.g. Arch/CachyOS: `pacman -S x264`) if you want H.264 via the FFmpeg
+media backend. Meridian warns at startup if it is missing while that
+backend is in use.
 
 ----------------------------------------------------------------------------
 appimagetool (build-only)

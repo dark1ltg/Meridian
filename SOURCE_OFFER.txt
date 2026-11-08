@@ -54,6 +54,8 @@ C. Not redistributed in this AppImage
   - Host `ffmpeg` CLI (mood analysis) — install separately.
   - Host `libx264` (GPL-2.0-only; incompatible to bundle with Meridian GPL-3)
     — install separately if needed for H.264 via Qt’s FFmpeg plugin.
+    AppImage aubio is built without libavcodec, so tempo/onset does not
+    require host libx264.
 
 Build Meridian from source with the scripts in packaging/ as described in
 README.md.
