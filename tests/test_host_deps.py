@@ -53,3 +53,16 @@ def test_should_warn_missing_ffmpeg_cli(monkeypatch) -> None:
     monkeypatch.setattr("meridian.host_deps.shutil.which", lambda _n: "/usr/bin/ffmpeg")
     assert host_ffmpeg_available() is True
     assert should_warn_missing_ffmpeg() is False
+
+
+def test_packaging_builds_aubio_without_distro_ffmpeg() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    recipe = (root / "packaging" / "build-appimage-ubuntu2404.sh").read_text(encoding="utf-8")
+    audit = (root / "packaging" / "build-appimage.sh").read_text(encoding="utf-8")
+    assert "libavcodec*" in recipe
+    assert "'fftw3f'" in recipe
+    assert "libaubio-dev" not in recipe
+    assert "libx264" in audit
+    assert "aubio still linked to distro ffmpeg" in audit

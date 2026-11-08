@@ -31,7 +31,7 @@ Meridian is a local, offline Linux music player. Every track becomes a star on a
 
 The release AppImage needs **glibc 2.38+** (Ubuntu 24.04 ships **2.39**). Distros with older glibc (for example AlmaLinux 9 / glibc 2.34) will not run it. AlmaLinux 10 (glibc 2.39) matches the baseline.
 
-Also install host **`ffmpeg`** for mood analysis. For H.264 through Qt’s FFmpeg plugin, install system **`x264` / `libx264`** (not bundled). Meridian warns if that library is missing.
+Also install host **`ffmpeg`** for mood analysis. For H.264 through Qt’s FFmpeg plugin, install system **`x264` / `libx264`** (not bundled). Meridian warns if that library is missing. Aubio in the AppImage is built without libavcodec, so tempo/onset does not need host `libx264.so.164` (Kubuntu 26.04 ships `.165` only). A source checkout still uses host aubio/ffmpeg.
 
 On broken GPU/EGL setups (some VMs / missing Mesa), Meridian **does not** use an OpenGL mood-map viewport by default. The map runs on a normal software widget path. To opt into GPU acceleration when your drivers are healthy:
 
